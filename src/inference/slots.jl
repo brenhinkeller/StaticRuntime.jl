@@ -76,6 +76,7 @@ function reset_slots!()
     mode = get(ENV, "STATIC_RUNTIME_SLOTS", "on")
     SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on
     PRECISE_NOSPECIALIZEINFER[] = get(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER", "1") != "0"
+    FILTER_BY_METHODS[] = get(ENV, "STATIC_RUNTIME_METHOD_FILTER", "1") != "0"
     SLOTS_WHY[] = haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY")
     CHECK_SLOT_TYPES[] = get(ENV, "STATIC_RUNTIME_CHECK_TYPES", "0") ∉ ("", "0")
     empty!(BLIND_TYPES)

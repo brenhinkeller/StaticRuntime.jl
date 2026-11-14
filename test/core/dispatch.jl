@@ -226,3 +226,29 @@ end
     ])
     @test static_status(() -> (t = (opaque(1), 2.5); getfield(t, opaque(5))))[1] in (:runtime_error, :mismatch)
 end
+
+# A call over the types of an argument is made over the ones that some method fits: the others are a `MethodError` whatever the program does, and each of them counts for the limit on the number of cases a call is split in
+# (`with_methods`). A call of three values of the type `Any` to a function that has methods for three types is 27 cases, not the 12167 that the registered types make.
+few_methods(a::Int, b::Int, c::Int) = a + b + c
+few_methods(a::Float64, b::Float64, c::Float64) = round(Int, a + b + c)
+few_methods(a::String, b::String, c::String) = length(a) + length(b) + length(c)
+anyvalue(x) = Base.inferencebarrier(x)::Any
+@testset "Calls over the types that a method fits" begin
+    f() = few_methods(anyvalue(opaque(2)), anyvalue(opaque(3)), anyvalue(4)) + few_methods(anyvalue(2.5), anyvalue(1.5), anyvalue(1.0)) + few_methods(anyvalue("ab"), anyvalue("c"), anyvalue("de"))
+    old = StaticRuntime.DISPATCH_STATS_ON[]
+    try
+        StaticRuntime.DISPATCH_STATS_ON[] = true
+        empty!(StaticRuntime.DISPATCH_STATS)
+        @test static_result(f) == f()
+        @test !isempty(StaticRuntime.DISPATCH_STATS)
+        @test maximum(s.cases for s in values(StaticRuntime.DISPATCH_STATS)) <= 27
+    finally
+        StaticRuntime.DISPATCH_STATS_ON[] = old
+    end
+    # (as it was, with `STATIC_RUNTIME_METHOD_FILTER=0`: the same answer, over all the registered types)
+    withenv("STATIC_RUNTIME_METHOD_FILTER" => "0") do
+        @test static_result(f) == f()
+    end
+    # a function with a method for every type, and a type that has a method only for the generic one
+    @test static_result(() -> dkind(anyvalue(DDog(1))) + dkind(anyvalue(DCow(2.0)))) == 3
+end

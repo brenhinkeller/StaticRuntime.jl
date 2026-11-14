@@ -148,7 +148,7 @@ const REGISTERED_CALLS = Dict{String,Int}()
 
 # The arguments of a call with the abstract types made unions, and the `Tuple` of their types (that of the function comes first, and
 # is not changed), or `nothing` if there is none to change; and whether one of them was made of the registered types
-function close_abstract_arguments(arginfo::CC.ArgInfo)
+function close_abstract_arguments(interp, arginfo::CC.ArgInfo, max_methods::Int)
     argtypes = copy(arginfo.argtypes)
     changed = false
     registered = false
@@ -157,16 +157,53 @@ function close_abstract_arguments(arginfo::CC.ArgInfo)
         argtypes[i] isa Core.TypeofVararg && continue # (a call with the arguments that are the rest of a splat: not known)
         T = CC.widenconst(argtypes[i]) # (a constant is of a concrete type; the rest of what is known of an argument is lost)
         u = listed_union(T)
+        reg = false
         if u === nothing
             u = registered_union(T, isshow)
             u === nothing && continue
-            registered = true
+            reg = true
         end
+        # (only the types that some method fits are kept: the others are `MethodError`s whatever the program does, and each of them counts for the limit on the number of cases that a call is split in)
+        u = with_methods(interp, arginfo, i, u, max_methods)
+        registered |= reg
         argtypes[i] = u
         changed = true
     end
     changed || return nothing
     return CC.ArgInfo(arginfo.fargs, argtypes), CC.argtypes_to_type(argtypes), registered
+end
+
+# The members of the union `u` of the types that argument `i` of the call can be that a method fits, with the other arguments as they are (the most that they can be: if no method fits the
+# member then, it does not for the types that the others are closed to). A union with none is left as it is (the call is left to Julia); `u` itself if every member has one, and a type
+# if one has. The methods of the function are looked up once (a function that has more than `METHOD_FILTER_LIMIT` is not filtered), and a member fits a method if the types intersect:
+# what Julia does to find the methods, without looking up each member (which took much longer than what is saved).
+const METHOD_FILTER_LIMIT = 64
+const FILTER_BY_METHODS = Ref(true) # `STATIC_RUNTIME_METHOD_FILTER=0` turns it off
+const FUNCTION_METHOD_SIGS = Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}()
+
+function method_signatures(interp, @nospecialize(ft), n::Int)
+    world = CC.get_inference_world(interp)
+    return get!(FUNCTION_METHOD_SIGS, (world, ft, n)) do
+        found = CC.findall(Tuple{ft, Vararg{Any,n}}, CC.method_table(interp); limit = METHOD_FILTER_LIMIT)
+        found === nothing || length(found.matches) > METHOD_FILTER_LIMIT ? nothing : Any[m.method.sig for m in found.matches]
+    end
+end
+
+function with_methods(interp, arginfo::CC.ArgInfo, i::Int, u, max_methods::Int)
+    (FILTER_BY_METHODS[] && Base.unionlen(u) > 1) || return u
+    ft = CC.widenconst(arginfo.argtypes[1])
+    sigs = method_signatures(interp, ft, length(arginfo.argtypes) - 1)
+    (sigs === nothing || isempty(sigs)) && return u
+    others = Any[a isa Core.TypeofVararg ? Any : CC.widenconst(a) for a in arginfo.argtypes]
+    kept = Any[]
+    members = Base.uniontypes(u)
+    for M in members
+        others[i] = M
+        atype = Tuple{others...}
+        any(sig -> typeintersect(atype, sig) !== Union{}, sigs) && push!(kept, M)
+    end
+    (isempty(kept) || length(kept) == length(members)) && return u
+    return Union{kept...}
 end
 
 # whether the call is a dispatch on the types of the arguments: more than one method fits, or too many to be counted, or the one
@@ -223,7 +260,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
                                      sv::Union{CC.IRInterpretationState{I},CC.InferenceState{I}} where I<:CC.AbstractInterpreter,
                                      max_methods::Int)
     registered = false
-    closed = close_abstract_arguments(arginfo)
+    closed = close_abstract_arguments(interp, arginfo, max_methods)
     # (a call that none of the types that the arguments are closed to has a method for is left as it is: it is not known what the
     # arguments are, and the result of the call is not that it is an error, which would make what calls it one too)
     closed === nothing || has_methods(interp, closed[1], closed[2], max_methods) || (closed = nothing)

@@ -71,6 +71,15 @@ describe(x::String) = length(x)
 describe(x::Symbol) = 7
 describe(x::Char) = Int(x)
 
+# a call over values of the type `Any` that nothing is known of, to a function that has methods for a few types only
+pair_few(x::Int, y::Int) = x + y
+pair_few(x::Float64, y::Float64) = round(Int, x * y)
+pair_few(x::String, y::String) = length(x) + length(y)
+three_few(a::Int, b::Int, c::Int) = a + b + c
+three_few(a::Float64, b::Float64, c::Float64) = round(Int, a + b + c)
+three_few(a::String, b::String, c::String) = length(a) + length(b) + length(c)
+anyval(x) = Base.inferencebarrier(x)::Any
+
 function return_union(i::Int)
     i % 3 == 0 && return i
     i % 3 == 1 && return float(i)
@@ -87,6 +96,8 @@ const PROGRAMS = Dict{String,Function}(
     "four_args_listed" => () -> (v = animals(opaque(1)); s = 0; for a in v, b in v, c in v, d in v[1:2]; s += meet4(a, b, c, d); end; s),
     "any_ctor3"        => () -> (v = Any[opaque(1), 2.5, 3]; t = T3(v[1], v[2], v[3]); round(Int, t.a + t.b + t.c)),
     "any_ctor_convert" => () -> (t = make_s3o(; blur = opaque(3)); round(Int, 100 * t.a.v + 100 * t.b.v + t.c.v)),
+    "any_few_methods2" => () -> pair_few(anyval(opaque(2)), anyval(opaque(3))) + pair_few(anyval(2.5), anyval(1.5)) + pair_few(anyval("ab"), anyval("c")),
+    "any_few_methods3" => () -> three_few(anyval(opaque(2)), anyval(opaque(3)), anyval(4)) + three_few(anyval(2.5), anyval(1.5), anyval(1.0)),
     "any_print"        => () -> (v = Any[opaque(1), "a", 2.5, :s, 'c']; for x in v; println(x); end; length(v)),
     "any_arith"        => () -> (v = Any[opaque(1), 2.5, 3]; s = 0; for x in v; s += x; end; round(Int, s)),
     "any_two_args"     => () -> (v = Any[opaque(1), 2.5, 3, 4.0f0]; s = 0.0; for x in v, y in v; s += x * y; end; round(Int, s)),
