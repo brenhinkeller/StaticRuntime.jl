@@ -69,6 +69,7 @@ function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool 
     define_subtype_builtins!(mod)
     null_methoderror_arguments!(mod)
     stub_cancel_handlers!(mod)
+    empty!(DANGLING_POINTERS_FOUND)
     e = ObjectEmbedder(mod, Dict())
     define_well_known_objects!(e)
     lower_gc_frames!(mod)
@@ -91,6 +92,7 @@ function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool 
         pointers = unresolved_pointer_uses(mod)
         isempty(dynamic) && isempty(pointers) || throw(UnsupportedCodeError(dynamic, pointers, isempty(dynamic) ? String[] : nonconst_globals(mod), dynamic_call_sites(mod, dynamic)))
     end
+    say_dangling_pointers()
     define_dynamic_stubs!(mod)
     needed = filter(RUNTIME_SHIM_FUNCTIONS) do name
         haskey(LLVM.functions(mod), name) && LLVM.isdeclaration(LLVM.functions(mod)[name])

@@ -238,14 +238,24 @@ end
 is_process_address(p::UInt) = UInt(0x10000) <= p < (UInt(1) << 48)
 
 const DANGLING_POINTER_WARNED = Set{Tuple{Any,Symbol}}()
+const DANGLING_POINTERS_FOUND = Tuple{Any,Symbol}[]
 
-# (a `Regex` and a `LazyLibrary` make theirs again when the program runs, so that those are not worth a warning)
+# (a `Regex` and a `LazyLibrary` make theirs again when the program runs, so that those are not worth a warning.) The warning is said when the program is accepted
+# (`say_dangling_pointers`), and not when it is found: a program that is refused is not run, so what it would have had null is of no concern
 function warn_dangling_pointer(T, name::Symbol)
     (T <: Regex && name === :regex) && return
     (T <: Libdl.LazyLibrary && name === :handle) && return
-    (T, name) in DANGLING_POINTER_WARNED && return
-    push!(DANGLING_POINTER_WARNED, (T, name))
-    @warn "The field `$name` of a constant of the type `$T` holds an address of this process, which means nothing in the program: it is null there." maxlog = 1
+    push!(DANGLING_POINTERS_FOUND, (T, name))
+    return
+end
+
+function say_dangling_pointers()
+    for (T, name) in DANGLING_POINTERS_FOUND
+        (T, name) in DANGLING_POINTER_WARNED && continue
+        push!(DANGLING_POINTER_WARNED, (T, name))
+        @warn "The field `$name` of a constant of the type `$T` holds an address of this process, which means nothing in the program: it is null there." maxlog = 1
+    end
+    empty!(DANGLING_POINTERS_FOUND)
     return
 end
 
