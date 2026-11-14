@@ -33,7 +33,9 @@ const FUNCTION_CANDIDATES = Type[]
 
 # The callbacks of the program that is compiled now: the types that were registered with `note_callback` (see closures.jl), each with the type of the value that it is called with
 const CALLBACK_CANDIDATES = Tuple{Type,Type}[]
-OverridesParams() = OverridesParams(hash(FILTER_BY_METHODS[], hash(CHECK_SLOT_TYPES[], hash(PRECISE_NOSPECIALIZEINFER[], hash(SLOTS_MODE[], hash(slots_hash(), hash(BOX_VERSION[], hash(CALLBACK_CANDIDATES, hash(FUNCTION_CANDIDATES, hash(CANDIDATES_VERSION[]))))))))) % Int)
+# (the settings that change what inference makes of a program, and the types that it has found of the program: each has to be in the key)
+inference_settings_hash() = hash((FILTER_BY_METHODS[], CHECK_SLOT_TYPES[], PRECISE_NOSPECIALIZEINFER[], SLOTS_MODE[], UNIVERSE_MODE[]))
+OverridesParams() = OverridesParams(hash(inference_settings_hash(), hash(universe_hash(), hash(slots_hash(), hash(BOX_VERSION[], hash(CALLBACK_CANDIDATES, hash(FUNCTION_CANDIDATES, hash(CANDIDATES_VERSION[]))))))) % Int)
 
 Base.Experimental.@MethodTable(method_table)
 @doc """

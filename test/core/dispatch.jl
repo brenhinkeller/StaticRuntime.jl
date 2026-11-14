@@ -105,10 +105,14 @@ dopen(a::DOpenE) = 5
         end
         # (a type that the program stores in the slot is dispatched on as well, registered or not)
         @test static_result(() -> (v = Any[1, DUnregistered(7)]; s = 0; for x in v; s += dnamed(x); end; s)) == 1 + 7
-        # (what is stored is not known here, so it is the registered types)
-        code, out = exe_output(() -> (v = Any[1, Base.inferencebarrier(DUnregistered(1))::Any]; s = 0; for x in v; s += dnamed(x); end; s))
-        @test code == 1
-        @test occursin("MethodError", out) && occursin("dnamed", out)
+        # (what is stored is not known here, so it is the registered types; and the types that the program makes, which is what is left out with `STATIC_RUNTIME_UNIVERSE=0`)
+        unknown_store() = (v = Any[1, Base.inferencebarrier(DUnregistered(1))::Any]; s = 0; for x in v; s += dnamed(x); end; s)
+        @test static_result(unknown_store) == 1 + 1
+        withenv("STATIC_RUNTIME_UNIVERSE" => "0") do
+            code, out = exe_output(unknown_store)
+            @test code == 1
+            @test occursin("MethodError", out) && occursin("dnamed", out)
+        end
         add_dispatch_candidates!(DUnregistered)
         @test static_result(() -> (v = Any[1, DUnregistered(5)]; s = 0; for x in v; s += dnamed(x); end; s)) == 1 + 5
     end

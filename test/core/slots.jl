@@ -38,3 +38,31 @@ slot_cases() = [
         end
     end
 end
+
+# The universe: the types that the program makes (`src/inference/slots.jl`). A call over a value of the type `Any` that nothing is known of (`anyvalue`) is made over the registered types and over the types that the program makes
+# that are not Julia's own, so a type that was not registered is one a value can have, as long as the program makes it
+struct UMeters; m::Float64; end
+struct UBox{T}; v::T; end
+uuse(x::Int) = x
+uuse(x::Float64) = round(Int, x)
+uuse(x::UMeters) = round(Int, 100 * x.m)
+uuse(x::UBox{UMeters}) = 7
+uuse(x::Vector{UMeters}) = length(x)
+universe_cases() = [
+    "a type of the program"      => () -> uuse(anyvalue(UMeters(opaque(1) + 0.5))),
+    "a parametric type of it"    => () -> uuse(anyvalue(UBox(UMeters(1.5)))),
+    "a vector of them"           => () -> uuse(anyvalue(UMeters[UMeters(1.0), UMeters(2.0)])),
+    "registered types as before" => () -> uuse(anyvalue(opaque(3))) + uuse(anyvalue(2.5)),
+    "both"                       => () -> uuse(anyvalue(UMeters(opaque(2) + 0.0))) + uuse(anyvalue(opaque(5))),
+]
+@testset "The universe" begin
+    check_cases(universe_cases())
+    withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
+        check_cases(universe_cases())
+    end
+    # (without it, the types that were not registered abort: as they did)
+    withenv("STATIC_RUNTIME_UNIVERSE" => "0") do
+        @test static_status(universe_cases()[1].second)[1] == :runtime_error
+        @test static_status(universe_cases()[4].second)[1] == :ok
+    end
+end

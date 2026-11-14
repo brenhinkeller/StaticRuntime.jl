@@ -133,12 +133,19 @@ end
 
 # The union of the registered types that are subtypes of `T` (`Any`, or an abstract type that can't be listed), or `nothing`. For a call of `show`, which is also made
 # for a `Vector{Any}` in a `Vector{Any}`, they are the types that `show` is registered for (see `add_show_candidates!`): those of calls in general, and `Vector{Any}`.
-function registered_union(@nospecialize(T), show::Bool = false)
+function registered_union(@nospecialize(T), show::Bool = false; universe::Bool = true)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its instances are of the types of it that were registered)
     T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll) || return nothing # (`Type{X}` is not an abstract type of objects)
     candidates = show ? show_candidates() : dispatch_candidates()
     T === Any || (candidates = vcat(candidates, FAMILY_CANDIDATES))
     found = Type[C for C in candidates if C <: T]
+    if universe && !show && UNIVERSE_MODE[] !== :off
+        # (the types that the program makes, that are not Julia's own: see slots.jl. How many there are is the limit that the call is split in, once the methods are looked at (`close_abstract_arguments`))
+        for t in universe_extras(T)
+            t in found || push!(found, t)
+        end
+        return isempty(found) ? nothing : Union{found...}
+    end
     1 <= length(found) <= SPLIT_LIMIT[] || return nothing
     return Union{found...}
 end
@@ -162,9 +169,17 @@ function close_abstract_arguments(interp, arginfo::CC.ArgInfo, max_methods::Int)
             u = registered_union(T, isshow)
             u === nothing && continue
             reg = true
+            # (only the types that some method fits are kept: the others are `MethodError`s whatever the program does, and each of them counts for the limit on the number of cases that a call is split in)
+            u = with_methods(interp, arginfo, i, u, max_methods)
+            if Base.unionlen(u) > SPLIT_LIMIT[]
+                # (too many with the types that the program makes: the registered ones only, as without them)
+                u = registered_union(T, isshow; universe = false)
+                u === nothing && continue
+                u = with_methods(interp, arginfo, i, u, max_methods)
+            end
+        else
+            u = with_methods(interp, arginfo, i, u, max_methods)
         end
-        # (only the types that some method fits are kept: the others are `MethodError`s whatever the program does, and each of them counts for the limit on the number of cases that a call is split in)
-        u = with_methods(interp, arginfo, i, u, max_methods)
         registered |= reg
         argtypes[i] = u
         changed = true
@@ -219,20 +234,22 @@ function dispatch_needed(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_
         T = CC.widenconst(arginfo.argtypes[i])
         T isa UnionAll && !(T <: Type) && return true
     end
-    matches = arginfo.fargs === nothing ?
-        CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods) :
-        CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods, fargs = arginfo.fargs)
+    matches = method_matches(interp, arginfo, atype, max_methods)
     matches isa CC.FailedMethodMatch && return true
     return length(matches.applicable) > 1 || !CC.fully_covering(matches)
 end
 
-# whether some method fits a call
-function has_methods(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
-    matches = arginfo.fargs === nothing ?
-        CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods) :
-        CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods, fargs = arginfo.fargs)
-    matches isa CC.FailedMethodMatch && return true # (too many to count)
-    return !isempty(matches.applicable)
+# the methods that fit a call (what Julia's inference finds them with), or `FailedMethodMatch` if there are too many to count
+method_matches(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int) = arginfo.fargs === nothing ?
+    CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods) :
+    CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods, fargs = arginfo.fargs)
+
+# whether some method fits a call with these argument types: by the signatures of the methods of the function (looked up once: see `method_signatures`) when it has few, and else as inference finds them
+function some_method_fits(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
+    sigs = FILTER_BY_METHODS[] ? method_signatures(interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
+    sigs === nothing || return any(sig -> typeintersect(atype, sig) !== Union{}, sigs)
+    matches = method_matches(interp, arginfo, atype, max_methods)
+    return matches isa CC.FailedMethodMatch || !isempty(matches.applicable) # (too many to count: some fit)
 end
 
 # What Julia is told of the methods that fit, as not covering what the arguments can be, so that the call it makes is a test of each
@@ -263,7 +280,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     closed = close_abstract_arguments(interp, arginfo, max_methods)
     # (a call that none of the types that the arguments are closed to has a method for is left as it is: it is not known what the
     # arguments are, and the result of the call is not that it is an error, which would make what calls it one too)
-    closed === nothing || has_methods(interp, closed[1], closed[2], max_methods) || (closed = nothing)
+    closed === nothing || some_method_fits(interp, closed[1], closed[2], max_methods) || (closed = nothing)
     if closed !== nothing && dispatch_needed(interp, arginfo, atype, max_methods)
         original = arginfo.argtypes
         arginfo, atype, registered = closed
@@ -369,6 +386,9 @@ end
 
 # The function that a statement of the code before it is optimized calls (what a callee refers to, if that is a variable that a
 # statement before has loaded: `Base.invokelatest` is a `GlobalRef`, or `getproperty(Base, :invokelatest)`), or `nothing`
+# whether a binding partition (which optimized code refers to a global by) is one of a constant: it holds the value
+is_const_partition(x::Core.BindingPartition) = (x.kind & 0x0f) in (Base.PARTITION_KIND_CONST, Base.PARTITION_KIND_CONST_IMPORT, Base.PARTITION_KIND_IMPLICIT_CONST, Base.PARTITION_KIND_BACKDATED_CONST)
+
 function called_function(code, x)
     x isa Core.SSAValue && (x = code[x.id])
     if x isa Expr && x.head === :call && length(x.args) == 3
@@ -383,7 +403,7 @@ function called_function(code, x)
     x isa GlobalRef && return isdefined(x.mod, x.name) ? getglobal(x.mod, x.name) : nothing
     x isa QuoteNode && return x.value
     # (optimized code refers to a global through its binding partition: a constant binding holds the value)
-    x isa Core.BindingPartition && return (x.kind & 0x0f) in (Base.PARTITION_KIND_CONST, Base.PARTITION_KIND_CONST_IMPORT, Base.PARTITION_KIND_IMPLICIT_CONST, Base.PARTITION_KIND_BACKDATED_CONST) ? x.restriction : nothing
+    x isa Core.BindingPartition && return is_const_partition(x) ? x.restriction : nothing
     return x isa Expr ? nothing : x
 end
 

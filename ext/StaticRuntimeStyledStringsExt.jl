@@ -277,9 +277,10 @@ function region_face(annots, active::Vector{Int})
     return merge(default_face(), combined)
 end
 
+# (the value of a `:link` annotation is the address, a string: asserted, so that what the other annotations hold (a `Face`, which is what the slot of the values of the annotations of a program that has no links holds) is not printed here)
 function region_link(annots, active::Vector{Int})
     for i in active
-        annots[i].label === :link && return string(annots[i].value)::String
+        annots[i].label === :link && return String(annots[i].value::AbstractString)
     end
     return nothing
 end

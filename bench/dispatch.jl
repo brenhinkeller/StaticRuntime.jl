@@ -79,6 +79,12 @@ three_few(a::Int, b::Int, c::Int) = a + b + c
 three_few(a::Float64, b::Float64, c::Float64) = round(Int, a + b + c)
 three_few(a::String, b::String, c::String) = length(a) + length(b) + length(c)
 anyval(x) = Base.inferencebarrier(x)::Any
+# a type of the program that is not registered, behind a value that nothing is known of
+struct UserMeters; m::Float64; end
+user_use(x::Int) = x
+user_use(x::Float64) = round(Int, x)
+user_use(x::UserMeters) = round(Int, 100 * x.m)
+user_use(x::String) = length(x)
 
 function return_union(i::Int)
     i % 3 == 0 && return i
@@ -98,6 +104,8 @@ const PROGRAMS = Dict{String,Function}(
     "any_ctor_convert" => () -> (t = make_s3o(; blur = opaque(3)); round(Int, 100 * t.a.v + 100 * t.b.v + t.c.v)),
     "any_few_methods2" => () -> pair_few(anyval(opaque(2)), anyval(opaque(3))) + pair_few(anyval(2.5), anyval(1.5)) + pair_few(anyval("ab"), anyval("c")),
     "any_few_methods3" => () -> three_few(anyval(opaque(2)), anyval(opaque(3)), anyval(4)) + three_few(anyval(2.5), anyval(1.5), anyval(1.0)),
+    "any_user_type"    => () -> user_use(anyval(UserMeters(opaque(1) + 0.5))) + user_use(anyval(opaque(3))) + user_use(anyval("abc")),
+    "any_print_barrier" => () -> (println(anyval(opaque(1))); println(anyval(2.5)); 2),
     "any_print"        => () -> (v = Any[opaque(1), "a", 2.5, :s, 'c']; for x in v; println(x); end; length(v)),
     "any_arith"        => () -> (v = Any[opaque(1), 2.5, 3]; s = 0; for x in v; s += x; end; round(Int, s)),
     "any_two_args"     => () -> (v = Any[opaque(1), 2.5, 3, 4.0f0]; s = 0.0; for x in v, y in v; s += x * y; end; round(Int, s)),
@@ -109,7 +117,7 @@ const PROGRAMS = Dict{String,Function}(
     "union_return"     => () -> (s = 0; for i in 1:opaque(6); s += use_union(return_union(i)); end; s),
     "numeric_baseline" => () -> (s = 0.0; for i in 1:opaque(1_000_000); s += sin(i * 0.001); end; round(Int, s)),
 )
-const ORDER = ["listed_shapes", "two_args_listed", "three_args_listed", "four_args_listed", "any_ctor3", "any_ctor_convert", "any_print", "any_arith", "any_two_args", "any_field", "vector_any_dicts", "sort_any", "show_mixed", "closures_vector", "union_return", "numeric_baseline"]
+const ORDER = ["any_print_barrier", "any_few_methods2", "any_few_methods3", "any_user_type", "listed_shapes", "two_args_listed", "three_args_listed", "four_args_listed", "any_ctor3", "any_ctor_convert", "any_print", "any_arith", "any_two_args", "any_field", "vector_any_dicts", "sort_any", "show_mixed", "closures_vector", "union_return", "numeric_baseline"]
 
 # one program: compile it (after a first program, so that the compiler is compiled), run it, and print the measurements as `key=value`
 function run_one(name)

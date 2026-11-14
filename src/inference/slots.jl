@@ -44,6 +44,85 @@ function note_dispatch_used!()
 end
 dispatch_was_used() = REGISTERED_DISPATCH_USED[] || OverridesParams().candidates in DISPATCH_PARAMS
 
+## The universe: the types that the program makes
+#
+# A call with an argument of the type `Any` is made over the types that were registered (dispatch.jl), and a value of another type that reaches it aborts the program. The values of a program are made in its code, which is what is
+# compiled: a type that nothing makes is not one that a value can have. The types of the statements of the code that is reached (and of the constants that it refers to) are those that the program can make, and the ones that are not
+# types of Julia itself (those that are not defined in `Core`, `Base`, the standard library or this package, or that have one of them as a parameter: `Vector{MyType}`) are added to the types that a call with an `Any` is made over, where a method fits them. The types that are
+# found in a pass are the ones that are used in the next, until a pass finds no more (the types make code reached that makes others); a program that makes no such types needs no more passes than it did. `STATIC_RUNTIME_UNIVERSE=0` leaves them out.
+# (The registered types that the program does not make are not left out, which was tried: the types that a first pass finds are those of a call over all the registered types, and each of those makes values of its own type, so nothing is
+# left out, and the extra pass costs half of the time of compiling. A program that gets an object of a type that it does not make has a `MethodError` that says so.)
+const UNIVERSE_MODE = Ref(:add)
+const UNIVERSE_SEEN = Set{Any}()
+const UNIVERSE_USED = Set{Any}()
+const UNIVERSE_VERSION = Ref(0)
+const UNIVERSE_LIMIT = 512 # (the types of a program that is compiled: more are not added, so that what is found settles)
+const UNIVERSE_EXTRAS = Dict{Any,Vector{Any}}()
+
+# whether a module is one of Julia's own (the standard library, Base and Core, and this package), whose types are the ones that are registered when a program is likely to have them
+const JULIA_OWNED_MODULES = Dict{Module,Bool}()
+function julia_owned_module(m::Module)
+    get!(JULIA_OWNED_MODULES, m) do
+        root = Base.moduleroot(m)
+        (root === Core || root === Base || root === StaticRuntime || root === StaticTools) && return true # (the package, and what its programs are made with)
+        path = pathof(root)
+        return path !== nothing && startswith(path, Sys.STDLIB)
+    end
+end
+
+# whether the objects of the concrete type `T` are not all of Julia's own types: the module that defines it is not one of Julia's, or a parameter of it is a type of that kind
+function user_relevant(@nospecialize(T), depth::Int = 0)
+    T isa DataType && isconcretetype(T) && depth <= 2 || return false
+    T <: Function && return false # (the types of functions and closures: see closures.jl)
+    T <: Type && return false
+    julia_owned_module(T.name.module) || return true
+    for p in T.parameters
+        p isa DataType && user_relevant(p, depth + 1) && return true
+    end
+    return false
+end
+
+function note_universe!(@nospecialize(T))
+    UNIVERSE_MODE[] === :off && return
+    T = CC.widenconst(T)
+    user_relevant(T) || return
+    FACTS_SINK[] === nothing ? push!(UNIVERSE_SEEN, T) : push!(FACTS_SINK[], ((:universe, T, nothing), Any))
+    return
+end
+
+# the types of the universe that are subtypes of `T` (for the types that a call is made over)
+function universe_extras(@nospecialize(T))
+    (UNIVERSE_MODE[] !== :off && !isempty(UNIVERSE_USED)) || return Any[]
+    get!(UNIVERSE_EXTRAS, (T, UNIVERSE_VERSION[])) do
+        Any[t for t in UNIVERSE_USED if t <: T]
+    end
+end
+
+# a hash of the types that the universe has, for the key of the inference cache (as for `slots_hash`)
+function universe_hash()
+    h = UInt(0)
+    for t in UNIVERSE_USED
+        h += UInt(objectid(t))
+    end
+    return hash(length(UNIVERSE_USED), h)
+end
+
+# the types that the statements of a method have (those of the optimized code of it, or of the code before it was optimized), and its arguments
+function note_universe_statements!(types, stmts, mi::Core.MethodInstance)
+    UNIVERSE_MODE[] === :off && return
+    sig = Base.unwrap_unionall(mi.specTypes)
+    sig isa DataType && for T in sig.parameters
+        T isa Type && note_universe!(T)
+    end
+    for (st, T) in zip(stmts, types)
+        # (a `PiNode` and a `PhiNode` have the type of values that are made elsewhere, and what a `typeassert` gives is the type of its argument: a type that is only there because a call was made over it is not one that is made)
+        (st isa Core.PiNode || st isa Core.PhiNode || st isa Core.PhiCNode || st isa Core.UpsilonNode) && continue
+        T isa Type || T isa Core.Const || T isa Core.PartialStruct || continue
+        note_universe!(T)
+    end
+    return
+end
+
 # said when the types of the slots have changed, so that the compilation is made again with them (the pass is cut short: inference is what they are found from)
 struct SlotsChanged <: Exception end
 
@@ -60,6 +139,7 @@ end
 # at the start of each pass of the compilation
 function reset_slots_pass!()
     PASS_PARAMS_KEY[] = OverridesParams().candidates
+    empty!(UNIVERSE_SEEN)
     empty!(RAW_STORE_TYPES)
     empty!(SEEN_SLOTS)
     empty!(SEEN_UNKNOWN)
@@ -77,6 +157,11 @@ function reset_slots!()
     SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on
     PRECISE_NOSPECIALIZEINFER[] = get(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER", "1") != "0"
     FILTER_BY_METHODS[] = get(ENV, "STATIC_RUNTIME_METHOD_FILTER", "1") != "0"
+    UNIVERSE_MODE[] = get(ENV, "STATIC_RUNTIME_UNIVERSE", "1") == "0" ? :off : :add
+    empty!(UNIVERSE_USED)
+    empty!(UNIVERSE_SEEN)
+    empty!(UNIVERSE_EXTRAS)
+    UNIVERSE_VERSION[] += 1
     SLOTS_WHY[] = haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY")
     CHECK_SLOT_TYPES[] = get(ENV, "STATIC_RUNTIME_CHECK_TYPES", "0") ∉ ("", "0")
     empty!(BLIND_TYPES)
@@ -245,6 +330,8 @@ function record_slot_facts!(ir::CC.IRCode, mi::Core.MethodInstance)
             st = ir.stmts[pc][:stmt]
             st isa Expr && learn_statement!(st, called, optype)
         end
+        note_universe_statements!((ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
+        note_slots_in_constants!(ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
     finally
         FACTS_SINK[] = nothing
     end
@@ -274,7 +361,7 @@ function replay_slot_facts!(mi::Core.MethodInstance)
     facts = get(SLOT_FACTS, (mi, PASS_PARAMS_KEY[]), nothing)
     facts === nothing && return
     for (key, T) in facts
-        key[1] === :raw ? push!(RAW_STORE_TYPES, key[2]) : note_slot_store!(key, T)
+        key[1] === :raw ? push!(RAW_STORE_TYPES, key[2]) : key[1] === :universe ? push!(UNIVERSE_SEEN, key[2]) : note_slot_store!(key, T)
     end
     return
 end
@@ -291,6 +378,7 @@ end
 function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(2000), seen = Base.IdSet{Any}())
     budget[] <= 0 && return
     budget[] -= 1
+    note_universe!(typeof(x))
     (x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char || depth >= 4) && return
     ismutable(x) && (x in seen ? (return) : push!(seen, x))
     if x isa Core.GenericMemory
@@ -350,6 +438,7 @@ function analyze_slots!(interp, root)
     for (ci, src) in GPUCompiler.CompilerCaching.get_codeinfos(interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
         learn_slots!(src, ci.def)
+        note_universe_statements!(src.ssavaluetypes isa Vector ? src.ssavaluetypes : Any[], src.code, ci.def)
         note_slots_in_constants!(src.code)
     end
     replay_reachable_facts!(root)
@@ -373,6 +462,17 @@ function analyze_slots!(interp, root)
         end
     end
     changed = update_slot_types!()
+    # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
+    if UNIVERSE_MODE[] !== :off && dispatch_was_used()
+        new = Any[t for t in UNIVERSE_SEEN if !(t in UNIVERSE_USED)]
+        length(UNIVERSE_USED) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(UNIVERSE_USED))])
+        if !isempty(new)
+            union!(UNIVERSE_USED, new)
+            UNIVERSE_VERSION[] += 1
+            empty!(UNIVERSE_EXTRAS)
+            changed = true
+        end
+    end
     changed || return
     SLOT_PASSES[] += 1
     if SLOT_PASSES[] > SLOT_PASS_LIMIT

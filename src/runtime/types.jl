@@ -36,7 +36,7 @@ function null_methoderror_arguments!(mod::LLVM.Module)
         # say which call it was: where the types that were split on were the ones that are registered, it is what an object of
         # another type reaches (see `dispatch.jl`)
         what = (name === nothing) ? "a call" : "`$name`"
-        msg = "MethodError: no method matching $what with the given argument types.\n This may be due to a type that was not known when compiling."
+        msg = "MethodError: no method matching $what with the given argument types.\n This may be due to a type that the program was not found to make when compiling: `add_dispatch_candidates!(T)` adds one."
         @dispose builder = LLVM.IRBuilder() begin
             LLVM.position!(builder, LLVM.before(call))
             abort_message!(builder, mod, msg)

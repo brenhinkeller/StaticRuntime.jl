@@ -47,8 +47,7 @@ function operand_type(src::Core.CodeInfo, x)
         return Any
     elseif x isa Core.BindingPartition
         # (the code refers to a global through its binding partition: a constant has the type of its value)
-        f = called_function(nothing, x)
-        return f === nothing && !((x.kind & 0x0f) in (Base.PARTITION_KIND_CONST, Base.PARTITION_KIND_CONST_IMPORT, Base.PARTITION_KIND_IMPLICIT_CONST, Base.PARTITION_KIND_BACKDATED_CONST)) ? Any : typeof(f)
+        return is_const_partition(x) ? typeof(x.restriction) : Any
     elseif x isa Expr
         return Any
     else
