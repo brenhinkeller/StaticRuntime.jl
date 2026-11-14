@@ -261,13 +261,15 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
-    isempty(BOX_TYPES) && return call
-    sv isa CC.InferenceState || return call
+    isempty(BOX_TYPES) && isempty(SLOT_TYPES) && return call
+    # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
+    (sv isa CC.InferenceState || CC.isready(call)) || return call
     argtypes = arginfo.argtypes
     length(argtypes) == 3 || return call
     t = argtypes[3]
     T = nothing
     if CC.widenconst(argtypes[2]) === Core.Box
+        sv isa CC.InferenceState || return call
         (t isa Core.Const && t.val === :contents) || return call
         arginfo.fargs === nothing && return call
         T = box_content_type(sv, arginfo.fargs[2])
@@ -288,7 +290,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.mem
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
     isempty(SLOT_TYPES) && return call
-    sv isa CC.InferenceState || return call
+    (sv isa CC.InferenceState || CC.isready(call)) || return call
     length(arginfo.argtypes) >= 2 || return call
     key = elem_slot_key(arginfo.argtypes[2])
     key === nothing && return call

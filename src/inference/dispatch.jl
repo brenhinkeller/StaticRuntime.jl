@@ -383,10 +383,42 @@ end
 const FIELD_BUILTINS = (Core.getfield, Core.setfield!)
 
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
+    CHECK_SLOT_TYPES[] && (ir = check_slot_reads!(ir))
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
     ir = concretize_namedtuples!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
+end
+
+# What is read from a slot that has types (see slots.jl) is checked to be of them, for finding what stores a program has that are not seen: the read is `typeassert`ed to the type that it was given. (It would have
+# been `Any` otherwise, and the calls on it dispatched over the registered types.) Only for reads whose type is narrower than what the slot is declared to hold.
+function check_slot_reads!(ir::CC.IRCode)
+    changed = false
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call && length(st.args) >= 3 || continue
+        f = CC.singleton_type(CC.argextype(st.args[1], ir))
+        key = nothing
+        if f === Core.getfield
+            name = CC.argextype(st.args[3], ir)
+            name isa Core.Const && (name.val isa Symbol || name.val isa Integer) || continue
+            key = field_slot_key(CC.argextype(st.args[2], ir), name.val)
+        elseif f === Core.memoryrefget
+            key = elem_slot_key(CC.argextype(st.args[2], ir))
+        else
+            continue
+        end
+        key === nothing && continue
+        slot_read_type(key) === nothing && continue
+        T = CC.widenconst(ir.stmts[pc][:type])
+        (T !== Union{} && closed_type(T)) || continue
+        wide = key[1] === :elem ? key[2] : fieldtype(key[2], key[3])
+        T === wide && continue
+        read = CC.insert_node!(ir, pc, CC.NewInstruction(st, wide), false)
+        ir.stmts[pc][:stmt] = Expr(:call, Core.typeassert, read, T)
+        changed = true
+    end
+    return changed ? CC.compact!(ir) : ir
 end
 
 function assert_field_receivers!(ir::CC.IRCode)

@@ -29,6 +29,7 @@ end
 # dynamic dispatch, closures and C callbacks
 @testset verbose=true "Inference" begin
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
+    @testset verbose=true "Slots" include_timed("slots.jl")
     include_timed("closures.jl")
     include_timed("cfunctions.jl")
 end

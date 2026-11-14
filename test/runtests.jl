@@ -23,8 +23,8 @@ GROUP in ("Core", "Packages", "All") || throw(ArgumentError("GROUP is `Core`, `P
 
 include("helpers.jl")
 
-GROUP in ("Core", "All") && include("core/runtests.jl")
-GROUP in ("Packages", "All") && include("packages/runtests.jl")
+GROUP in ("Core", "All") && @time "Core tests:" include("core/runtests.jl")
+GROUP in ("Packages", "All") && @time "Package tests:" include("packages/runtests.jl")
 
 if !isempty(get(ENV, "TEST_TIMING", ""))
     println("\nSeconds for each file of the tests:")
