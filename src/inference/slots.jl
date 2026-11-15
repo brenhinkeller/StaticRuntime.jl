@@ -61,7 +61,6 @@ const UNIVERSE_MODE = Ref(:add)
 const UNIVERSE_SEEN = Set{Any}()
 const UNIVERSE_USED = Set{Any}()
 const UNIVERSE_VERSION = Ref(0)
-const UNIVERSE_FREEZE_PASS = 2 # (from this pass on the universe is not added to: the types that the passes find go on growing for a program that reaches much, and a pass that is made with more of them takes longer than the one before)
 const UNIVERSE_LIMIT = 512 # (the types of a program that is compiled: more are not added, so that what is found settles)
 const UNIVERSE_EXTRAS = Dict{Any,Vector{Any}}()
 const STORED_BY_SLOT = Dict{SlotKey,Set{Any}}() # (the types that were stored in each slot of an abstract type, in this pass: those of the slots that are open are in the universe, see `note_stored_type!`)
@@ -176,6 +175,7 @@ function reset_slots!(; strict::Bool = true)
     empty!(UNIVERSE_USED)
     empty!(UNIVERSE_SEEN)
     empty!(UNIVERSE_EXTRAS)
+    empty!(REGISTERED_UNIONS)
     UNIVERSE_VERSION[] += 1
     SLOTS_WHY[] = haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY")
     # (the check is on when the compilation is `strict`, and `STATIC_RUNTIME_CHECK_TYPES` is `1` (on) or `0` (off) for either)
@@ -540,7 +540,7 @@ end
 # what was used
 function analyze_slots!(interp, root)
     SLOTS_MODE[] === :off && return
-    (isempty(SLOT_TYPES) && !dispatch_was_used() && isempty(EMBEDDED_SLOTS) && SLOTS_MODE[] !== :observe) && return
+    (isempty(SLOT_TYPES) && !dispatch_was_used() && SLOTS_MODE[] !== :observe) && return
     # (what the roots that were made before in this pass stored is kept: a `@cfunction` is a root of its own, and the slots are those of the whole program)
     for (ci, src) in GPUCompiler.CompilerCaching.get_codeinfos(interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
@@ -595,7 +595,7 @@ function analyze_slots!(interp, root)
     end
     changed = update_slot_types!()
     # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
-    if UNIVERSE_MODE[] !== :off && dispatch_was_used() && SLOT_PASSES[] < UNIVERSE_FREEZE_PASS
+    if UNIVERSE_MODE[] !== :off && dispatch_was_used()
         add_stored_types!()
         new = Any[t for t in UNIVERSE_SEEN if !(t in UNIVERSE_USED)]
         length(UNIVERSE_USED) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(UNIVERSE_USED))])
@@ -603,6 +603,7 @@ function analyze_slots!(interp, root)
             union!(UNIVERSE_USED, new)
             UNIVERSE_VERSION[] += 1
             empty!(UNIVERSE_EXTRAS)
+            empty!(REGISTERED_UNIONS)
             changed = true
         end
     end

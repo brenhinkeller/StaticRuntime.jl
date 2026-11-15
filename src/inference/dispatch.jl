@@ -133,7 +133,14 @@ end
 
 # The union of the registered types that are subtypes of `T` (`Any`, or an abstract type that can't be listed), or `nothing`. For a call of `show`, which is also made
 # for a `Vector{Any}` in a `Vector{Any}`, they are the types that `show` is registered for (see `add_show_candidates!`): those of calls in general, and `Vector{Any}`.
+const REGISTERED_UNIONS = Dict{Any,Any}() # (kept for what the lists are: the union of a few hundred types is made for each call of a program that has many, and is the same for all of them; emptied with `UNIVERSE_EXTRAS`)
 function registered_union(@nospecialize(T), show::Bool = false; universe::Bool = true)
+    key = (T, show, universe, UNIVERSE_MODE[], UNIVERSE_VERSION[], CANDIDATES_VERSION[], length(SHOW_CANDIDATES), length(FAMILY_CANDIDATES))
+    cached = get(REGISTERED_UNIONS, key, missing)
+    cached === missing || return cached
+    return REGISTERED_UNIONS[key] = registered_union_(T, show, universe)
+end
+function registered_union_(@nospecialize(T), show::Bool, universe::Bool)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its instances are of the types of it that were registered)
     T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll) || return nothing # (`Type{X}` is not an abstract type of objects)
     candidates = show ? show_candidates() : dispatch_candidates()
