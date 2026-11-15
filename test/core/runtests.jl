@@ -30,6 +30,7 @@ end
 @testset verbose=true "Inference" begin
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
     @testset verbose=true "Slots" include_timed("slots.jl")
+    @testset verbose=true "Types that are stated" include_timed("assume.jl")
     include_timed("closures.jl")
     include_timed("cfunctions.jl")
 end

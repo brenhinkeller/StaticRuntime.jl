@@ -249,6 +249,25 @@ specific than it.** So an override `print(x1, x2) = print(STDOUT, x1, x2)` would
 they should not: with the same signature as the method that they replace, with restricted argument
 types, or by doing for those calls what the method of Base does (see `src/io.jl`).
 
+### Stating a type instead of copying code
+
+Many overrides of code from a package are a copy of a function with a type put in it, because the compiler finds a wide type (a `Union`, `Any`) where the code knows what it is. A copy drifts when the package changes. `@assume` states the
+type, and the code of the package stays as it is:
+
+```julia
+function __init__()
+    StaticRuntime.@assume Makie.theme(::Nothing, ::Symbol)::Attributes   # the call gives an `Attributes`
+    StaticRuntime.@assume_field Observable.listeners::Vector{Pair{Int,Any}}  # the field holds this
+end
+```
+
+* **The type of a call**: `@assume f(::A, ::B)::R` says that the methods that the arguments `A` and `B` (or subtypes) fit give a `R`. Those methods are inferred as they are, with what they give narrowed to `R` (the intersection of the
+  two types), and every `return` of them is a `typeassert` to `R`: callers have a type that is right, and a program in which the method gives another type stops with a type error that says so, and does not go on as if it had the type.
+  A function with keyword arguments is stated by its method without them, and a constructor `T(...)` by `Type{T}`.
+* **The type of a field**: `@assume_field S.name::T` says that a field of the type `Any` (or another that is not concrete) of the struct `S` holds a `T` where it is read, and the read is a `typeassert`.
+* Both are given where the module is initialized (`__init__`), as `add_dispatch_candidates!` is: they are kept for the session, and not by what is precompiled. A package extension is the place. What is stated is a number in the key of
+  what is inferred, so a change of it is a new inference.
+
 ## Strict mode: unsupported code is rejected when compiling
 
 A lot of Julia code can't work in a standalone binary because it needs the Julia runtime: most

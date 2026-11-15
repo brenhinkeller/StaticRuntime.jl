@@ -440,7 +440,8 @@ end
 const FIELD_BUILTINS = (Core.getfield, Core.setfield!)
 
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
-    CHECK_SLOT_TYPES[] && (ir = check_slot_reads!(ir))
+    ir = assert_assumed_returns!(ir, opt.linfo)
+    (CHECK_SLOT_TYPES[] || !isempty(ASSUMED_SLOTS)) && (ir = check_slot_reads!(ir))
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
     ir = concretize_namedtuples!(ir)
@@ -451,6 +452,7 @@ end
 # been `Any` otherwise, and the calls on it dispatched over the registered types.) Only for reads whose type is narrower than what the slot is declared to hold.
 function check_slot_reads!(ir::CC.IRCode)
     changed = false
+    reads = Dict{Int,SlotKey}() # (the statements that read a slot that was given types, and are checked)
     for pc in 1:length(ir.stmts)
         st = ir.stmts[pc][:stmt]
         st isa Expr && st.head === :call && length(st.args) >= 3 || continue
@@ -467,12 +469,21 @@ function check_slot_reads!(ir::CC.IRCode)
         end
         key === nothing && continue
         slot_read_type(key) === nothing && continue
+        (CHECK_SLOT_TYPES[] || haskey(ASSUMED_SLOTS, key)) || continue # (what is assumed is always checked)
+        reads[pc] = key
         T = CC.widenconst(ir.stmts[pc][:type])
         (T !== Union{} && closed_type(T)) || continue
         wide = key[1] === :elem ? key[2] : fieldtype(key[2], key[3])
         T === wide && continue
         read = CC.insert_node!(ir, pc, CC.NewInstruction(st, wide), false)
         ir.stmts[pc][:stmt] = Expr(:call, Core.typeassert, read, T)
+        changed = true
+    end
+    # (a read that inference narrowed with a `PiNode` of its value, which is not a check: it is the type that was claimed, and one that the value may not have)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Core.PiNode && st.val isa Core.SSAValue && haskey(reads, st.val.id) && st.typ isa Type || continue
+        ir.stmts[pc][:stmt] = Expr(:call, Core.typeassert, st.val, st.typ)
         changed = true
     end
     return changed ? CC.compact!(ir) : ir

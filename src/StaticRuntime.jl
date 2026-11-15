@@ -42,6 +42,7 @@ include("inference/dispatch.jl")    # dynamic dispatch on abstract types, by uni
 include("inference/closures.jl")    # calls of functions that are not known: closures in collections, in boxes
 include("inference/boxes.jl")       # the variables that closures take, as boxes of the type of what they hold
 include("inference/slots.jl")       # what the slots of an abstract type (a `Vector{Any}`, a field of the type `Any`) hold
+include("inference/assume.jl")      # types that are stated: `@assume f(::A)::R`, `@assume_field S.x::T`
 include("inference/cfunctions.jl")  # @cfunction: C functions that call functions of the program
 include("inference/diagnostics.jl") # Why an entry point does not infer to a concrete type
 
@@ -50,7 +51,7 @@ include("testing.jl")    # Differential testing: compiled executable vs. ordinar
 
 export compile_executable, compile_shlib, static_code_llvm, static_code_typed, static_code_native,
        static_llvm_module, @device_override
-export UnsupportedCodeError, InferenceError, add_show_candidates!, add_dispatch_candidates!
+export UnsupportedCodeError, InferenceError, add_show_candidates!, add_dispatch_candidates!, @assume, @assume_field
 export StaticIO, StaticFile, STDIN, STDOUT, STDERR
 export static_result, static_status, static_status_batch, undefined_symbols, allocation_sites, @static_test
 export gc_live_bytes, gc_collections, gc_heap_bytes

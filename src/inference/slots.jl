@@ -583,7 +583,11 @@ function refined_read(@nospecialize(T), @nospecialize(rt))
     return R === Union{} ? rt : R
 end
 
-slot_read_type(key) = SLOTS_MODE[] === :on ? get(SLOT_TYPES, key, nothing) : nothing
+function slot_read_type(key)
+    assumed = get(ASSUMED_SLOTS, key, nothing) # (a type that is stated: see assume.jl)
+    assumed === nothing || return assumed
+    return SLOTS_MODE[] === :on ? get(SLOT_TYPES, key, nothing) : nothing
+end
 
 # What was found, as lines to read: the slot, and the types (or that they are not known)
 function slots_report(io::IO = stdout)

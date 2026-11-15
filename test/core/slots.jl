@@ -42,6 +42,12 @@ slot_cases() = [
         withenv("STATIC_RUNTIME_SLOTS_BLIND" => "String") do
             @test static_status(stores_string)[1] == :runtime_error
         end
+        # (a slot that holds one type: what inference narrows it to is a `PiNode` of the read, which is no check, and is turned into one)
+        stores_float() = (v = Any[opaque(1), 2.5]; s = 0; for x in v; s += x isa Float64 ? 100 : x; end; s)
+        @test static_status(stores_float)[1] == :ok
+        withenv("STATIC_RUNTIME_SLOTS_BLIND" => "Float64") do
+            @test static_status(stores_float)[1] == :runtime_error
+        end
         withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
             @test static_status(stores_string)[1] == :ok
             # (the analysis is made to miss the stores of `String`, as it would a store that it can't see: the read is then not of the type that it was said to be)
