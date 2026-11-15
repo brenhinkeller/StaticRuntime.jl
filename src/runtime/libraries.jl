@@ -295,11 +295,7 @@ function loader_ir()
     return LOADER_IR[]
 end
 
-# the libraries of the last program that was linked (what `libraries = :bundle` copies, when it has been compiled)
-const LAST_LIBRARIES = Ref(LibraryPlan())
-
 function link_libraries!(mod::LLVM.Module, plan::LibraryPlan; libraries::Symbol = :system)
-    LAST_LIBRARIES[] = plan
     isempty(plan.symbols) && return false
     @debug "Functions of libraries, looked up when the program runs" plan.paths plan.symbols libraries
     for ir in (library_table_ir(plan, libraries), loader_ir())
@@ -311,9 +307,8 @@ function link_libraries!(mod::LLVM.Module, plan::LibraryPlan; libraries::Symbol 
     return true
 end
 
-# Copy the libraries of the program that was compiled to the folder `lib` next to it (`libraries = :bundle`)
-function bundle_libraries(program::AbstractString)
-    plan = LAST_LIBRARIES[]
+# Copy the libraries of the program that was compiled (`plan`: what `link_runtime!` says that it calls) to the folder `lib` next to it (`libraries = :bundle`)
+function bundle_libraries(program::AbstractString, plan::LibraryPlan)
     copied = String[]
     isempty(plan.symbols) && return copied
     dir = joinpath(dirname(abspath(program)), "lib")

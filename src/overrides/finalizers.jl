@@ -14,6 +14,8 @@
 # in the middle of another; an error that a finalizer throws is ignored (Julia prints it); the finalizers of objects that are alive when the program ends do not
 # run (they do not in Julia, if the program exits with `exit()`, but they do when it ends normally).
 
+# (The number and the list of a site are made by generated functions, `finalizer_site_id` and `finalizer_registry`, whose code Julia keeps for the process: they can only be tables of the process, by the types of the site,
+# and a number is the same for a site in every program. The lists are the programs' own: they are empty here, as nothing but a program that runs puts a finalizer in one.)
 const FINALIZER_SITES = Dict{Tuple{DataType,DataType},Int}()
 const FINALIZER_REGISTRIES = Dict{Tuple{DataType,DataType},Any}()
 const FINALIZER_NEVER = Ref(false)

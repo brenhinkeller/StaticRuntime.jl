@@ -13,13 +13,12 @@ struct CFunctionRoot
     args::Vector{DataType}
     ret::DataType
 end
-const CFUNCTION_ROOTS = CFunctionRoot[]
 
 # the name of the function of the program that a root is compiled as (the compiler adds `julia_` and a number)
 cfunction_root_name(id::Integer) = string("cfunction_target_", id)
 
 # The function that a thunk of `jl_get_abi_converter` calls by dispatch: the roots that are for the type of its function, and have the types that it has
-function cfunction_root_function(mod::LLVM.Module, thunk::LLVM.Function)
+function cfunction_root_function(mod::LLVM.Module, thunk::LLVM.Function, roots::AbstractVector{CFunctionRoot})
     fns = LLVM.functions(mod)
     haskey(fns, "ijl_apply_generic") || return nothing
     for use in LLVM.uses(fns["ijl_apply_generic"])
@@ -30,7 +29,7 @@ function cfunction_root_function(mod::LLVM.Module, thunk::LLVM.Function)
         is_process_address(addr) || return nothing
         ft = typeof(unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
         wanted = (string.(LLVM.parameters(LLVM.function_type(thunk))), string(LLVM.return_type(LLVM.function_type(thunk))))
-        for root in CFUNCTION_ROOTS
+        for root in roots
             root.ftype === ft || continue
             prefix = string("julia_", cfunction_root_name(root.id), "_")
             for fn in values(fns)
@@ -81,9 +80,9 @@ function replace_with_call!(old::LLVM.Function, target::LLVM.Function)
     return new
 end
 
-# Make the wrappers of the `@cfunction`s call the functions of the program
-function link_cfunctions!(mod::LLVM.Module)
-    isempty(CFUNCTION_ROOTS) && return false
+# Make the wrappers of the `@cfunction`s of the program (`roots`: see `CFunctionRoot`) call the functions of the program
+function link_cfunctions!(mod::LLVM.Module, roots::AbstractVector{CFunctionRoot})
+    isempty(roots) && return false
     fns = LLVM.functions(mod)
     haskey(fns, "jl_get_abi_converter") || return false
     wrappers = Dict{LLVM.Function,LLVM.Function}() # (the wrapper => the thunk that it has)
@@ -98,7 +97,7 @@ function link_cfunctions!(mod::LLVM.Module)
     end
     changed = false
     for (wrapper, thunk) in wrappers
-        root = cfunction_root_function(mod, thunk)
+        root = cfunction_root_function(mod, thunk, roots)
         root === nothing && continue
         replace_with_call!(wrapper, root)
         changed = true

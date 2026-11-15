@@ -5,8 +5,6 @@
 # again with a function for each `@cfunction` that calls it, `cfunction_target_ID(arguments...)`, and that is called from the entry point where it can't be reached.
 # Inference says what the `@cfunction`s of the program are (the function, the types of the arguments and of the result), as for the functions of closures.jl.
 
-const SEEN_CFUNCTIONS = Tuple{DataType,Vector{DataType},DataType,Any}[] # (the type of the function, of the arguments, of the result, the function)
-
 # What a function that is the target of a `@cfunction` does, other than call the function: it is a change of a global, so that the call from the entry point is not removed as
 # a call that has no effect, and that is not made.
 mutable struct CFunctionGuard
@@ -14,18 +12,17 @@ mutable struct CFunctionGuard
 end
 const CFUNCTION_GUARD = CFunctionGuard(0)
 
-# The functions of the roots in `Runtime.CFUNCTION_ROOTS` (for the same position in the list)
-const CFUNCTION_FUNCTIONS = Any[]
-
-# The arguments of a compilation (the function and its types come first), with the entry point that has the targets of the `@cfunction`s that were found
-function rooted_arguments(args)
-    isempty(Runtime.CFUNCTION_ROOTS) && return args
+# The arguments of a compilation (the function and its types come first), with the entry point that has the targets of the `@cfunction`s that were found (the roots of the compilation `c`, and the functions that they call)
+function rooted_arguments(c::Compilation, args)
+    cl = c.closures
+    isempty(cl.cfunction_roots) && return args
     length(args) >= 2 && args[1] isa Function && (args[2] isa Tuple || (args[2] isa DataType && args[2] <: Tuple)) || return args
-    entry = rooted_entry(args[1], args[2], collect(zip(Runtime.CFUNCTION_ROOTS, CFUNCTION_FUNCTIONS)))
+    entry = rooted_entry(args[1], args[2], collect(zip(cl.cfunction_roots, cl.cfunction_functions)))
     return (entry, args[2:end]...)
 end
 
 function CC.abstract_eval_cfunction(interp::OverridesInterpreter, e::Expr, sstate::CC.StatementState, sv::CC.AbsIntState)
+    seen = compilation().closures.seen_cfunctions # (not inside the `try`: that it is not there is not a `@cfunction` that fails to compile)
     try
         ft = CC.abstract_eval_value(interp, e.args[2], sstate, sv)
         f = ft isa Core.Const ? ft.val : (T = CC.widenconst(ft); T isa DataType && Base.issingletontype(T) ? T.instance : nothing)
@@ -34,7 +31,7 @@ function CC.abstract_eval_cfunction(interp::OverridesInterpreter, e::Expr, sstat
         if f !== nothing && Base.issingletontype(typeof(f)) && ret isa DataType && isconcretetype(ret) && argtypes isa Core.SimpleVector &&
            all(T -> T isa DataType && isconcretetype(T), argtypes)
             entry = (typeof(f), DataType[argtypes...], ret, f)
-            any(s -> s[1] === entry[1] && s[2] == entry[2] && s[3] === entry[3], SEEN_CFUNCTIONS) || push!(SEEN_CFUNCTIONS, entry)
+            any(s -> s[1] === entry[1] && s[2] == entry[2] && s[3] === entry[3], seen) || push!(seen, entry)
         end
     catch
         # (what is not found is a `@cfunction` that fails to compile, as it did)

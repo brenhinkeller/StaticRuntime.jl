@@ -14,20 +14,17 @@ const DEEPCOPY_ATOMS = Union{Symbol, Core.MethodInstance, Method, GlobalRef, Dat
 
 # The methods of `deepcopy_internal` that are not Base's (a package's own, for its types). A generated function can't look at the methods (reflection is not
 # allowed in it), so they are looked up when compiling (`register_custom_deepcopy!`, which the functions that compile call) and kept in this list, which
-# the generator reads; as with the registered types of dispatch, what is inferred is kept apart for each state of the list (`CANDIDATES_VERSION`).
-const CUSTOM_DEEPCOPY = Any[]
+# the generator reads (the list is in the registry, see registry.jl); as with the registered types of dispatch, what is inferred is kept apart for each state of the registry (its version).
 const WARNED_DEEPCOPY = Set{Any}()
 function register_custom_deepcopy!()
     for m in methods(Base.deepcopy_internal)
         m.module === Base && continue
-        any(sig -> sig === m.sig, CUSTOM_DEEPCOPY) && continue
-        push!(CUSTOM_DEEPCOPY, m.sig)
-        CANDIDATES_VERSION[] += 1
+        register_deepcopy!(m.sig)
     end
     return nothing
 end
 custom_deepcopy_methods(T::DataType) =
-    String[string(sig.parameters[2] isa Type ? sig.parameters[2] : "...") for sig in CUSTOM_DEEPCOPY if Tuple{typeof(Base.deepcopy_internal), T, IdDict} <: sig]
+    String[string(sig.parameters[2] isa Type ? sig.parameters[2] : "...") for sig in REGISTRY.deepcopy if Tuple{typeof(Base.deepcopy_internal), T, IdDict} <: sig]
 
 function static_deepcopy end
 function copy_struct end

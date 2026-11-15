@@ -9,6 +9,9 @@ using LLVM: LLVM
 @reexport using StaticCompiler: StaticTarget
 @reexport using StaticTools
 
+# What is registered (the types that calls are made over, what is stated of types): one value, that a compilation takes a copy of
+include("registry.jl")
+
 # The compiler: our method table and entry points, the type tags and the pipeline of LLVM passes
 include("overrides.jl") # Our method table, `@device_override`, and the entry points that use it
 include("tags.jl")      # The type tags of objects
@@ -38,6 +41,7 @@ include("overrides/finalizers.jl") # finalizer(f, x) of a Julia function
 include("overrides/tasks.jl")      # Tasks that run to completion: @async, Channel, wait, fetch
 
 # Inference: what the compiler does with calls that are not resolved by Julia
+include("inference/compilation.jl") # the state of a compilation: what its passes find and are made with, and the key of what it infers
 include("inference/dispatch.jl")    # dynamic dispatch on abstract types, by union splitting
 include("inference/closures.jl")    # calls of functions that are not known: closures in collections, in boxes
 include("inference/boxes.jl")       # the variables that closures take, as boxes of the type of what they hold

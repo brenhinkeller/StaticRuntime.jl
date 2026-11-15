@@ -117,8 +117,7 @@ const DEFAULT_SHOW_CANDIDATES = Type[Int, Float64, String, Bool, Char, Symbol, N
     Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, UInt128, Float16, Float32,
     Missing, Vector{Any}]
 
-const SHOW_CANDIDATES = Type[]
-show_candidates() = unique!(vcat(DEFAULT_SHOW_CANDIDATES, SHOW_CANDIDATES))
+# (the ones that were added are in the registry: see registry.jl)
 
 """
     add_show_candidates!(types...)
@@ -135,18 +134,15 @@ of `show_element`, where the methods that you define later are not visible.)
 function add_show_candidates!(types::Type...)
     for T in types
         isconcretetype(T) || throw(ArgumentError("$T is not a concrete type"))
-        if !(T in SHOW_CANDIDATES)
-            push!(SHOW_CANDIDATES, T)
-            CANDIDATES_VERSION[] += 1
-        end
     end
+    register_show!(types)
     return nothing
 end
 
 @generated function show_element(io, x, ::Type{T}) where {T}
     isconcretetype(T) && return :(show(io, x); nothing)
     body = Expr(:block)
-    for C in vcat(DEFAULT_SHOW_CANDIDATES, SHOW_CANDIDATES)
+    for C in vcat(DEFAULT_SHOW_CANDIDATES, REGISTRY.show) # (the registry as it is when this is generated: see registry.jl)
         typeintersect(C, T) === Union{} && continue
         # (an `isa` that is true when `T` is a subtype of `C`: no test)
         push!(body.args, :(x isa $C && return (show(io, x::$C); nothing)))

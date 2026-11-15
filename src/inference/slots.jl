@@ -7,47 +7,26 @@
 # A slot is the elements of one type of memory (`Memory{Any}`: all the `Vector{Any}` and the `Dict{K,Any}` of the program are one), or the field of a struct (`RefValue{Any}.x`, a field of the type `Any` of a struct of
 # the program). The key of a slot is `(:elem, T, nothing)` or `(:field, S, name)`.
 
-const SlotKey = Tuple{Symbol,Any,Any}
-
-# the types that the slots held in the compilation that is made now: the union of the types of what was stored, or `Any` when something of a type that is not known was (so that what the slot holds is not known)
-const SEEN_SLOTS = Dict{SlotKey,Any}()
-const SLOT_LIMIT = Ref(64)
-# `:on` (the types are used), `:observe` (found and kept in `SEEN_SLOTS`, and not used), `:off`: `STATIC_RUNTIME_SLOTS` is `1`/unset, `observe` or `0`
-const SLOTS_MODE = Ref(:on)
-
-# The types that reads of each slot are given in this compilation (see `update_slot_types!`), the slots that are given up (what is stored in them is not known: a read of one is an `Any`, over the registered types), and the
-# slots that something of a type that is not known was stored in, in the pass that was made last
-const SLOT_TYPES = Dict{SlotKey,Any}()
-const SLOT_OPEN = Set{SlotKey}()
-const SEEN_UNKNOWN = Set{SlotKey}()
-const SLOT_PASSES = Ref(0)
-# whether a compilation that failed with the types of the slots was made again without them (once)
-const SLOTS_FALLBACK = Ref(false)
+# (`SlotKey` is in registry.jl.) What a compilation knows of its slots is its `SlotState` (compilation.jl): `seen`, the types that were stored in each slot in this pass: the union of them, or `Any` when something of a type
+# that is not known was (so that what the slot holds is not known); `types`, the types that reads of each slot are given in this pass (see `update_slot_types!`); `open`, the slots that are given up (what is stored in them is
+# not known: a read of one is an `Any`, over the registered types); `seen_unknown`, the slots that something of a type that is not known was stored in, in this pass. `mode` is `:on` (the types are used), `:observe` (found and
+# kept in `seen`, and not used), or `:off`.
 const SLOT_PASS_LIMIT = 4
-# (for finding out why a slot is given up: the first stores of a type that is not known, as text; kept when `STATIC_RUNTIME_SLOTS_WHY` is set)
-const SLOTS_WHY = Ref(false)
-# Every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed. It is on when the compilation is `strict` (the default), and `STATIC_RUNTIME_CHECK_TYPES=0` turns it off (`1` turns it on for `strict = false`); it costs nothing that could be measured in the benchmarks of `bench/dispatch.jl`
-const UNKNOWN_STORES = Dict{SlotKey,Vector{String}}()
-const STORE_CONTEXT = Ref{Any}(nothing)
-# (for `STATIC_RUNTIME_SLOTS_WHY`: the operand of the store that is being noted, and the stores of a type that is not known that were found while the code was looked at: (slot, what is stored is a parameter of the method, where))
-const STORE_OPERAND = Ref{Any}(nothing)
-const UNKNOWN_CENSUS = Tuple{SlotKey,Bool,String}[]
-const CHECK_SLOT_TYPES = Ref(false)
-# (for testing the check: `STATIC_RUNTIME_SLOTS_BLIND=String,Int` makes the analysis miss the stores of these types, as it would a store that it can not see)
-const BLIND_TYPES = Set{String}()
-# the declared types of the slots that a store through a pointer was seen to write (a pointer can point into the elements of a memory and into a field): the slots of them are not known
-const RAW_STORE_TYPES = Set{Any}()
+# Every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed. It is on when the compilation is `strict` (the default), and `STATIC_RUNTIME_CHECK_TYPES=0` turns it off (`1` turns it on for `strict = false`); it costs nothing that could be measured in the benchmarks of `bench/dispatch.jl` (see `Settings`)
+const SLOT_LIMIT = Ref(64) # the most types that a slot holds before it is given up
+# the number of the types of the universe that a compilation adds (the types of a program that is compiled: more are not added, so that what is found settles)
+const UNIVERSE_LIMIT = 512
 
-# Whether this compilation has called anything over the registered types (a value of the type `Any` that it dispatched on): when it has not, there is nothing that the types of the slots would change
-const REGISTERED_DISPATCH_USED = Ref(false)
-# The keys of the inference cache (`OverridesParams`) that this was true for: what is inferred before is taken from the cache, where this is not seen again
-const DISPATCH_PARAMS = Set{Int}()
-function note_dispatch_used!()
-    REGISTERED_DISPATCH_USED[] = true
-    push!(DISPATCH_PARAMS, OverridesParams().candidates)
+# Whether this compilation has called anything over the registered types (a value of the type `Any` that it dispatched on): when it has not, there is nothing that the types of the slots would change.
+# What was inferred before is taken from the cache, where this is not seen again: so the keys of the inference cache that it was true for are kept (they are made of all that inference depends on, so what is true of one is true of
+# every compilation that has it)
+const DISPATCH_USED_KEYS = Set{Int}()
+function note_dispatch_used!(c::Compilation)
+    c.dispatch.registered_used = true
+    push!(DISPATCH_USED_KEYS, c.key)
     return
 end
-dispatch_was_used() = REGISTERED_DISPATCH_USED[] || OverridesParams().candidates in DISPATCH_PARAMS
+dispatch_was_used(c::Compilation) = c.dispatch.registered_used || c.key in DISPATCH_USED_KEYS
 
 ## The universe: the types that the program makes
 #
@@ -57,15 +36,9 @@ dispatch_was_used() = REGISTERED_DISPATCH_USED[] || OverridesParams().candidates
 # found in a pass are the ones that are used in the next, until a pass finds no more (the types make code reached that makes others); a program that makes no such types needs no more passes than it did. `STATIC_RUNTIME_UNIVERSE=0` leaves them out.
 # (The registered types that the program does not make are not left out, which was tried: the types that a first pass finds are those of a call over all the registered types, and each of those makes values of its own type, so nothing is
 # left out, and the extra pass costs half of the time of compiling. A program that gets an object of a type that it does not make has a `MethodError` that says so.)
-const UNIVERSE_MODE = Ref(:add)
-const UNIVERSE_SEEN = Set{Any}()
-const UNIVERSE_USED = Set{Any}()
-const UNIVERSE_VERSION = Ref(0)
-const UNIVERSE_LIMIT = 512 # (the types of a program that is compiled: more are not added, so that what is found settles)
-const UNIVERSE_EXTRAS = Dict{Any,Vector{Any}}()
-const STORED_BY_SLOT = Dict{SlotKey,Set{Any}}() # (the types that were stored in each slot of an abstract type, in this pass: those of the slots that are open are in the universe, see `note_stored_type!`)
 
 # whether a module is one of Julia's own (the standard library, Base and Core, and this package), whose types are the ones that are registered when a program is likely to have them
+# (what a module is does not change: it is kept)
 const JULIA_OWNED_MODULES = Dict{Module,Bool}()
 function julia_owned_module(m::Module)
     get!(JULIA_OWNED_MODULES, m) do
@@ -91,101 +64,42 @@ function user_relevant(@nospecialize(T), depth::Int = 0)
     return false
 end
 
-function note_universe!(@nospecialize(T))
-    UNIVERSE_MODE[] === :off && return
+function note_universe!(c::Compilation, @nospecialize(T))
+    c.settings.universe || return
     T = CC.widenconst(T)
     user_relevant(T) || return
-    FACTS_SINK[] === nothing ? push!(UNIVERSE_SEEN, T) : push!(FACTS_SINK[], ((:universe, T, nothing), Any))
+    s = c.slots
+    s.facts_sink === nothing ? push!(s.universe_seen, T) : push!(s.facts_sink, ((:universe, T, nothing), Any))
     return
 end
 
 # the types of the universe that are subtypes of `T` (for the types that a call is made over)
-function universe_extras(@nospecialize(T))
-    (UNIVERSE_MODE[] !== :off && !isempty(UNIVERSE_USED)) || return Any[]
-    get!(UNIVERSE_EXTRAS, (T, UNIVERSE_VERSION[])) do
-        Any[t for t in UNIVERSE_USED if t <: T]
+function universe_extras(c::Compilation, @nospecialize(T))
+    s = c.slots
+    (c.settings.universe && !isempty(s.universe)) || return Any[]
+    get!(s.universe_extras, T) do
+        Any[t for t in s.universe if t <: T]
     end
-end
-
-# a hash of the types that the universe has, for the key of the inference cache (as for `slots_hash`)
-function universe_hash()
-    h = UInt(0)
-    for t in UNIVERSE_USED
-        h += UInt(objectid(t))
-    end
-    return hash(length(UNIVERSE_USED), h)
 end
 
 # the types that the statements of a method have (those of the optimized code of it, or of the code before it was optimized), and its arguments
-function note_universe_statements!(types, stmts, mi::Core.MethodInstance)
-    UNIVERSE_MODE[] === :off && return
+function note_universe_statements!(c::Compilation, types, stmts, mi::Core.MethodInstance)
+    c.settings.universe || return
     sig = Base.unwrap_unionall(mi.specTypes)
     sig isa DataType && for T in sig.parameters
-        T isa Type && note_universe!(T)
+        T isa Type && note_universe!(c, T)
     end
     for (st, T) in zip(stmts, types)
         # (a `PiNode` and a `PhiNode` have the type of values that are made elsewhere, and what a `typeassert` gives is the type of its argument: a type that is only there because a call was made over it is not one that is made)
         (st isa Core.PiNode || st isa Core.PhiNode || st isa Core.PhiCNode || st isa Core.UpsilonNode) && continue
         T isa Type || T isa Core.Const || T isa Core.PartialStruct || continue
-        note_universe!(T)
+        note_universe!(c, T)
     end
     return
 end
 
 # said when the types of the slots have changed, so that the compilation is made again with them (the pass is cut short: inference is what they are found from)
 struct SlotsChanged <: Exception end
-
-# A hash of the types of the slots, for the key of the inference cache. (`hash` of a `Union` does not tell unions apart, so this is made of the objectids of the types in them. The order does not matter.)
-function slots_hash()
-    h = UInt(0)
-    for (k, T) in SLOT_TYPES
-        members = sort!(UInt[objectid(t) for t in Base.uniontypes(T)])
-        h += hash(members, hash(objectid(k[2]), hash(k[1], hash(k[3]))))
-    end
-    return hash(length(SLOT_TYPES), h)
-end
-
-# at the start of each pass of the compilation
-function reset_slots_pass!()
-    PASS_PARAMS_KEY[] = OverridesParams().candidates
-    empty!(UNIVERSE_SEEN)
-    empty!(STORED_BY_SLOT)
-    empty!(RAW_STORE_TYPES)
-    SCAN_TRUNCATED[] = false
-    empty!(SEEN_SLOTS)
-    empty!(SEEN_UNKNOWN)
-    empty!(UNKNOWN_STORES)
-    return
-end
-
-function reset_slots!(; strict::Bool = true)
-    empty!(SLOT_TYPES)
-    empty!(SLOT_OPEN)
-    empty!(SEEN_SLOTS)
-    empty!(SEEN_UNKNOWN)
-    SLOT_PASSES[] = 0
-    empty!(SCAN_CACHE)
-    SLOTS_FALLBACK[] = get(ENV, "STATIC_RUNTIME_SLOTS_FALLBACK", "1") == "0" # (`0`: a compilation that fails with the types of the slots is not made again without them, for finding out what failed)
-    SCAN_TRUNCATED[] = false
-    mode = get(ENV, "STATIC_RUNTIME_SLOTS", "on")
-    SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on
-    PRECISE_NOSPECIALIZEINFER[] = get(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER", "1") != "0"
-    FILTER_BY_METHODS[] = get(ENV, "STATIC_RUNTIME_METHOD_FILTER", "1") != "0"
-    UNIVERSE_MODE[] = get(ENV, "STATIC_RUNTIME_UNIVERSE", "1") == "0" ? :off : :add
-    empty!(UNIVERSE_USED)
-    empty!(UNIVERSE_SEEN)
-    empty!(UNIVERSE_EXTRAS)
-    empty!(REGISTERED_UNIONS)
-    UNIVERSE_VERSION[] += 1
-    SLOTS_WHY[] = haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY")
-    # (the check is on when the compilation is `strict`, and `STATIC_RUNTIME_CHECK_TYPES` is `1` (on) or `0` (off) for either)
-    check = get(ENV, "STATIC_RUNTIME_CHECK_TYPES", "")
-    CHECK_SLOT_TYPES[] = isempty(check) ? strict : check != "0"
-    empty!(BLIND_TYPES)
-    union!(BLIND_TYPES, filter(!isempty, split(get(ENV, "STATIC_RUNTIME_SLOTS_BLIND", ""), ',')))
-    empty!(UNKNOWN_STORES)
-    return
-end
 
 # whether what is read from a slot of the declared type `T` has a type that is not known: `Any`, an abstract type, a union with one of them. (A concrete type, and a union of them, are known already.)
 needs_slot_type(@nospecialize(T)) = !(isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T))) || T <: Type)
@@ -199,29 +113,30 @@ function stored_type(@nospecialize(T))
     return !isconcretetype(T) && T <: Type ? Union{DataType,UnionAll,Union} : T
 end
 
-function note_slot_store!(key::SlotKey, @nospecialize(T))
+function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T))
+    s, settings = c.slots, c.settings
     T = stored_type(T)
     T === Union{} && return
-    !isempty(EMBEDDED_SLOTS) && key in EMBEDDED_SLOTS && !closed_type(T) && return # (see `@assume_field_embedded`: the reads are checked)
-    if FACTS_SINK[] !== nothing
-        SLOTS_WHY[] && !closed_type(T) && push!(UNKNOWN_CENSUS, (key, STORE_OPERAND[] isa Core.Argument, string(STORE_CONTEXT[])))
-        push!(FACTS_SINK[], (key, T))
+    key in c.registered.embedded && !closed_type(T) && return # (see `@assume_field_embedded`: the reads are checked)
+    if s.facts_sink !== nothing
+        settings.why && !closed_type(T) && push!(s.unknown_census, (key, s.store_operand isa Core.Argument, string(s.store_context)))
+        push!(s.facts_sink, (key, T))
         return
     end
-    isempty(BLIND_TYPES) || (T = Union{(t for t in Base.uniontypes(T) if !(string(t) in BLIND_TYPES))...}; T === Union{} && return)
-    cur = get!(SEEN_SLOTS, key, Union{})
+    isempty(settings.blind) || (T = Union{(t for t in Base.uniontypes(T) if !(string(t) in settings.blind))...}; T === Union{} && return)
+    cur = get!(s.seen, key, Union{})
     if !closed_type(T)
-        push!(SEEN_UNKNOWN, key)
-        if SLOTS_WHY[]
-            why = get!(Vector{String}, UNKNOWN_STORES, key)
-            length(why) < 6 && push!(why, string(T, "  in  ", STORE_CONTEXT[]))
+        push!(s.seen_unknown, key)
+        if settings.why
+            why = get!(Vector{String}, s.unknown_stores, key)
+            length(why) < 6 && push!(why, string(T, "  in  ", s.store_context))
         end
         return
     end
     new = Union{cur, T}
-    Base.unionlen(new) > SLOT_LIMIT[] ? push!(SEEN_UNKNOWN, key) : (SEEN_SLOTS[key] = new)
+    Base.unionlen(new) > settings.slot_limit ? push!(s.seen_unknown, key) : (s.seen[key] = new)
     for t in Base.uniontypes(T)
-        note_stored_type!(key, t)
+        note_stored_type!(c, key, t)
     end
     return
 end
@@ -232,20 +147,21 @@ end
 # are many (the program that is made of `String`s and `Symbol`s of a `Vector{Any}` has hundreds), which a call over a value that is not known is split by.
 # (the types of the type system, that the code of Base keeps in a `Vector{Any}` while it works with types (`typejoin`), are not values of a program: a call that is made over them is one that is not wanted)
 const REFLECTION_TYPES = Any[TypeVar, Core.TypeofVararg, Core.TypeName, Module, Method, Core.MethodInstance, Core.CodeInstance, Core.SimpleVector]
-function note_stored_type!(key::SlotKey, @nospecialize(T))
-    UNIVERSE_MODE[] === :off && return
+function note_stored_type!(c::Compilation, key::SlotKey, @nospecialize(T))
+    c.settings.universe || return
     (T isa DataType && isconcretetype(T) && !(T <: Function) && !(T <: Type)) || return
     any(R -> T <: R, REFLECTION_TYPES) && return
-    (T in DEFAULT_DISPATCH_CANDIDATES || T in SHOW_CANDIDATES) && return # (registered already)
-    push!(get!(Set{Any}, STORED_BY_SLOT, key), T)
+    T in c.registered.dispatch && return # (registered already)
+    push!(get!(Set{Any}, c.slots.stored_by_slot, key), T)
     return
 end
 
 # the types that were stored in the slots that are open, as types of the universe
-function add_stored_types!()
-    for (key, types) in STORED_BY_SLOT
-        (key in SLOT_OPEN || key in SEEN_UNKNOWN) || continue
-        union!(UNIVERSE_SEEN, types)
+function add_stored_types!(c::Compilation)
+    s = c.slots
+    for (key, types) in s.stored_by_slot
+        (key in s.open || key in s.seen_unknown) || continue
+        union!(s.universe_seen, types)
     end
     return
 end
@@ -284,8 +200,9 @@ end
 const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer) ? x : nothing
 
 # What a statement stores in the slots: `called(x)` is the function (or the type) that the operand `x` is, and `optype(x)` the type of an operand
-function learn_statement!(call::Expr, called, optype)
-    store!(key, operand) = (STORE_OPERAND[] = operand; note_slot_store!(key, optype(operand)))
+function learn_statement!(c::Compilation, call::Expr, called, optype)
+    s = c.slots
+    store!(key, operand) = (s.store_operand = operand; note_slot_store!(c, key, optype(operand)))
     if call.head === :call && length(call.args) >= 3
         f = called(call.args[1])
         if f === Core.memoryrefset!
@@ -295,10 +212,10 @@ function learn_statement!(call::Expr, called, optype)
             # (the value that is stored: the second of the arguments after the reference for `swap` and `setonce`, the third for `replace`)
             key = elem_slot_key(optype(call.args[2]))
             i = f === Core.memoryrefreplace! ? 4 : 3
-            key === nothing || (length(call.args) >= i ? store!(key, call.args[i]) : note_slot_store!(key, Any))
+            key === nothing || (length(call.args) >= i ? store!(key, call.args[i]) : note_slot_store!(c, key, Any))
         elseif f === Core.memoryrefmodify!
             key = elem_slot_key(optype(call.args[2]))
-            key === nothing || note_slot_store!(key, Any) # (what a function that is given gives: not followed)
+            key === nothing || note_slot_store!(c, key, Any) # (what a function that is given gives: not followed)
         elseif f === Core.setfield! || f === Core.swapfield! || f === Core.setfieldonce! || f === Core.replacefield! || f === Core.modifyfield!
             # (the stored value: the third of the arguments after the object, the fourth for `replace`; `modify` stores what a function gives)
             i = f === Core.replacefield! ? 5 : 4
@@ -309,17 +226,17 @@ function learn_statement!(call::Expr, called, optype)
             if name === nothing
                 # (a field that is not known when compiling: any of the fields that hold an unknown type may be it)
                 S isa DataType && isconcretetype(S) && isstructtype(S) &&
-                    for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!((:field, S, fieldname(S, i)), Any); end
+                    for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
             else
                 key = field_slot_key(S, name)
-                key === nothing || (STORE_OPERAND[] = operand; note_slot_store!(key, T))
+                key === nothing || (s.store_operand = operand; note_slot_store!(c, key, T))
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
             P = CC.widenconst(optype(call.args[2]))
             if P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && needs_slot_type(P.parameters[1])
-                note_slot_store!((:elem, P.parameters[1], nothing), Any)
-                note_raw_store!(P.parameters[1])
+                note_slot_store!(c, (:elem, P.parameters[1], nothing), Any)
+                note_raw_store!(c, P.parameters[1])
             end
         end
     elseif call.head === :new && length(call.args) >= 2
@@ -338,14 +255,15 @@ function learn_statement!(call::Expr, called, optype)
         for i in 1:fieldcount(S)
             needs_slot_type(fieldtype(S, i)) || continue
             ET = TT isa DataType && TT <: Tuple && isconcretetype(TT) && i <= length(TT.parameters) ? TT.parameters[i] : Any
-            note_slot_store!((:field, S, fieldname(S, i)), ET)
+            note_slot_store!(c, (:field, S, fieldname(S, i)), ET)
         end
     end
     return
 end
 
 # the stores of a method (its optimized statements, with their types)
-function learn_slots!(src::Core.CodeInfo, mi::Core.MethodInstance)
+function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstance)
+    s = c.slots
     code = src.code
     called = x -> called_function(code, x)
     optype = x -> slot_operand_type(src, mi, x)
@@ -353,46 +271,46 @@ function learn_slots!(src::Core.CodeInfo, mi::Core.MethodInstance)
         st = code[pc]
         call = st isa Expr && st.head === :(=) && length(st.args) == 2 ? st.args[2] : st
         call isa Expr || continue
-        if SLOTS_WHY[]
+        if c.settings.why
             defs = [string("%", a.id, " = ", first(string(code[a.id]), 150), " :: ", src.ssavaluetypes[a.id]) for a in call.args if a isa Core.SSAValue]
-            STORE_CONTEXT[] = string(mi, " #", pc, ": ", first(string(call), 160), "   WHERE ", join(defs, " ; "))
+            s.store_context = string(mi, " #", pc, ": ", first(string(call), 160), "   WHERE ", join(defs, " ; "))
         end
-        learn_statement!(call, called, optype)
+        learn_statement!(c, call, called, optype)
     end
     return
 end
 
 # The stores of a method as they are before the inliner and the scalar replacement have been at it (a `Pair` that only holds the value that is read from a `Dict` for a moment is not there afterwards, and the type of its field is
 # read all the same), as facts about the method that are kept, so that the method is not looked at again when it is taken from the cache: (the method, the key of the cache) => the stores as (slot, type)
+# (it is a cache of what is true of a method for a key of the inference cache, which is made of all that inference depends on: it is kept for as long as what is inferred is, which is longer than a compilation)
 const SLOT_FACTS = Dict{Tuple{Core.MethodInstance,Int},Vector{Tuple{SlotKey,Any}}}()
-const FACTS_SINK = Ref{Union{Nothing,Vector{Tuple{SlotKey,Any}}}}(nothing)
-const PASS_PARAMS_KEY = Ref(0)
 
-function record_slot_facts!(ir::CC.IRCode, mi::Core.MethodInstance)
+function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstance)
+    s = c.slots
     facts = Tuple{SlotKey,Any}[]
-    FACTS_SINK[] = facts
+    s.facts_sink = facts
     try
         called = x -> CC.singleton_type(CC.argextype(x, ir))
         optype = x -> CC.widenconst(CC.argextype(x, ir))
         for pc in 1:length(ir.stmts)
             st = ir.stmts[pc][:stmt]
-            if SLOTS_WHY[]
-                STORE_OPERAND[] = nothing
-                STORE_CONTEXT[] = string(mi, " #", pc, ": ", first(string(st), 120))
+            if c.settings.why
+                s.store_operand = nothing
+                s.store_context = string(mi, " #", pc, ": ", first(string(st), 120))
             end
-            st isa Expr && learn_statement!(st, called, optype)
+            st isa Expr && learn_statement!(c, st, called, optype)
         end
-        note_universe_statements!((ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
-        note_slots_in_constants!(ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
+        note_universe_statements!(c, (ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
+        note_slots_in_constants!(c, ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
     finally
-        FACTS_SINK[] = nothing
+        s.facts_sink = nothing
     end
-    SLOT_FACTS[(mi, PASS_PARAMS_KEY[])] = facts
+    SLOT_FACTS[(mi, c.key)] = facts
     return
 end
 
 # The facts of every method that the code that was compiled depends on, which the inlined ones are among (the edges of a method are the methods that it calls and those that were inlined into it)
-function replay_reachable_facts!(root::Core.CodeInstance)
+function replay_reachable_facts!(c::Compilation, root::Core.CodeInstance)
     seen = Base.IdSet{Any}()
     stack = Any[root]
     while !isempty(stack)
@@ -400,41 +318,41 @@ function replay_reachable_facts!(root::Core.CodeInstance)
         ci in seen && continue
         push!(seen, ci)
         ci isa Core.CodeInstance || continue
-        ci.def isa Core.MethodInstance && replay_slot_facts!(ci.def)
+        ci.def isa Core.MethodInstance && replay_slot_facts!(c, ci.def)
         for e in ci.edges
             e isa Core.CodeInstance && push!(stack, e)
-            e isa Core.MethodInstance && replay_slot_facts!(e)
+            e isa Core.MethodInstance && replay_slot_facts!(c, e)
         end
     end
     return
 end
 
-function replay_slot_facts!(mi::Core.MethodInstance)
-    facts = get(SLOT_FACTS, (mi, PASS_PARAMS_KEY[]), nothing)
+function replay_slot_facts!(c::Compilation, mi::Core.MethodInstance)
+    s = c.slots
+    facts = get(SLOT_FACTS, (mi, c.key), nothing)
     facts === nothing && return
     for (key, T) in facts
-        key[1] === :raw ? push!(RAW_STORE_TYPES, key[2]) : key[1] === :universe ? push!(UNIVERSE_SEEN, key[2]) : key[1] === :truncated ? (SCAN_TRUNCATED[] = true) : note_slot_store!(key, T)
+        key[1] === :raw ? push!(s.raw_store_types, key[2]) : key[1] === :universe ? push!(s.universe_seen, key[2]) : key[1] === :truncated ? (s.scan_truncated = true) : note_slot_store!(c, key, T)
     end
     return
 end
 
-note_raw_store!(@nospecialize(T)) = FACTS_SINK[] === nothing ? push!(RAW_STORE_TYPES, T) : push!(FACTS_SINK[], ((:raw, T, nothing), Any))
+note_raw_store!(c::Compilation, @nospecialize(T)) = c.slots.facts_sink === nothing ? push!(c.slots.raw_store_types, T) : push!(c.slots.facts_sink, ((:raw, T, nothing), Any))
 
 function CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState{<:OverridesInterpreter}, propagate_inbounds::Bool)
     mi = ir.debuginfo.def
-    mi isa Core.MethodInstance && SLOTS_MODE[] !== :off && record_slot_facts!(ir, mi)
+    c = compilation()
+    mi isa Core.MethodInstance && c.slots.mode !== :off && record_slot_facts!(c, ir, mi)
     return @invoke CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState, propagate_inbounds::Bool)
 end
 
 # What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type, and the types of what is in them (for the universe). A constant is
 # looked at with a list of what is to be looked at (not by calls of itself: what a program embeds can be a long chain, or deep, as a graph of objects is), each mutable object once (it can refer to itself), and as many objects
 # as `SCAN_BUDGET`. One that is larger, or a struct that has more than `SCAN_FIELDS` fields, is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls
-# on what is read from them are made over the registered types. What is found in a constant is kept for the compilation (`SCAN_CACHE`): the same constant is the operand of many statements.
+# on what is read from them are made over the registered types. What is found in a constant is kept for the compilation (`SlotState.scan_cache`): the same constant is the operand of many statements.
 const SCAN_BUDGET = 200_000
 const SCAN_FIELDS = 64
-const SCAN_TRUNCATED = Ref(false)
-const SCAN_CACHE = IdDict{Any,Vector{Tuple{SlotKey,Any}}}()
-note_truncated!() = FACTS_SINK[] === nothing ? (SCAN_TRUNCATED[] = true) : push!(FACTS_SINK[], ((:truncated, nothing, nothing), Any))
+note_truncated!(c::Compilation) = c.slots.facts_sink === nothing ? (c.slots.scan_truncated = true) : push!(c.slots.facts_sink, ((:truncated, nothing, nothing), Any))
 
 scan_leaf(@nospecialize(x)) = x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
 
@@ -468,7 +386,8 @@ function scan_facts(@nospecialize(x0))
             for e in x
                 push!(stack, e)
             end
-        elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName)
+        elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName) &&
+               !(x isa Task) # (a task is the state of the process that compiles: its scope, its storage, the tasks that wait for it. The tasks of a program are made by the program (see tasks.jl). `Base.roottask` is a constant of code that waits)
             S = typeof(x)
             if fieldcount(S) > SCAN_FIELDS
                 push!(facts, ((:truncated, nothing, nothing), Any))
@@ -485,15 +404,15 @@ function scan_facts(@nospecialize(x0))
     return collect(facts)
 end
 
-function note_slots_in!(@nospecialize(x))
+function note_slots_in!(c::Compilation, @nospecialize(x))
     if scan_leaf(x)
-        note_universe!(typeof(x))
+        note_universe!(c, typeof(x))
         return
     end
-    facts = get!(() -> scan_facts(x), SCAN_CACHE, x)
+    facts = get!(() -> scan_facts(x), c.slots.scan_cache, x)
     for (key, T) in facts
         k = key[1]
-        k === :universe ? note_universe!(key[2]) : k === :truncated ? note_truncated!() : note_slot_store!(key, T)
+        k === :universe ? note_universe!(c, key[2]) : k === :truncated ? note_truncated!(c) : note_slot_store!(c, key, T)
     end
     return
 end
@@ -522,12 +441,12 @@ function constant_operand(a)
     return a isa Core.SSAValue || a isa Core.Argument || a isa Expr ? nothing : a
 end
 
-function note_slots_in_constants!(code)
+function note_slots_in_constants!(c::Compilation, code)
     for st in code
         for a in statement_operands(st)
             v = constant_operand(a)
             v === nothing && continue
-            note_slots_in!(v)
+            note_slots_in!(c, v)
         end
     end
     return
@@ -538,119 +457,125 @@ end
 # Run after inference (the types of all that is reached are in the cache, with the optimized code: what `juliac --trim` looks at, so that what is found is of what the program reaches, and does not depend on which methods were
 # inferred in this pass and which were taken from the cache): the stores of the slots in the code that the program reaches, and what the reads of them are given in the next pass (`update_slot_types!`), until what is found is
 # what was used
-function analyze_slots!(interp, root)
-    SLOTS_MODE[] === :off && return
-    (isempty(SLOT_TYPES) && !dispatch_was_used() && SLOTS_MODE[] !== :observe) && return
+function analyze_slots!(c::Compilation, interp, root)
+    s = c.slots
+    s.mode === :off && return
+    (isempty(s.types) && !dispatch_was_used(c) && s.mode !== :observe) && return
     # (what the roots that were made before in this pass stored is kept: a `@cfunction` is a root of its own, and the slots are those of the whole program)
     for (ci, src) in GPUCompiler.CompilerCaching.get_codeinfos(interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
-        learn_slots!(src, ci.def)
-        note_universe_statements!(src.ssavaluetypes isa Vector ? src.ssavaluetypes : Any[], src.code, ci.def)
-        note_slots_in_constants!(src.code)
+        learn_slots!(c, src, ci.def)
+        note_universe_statements!(c, src.ssavaluetypes isa Vector ? src.ssavaluetypes : Any[], src.code, ci.def)
+        note_slots_in_constants!(c, src.code)
     end
-    replay_reachable_facts!(root)
-    if SCAN_TRUNCATED[]
+    replay_reachable_facts!(c, root)
+    if s.scan_truncated
         # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
         @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
-        had_types = !isempty(SLOT_TYPES)
-        empty!(SLOT_TYPES)
-        SLOTS_MODE[] = :off
+        had_types = !isempty(s.types)
+        empty!(s.types)
+        s.mode = :off
         had_types && throw(SlotsChanged())
         return
     end
-    if !isempty(RAW_STORE_TYPES)
-        for k in union(collect(keys(SEEN_SLOTS)), collect(keys(SLOT_TYPES)))
+    if !isempty(s.raw_store_types)
+        for k in union(collect(keys(s.seen)), collect(keys(s.types)))
             declared = k[1] === :elem ? k[2] : fieldtype(k[2], k[3])
-            declared in RAW_STORE_TYPES && push!(SEEN_UNKNOWN, k)
+            declared in s.raw_store_types && push!(s.seen_unknown, k)
         end
     end
-    SLOTS_MODE[] === :observe && return
-    if SLOTS_WHY[]
-        if !isempty(UNKNOWN_CENSUS)
-            by = Dict{SlotKey,Vector{Int}}() # (slot) => [stores of a type that is not known, of which a parameter of the method]
-            example = Dict{SlotKey,String}()
-            for (k, param, ctx) in UNKNOWN_CENSUS
-                c = get!(by, k, [0, 0]); c[1] += 1; c[2] += param
-                haskey(example, k) || (example[k] = ctx)
-            end
-            println(stderr, "== unknown stores found while looking at the code (all methods): ", length(UNKNOWN_CENSUS), ", of which the value is a parameter of the method: ", count(c -> c[2], UNKNOWN_CENSUS))
-            for (k, c) in sort!(collect(by); by = p -> -p[2][1])[1:min(end, 12)]
-                println(stderr, "   ", k[1], " ", k[2], " ", k[3], ": ", c[1], " stores, ", c[2], " of a parameter")
-                println(stderr, "        e.g. ", first(example[k], 260))
-            end
-            for (k, param, ctx) in first(UNKNOWN_CENSUS, 6)
-                println(stderr, "     e.g. ", param ? "[parameter] " : "", first(ctx, 200))
-            end
-        end
-        println(stderr, "== slots, pass ", SLOT_PASSES[], ": ", length(SLOT_TYPES), " known, ", length(SLOT_OPEN), " open; unknown stores in ", length(SEEN_UNKNOWN), " slots")
-        for (k, T) in SEEN_SLOTS
-            println(stderr, "   seen ", k[1], " ", k[2], " ", k[3], " => ", T)
-        end
-        for k in SEEN_UNKNOWN
-            println(stderr, "   ", k[1], " ", k[2], " ", k[3], k in SLOT_OPEN ? "  (open already)" : haskey(SLOT_TYPES, k) ? "  (known: $(Base.unionlen(SLOT_TYPES[k])) types)" : "  (not known yet)")
-            for w in get(UNKNOWN_STORES, k, String[])
-                println(stderr, "        ", first(w, 300))
-            end
-        end
-    end
-    changed = update_slot_types!()
+    s.mode === :observe && return
+    c.settings.why && report_why(c)
+    changed = update_slot_types!(c)
     # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
-    if UNIVERSE_MODE[] !== :off && dispatch_was_used()
-        add_stored_types!()
-        new = Any[t for t in UNIVERSE_SEEN if !(t in UNIVERSE_USED)]
-        length(UNIVERSE_USED) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(UNIVERSE_USED))])
+    if c.settings.universe && dispatch_was_used(c)
+        add_stored_types!(c)
+        new = Any[t for t in s.universe_seen if !(t in s.universe)]
+        length(s.universe) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(s.universe))])
         if !isempty(new)
-            union!(UNIVERSE_USED, new)
-            UNIVERSE_VERSION[] += 1
-            empty!(UNIVERSE_EXTRAS)
-            empty!(REGISTERED_UNIONS)
+            union!(s.universe, new)
+            empty!(s.universe_extras)
             changed = true
         end
     end
+    @debug "slots pass" pass = c.pass slot_passes = s.passes changed known = length(s.types) open = length(s.open) unknown = length(s.seen_unknown) universe = length(s.universe) _id = :static_slots
     changed || return
-    SLOT_PASSES[] += 1
-    if SLOT_PASSES[] > SLOT_PASS_LIMIT
+    s.passes += 1
+    if s.passes > SLOT_PASS_LIMIT
         # (it does not settle: the compilation is made as if there were no slots)
-        empty!(SLOT_TYPES)
-        SLOTS_MODE[] = :off
+        empty!(s.types)
+        s.mode = :off
     end
     throw(SlotsChanged())
 end
 
+# (for `STATIC_RUNTIME_SLOTS_WHY`: why the slots are given up, as text on the error output)
+function report_why(c::Compilation)
+    s = c.slots
+    if !isempty(s.unknown_census)
+        by = Dict{SlotKey,Vector{Int}}() # (slot) => [stores of a type that is not known, of which a parameter of the method]
+        example = Dict{SlotKey,String}()
+        for (k, param, ctx) in s.unknown_census
+            e = get!(by, k, [0, 0]); e[1] += 1; e[2] += param
+            haskey(example, k) || (example[k] = ctx)
+        end
+        println(stderr, "== unknown stores found while looking at the code (all methods): ", length(s.unknown_census), ", of which the value is a parameter of the method: ", count(e -> e[2], s.unknown_census))
+        for (k, e) in sort!(collect(by); by = p -> -p[2][1])[1:min(end, 12)]
+            println(stderr, "   ", k[1], " ", k[2], " ", k[3], ": ", e[1], " stores, ", e[2], " of a parameter")
+            println(stderr, "        e.g. ", first(example[k], 260))
+        end
+        for (k, param, ctx) in first(s.unknown_census, 6)
+            println(stderr, "     e.g. ", param ? "[parameter] " : "", first(ctx, 200))
+        end
+    end
+    println(stderr, "== slots, pass ", s.passes, ": ", length(s.types), " known, ", length(s.open), " open; unknown stores in ", length(s.seen_unknown), " slots")
+    for (k, T) in s.seen
+        println(stderr, "   seen ", k[1], " ", k[2], " ", k[3], " => ", T)
+    end
+    for k in s.seen_unknown
+        println(stderr, "   ", k[1], " ", k[2], " ", k[3], k in s.open ? "  (open already)" : haskey(s.types, k) ? "  (known: $(Base.unionlen(s.types[k])) types)" : "  (not known yet)")
+        for w in get(s.unknown_stores, k, String[])
+            println(stderr, "        ", first(w, 300))
+        end
+    end
+    return
+end
+
 function GPUCompiler.drive_inference!(interp::OverridesInterpreter, mi::Core.MethodInstance)
     root = @invoke GPUCompiler.drive_inference!(interp::CC.AbstractInterpreter, mi::Core.MethodInstance)
-    root isa Core.CodeInstance && analyze_slots!(interp, root)
+    root isa Core.CodeInstance && analyze_slots!(compilation(), interp, root)
     return root
 end
 
 # The types that the reads of the slots are given next, from what was stored in them in the pass that was made: the first time, the types that are known of what was stored (what is stored that is read from a slot
 # is of a type that is not known in that pass, as an `Any`, and is not counted); after that, what was stored with the reads as they were given has to be of those types: if it is, they are the ones; if it is of other types, those
 # are added; if something that is of a type that is not known is stored, the slot is given up. Returns whether any changed.
-function update_slot_types!()
+function update_slot_types!(c::Compilation)
+    s = c.slots
     changed = false
-    for (k, T) in SEEN_SLOTS
-        k in SLOT_OPEN && continue
-        used = get(SLOT_TYPES, k, nothing)
+    for (k, T) in s.seen
+        k in s.open && continue
+        used = get(s.types, k, nothing)
         if used === nothing
             T === Union{} && continue
-            SLOT_TYPES[k] = T
+            s.types[k] = T
             changed = true
-        elseif k in SEEN_UNKNOWN
-            delete!(SLOT_TYPES, k)
-            push!(SLOT_OPEN, k)
+        elseif k in s.seen_unknown
+            delete!(s.types, k)
+            push!(s.open, k)
             changed = true
         elseif T === Union{} || T === used
             continue
         elseif T <: used
-            SLOT_TYPES[k] = T
+            s.types[k] = T
             changed = true
         else
             new = Union{used, T}
-            if Base.unionlen(new) > SLOT_LIMIT[]
-                delete!(SLOT_TYPES, k)
-                push!(SLOT_OPEN, k)
+            if Base.unionlen(new) > c.settings.slot_limit
+                delete!(s.types, k)
+                push!(s.open, k)
             else
-                SLOT_TYPES[k] = new
+                s.types[k] = new
             end
             changed = true
         end
@@ -658,22 +583,23 @@ function update_slot_types!()
     return changed
 end
 
-# the type that a read of a slot is given, or `nothing`
 # The type of a read from a slot of the types that were stored in it, as precise as what inference had for it before (`rt`): the part of it that is of the types that the declared type has
 function refined_read(@nospecialize(T), @nospecialize(rt))
     R = typeintersect(T, CC.widenconst(rt))
     return R === Union{} ? rt : R
 end
 
-function slot_read_type(key)
-    assumed = get(ASSUMED_SLOTS, key, nothing) # (a type that is stated: see assume.jl)
+# the type that a read of a slot is given, or `nothing`
+function slot_read_type(c::Compilation, key)
+    assumed = get(c.registered.fields, key, nothing) # (a type that is stated: see assume.jl)
     assumed === nothing || return assumed
-    return SLOTS_MODE[] === :on ? get(SLOT_TYPES, key, nothing) : nothing
+    return c.slots.mode === :on ? get(c.slots.types, key, nothing) : nothing
 end
 
-# What was found, as lines to read: the slot, and the types (or that they are not known)
-function slots_report(io::IO = stdout)
-    for (key, T) in sort!(collect(SEEN_SLOTS); by = p -> string(p[1]))
+# What was found, as lines to read: the slot, and the types (or that they are not known). Of the last compilation, unless one is given.
+function slots_report(io::IO = stdout, c::Union{Nothing,Compilation} = LAST_COMPILATION[])
+    c === nothing && return
+    for (key, T) in sort!(collect(c.slots.seen); by = p -> string(p[1]))
         what = key[1] === :elem ? string("elements of Memory{", key[2], "}") : string(key[2], ".", key[3])
         println(io, rpad(what, 60), T === Any ? "NOT KNOWN" : string(Base.unionlen(T), " types: ", T))
     end

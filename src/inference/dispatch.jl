@@ -36,7 +36,7 @@ const SPLIT_LIMIT = Ref(64)
 function GPUCompiler.inference_params(job::GPUCompiler.CompilerJob{<:StaticCompiler.StaticCompilerTarget, OverridesParams})
     base = @invoke GPUCompiler.inference_params(job::GPUCompiler.CompilerJob)
     job.config.target.method_table === method_table || return base
-    return CC.InferenceParams(base; max_union_splitting = max(base.max_union_splitting, SPLIT_LIMIT[]))
+    return CC.InferenceParams(base; max_union_splitting = max(base.max_union_splitting, job.config.params.split_limit))
 end
 
 ## The interpreter of our compilations
@@ -83,35 +83,32 @@ add_dispatch_candidates!(types::Type...) = add_show_candidates!(types...)
 
 # Types that a call is made over only when the argument is of a type that they are instances of (`Dates.DatePart{'y'}` for `Dates.DatePart`), and not for `Any`: they are
 # not types that a value of `Any` is likely to have, and a call with two arguments of `Any` is split over the pairs of the types, which there is a limit to (`SPLIT_LIMIT`).
-const FAMILY_CANDIDATES = Type[]
 function add_family_candidates!(types::Type...)
     for T in types
         isconcretetype(T) || throw(ArgumentError("$T is not a concrete type"))
-        if !(T in FAMILY_CANDIDATES)
-            push!(FAMILY_CANDIDATES, T)
-            CANDIDATES_VERSION[] += 1
-        end
     end
+    register_family!(types)
     return nothing
 end
 
 # (without `Vector{Any}`, which `show` needs for lists in lists, but which has methods of arithmetic and the like, that call for much of what is
 # not there, for every call with an `Any` that is a number: register it if you have lists in the values of the calls that you make)
 const DEFAULT_DISPATCH_CANDIDATES = Type[T for T in DEFAULT_SHOW_CANDIDATES if T !== Vector{Any}]
-dispatch_candidates() = unique!(vcat(DEFAULT_DISPATCH_CANDIDATES, SHOW_CANDIDATES))
 
 ## the unions that an abstract type is made
 
 # The union of the concrete subtypes of the abstract type `T`, or `nothing` if there is no such type, or too many of them, or
 # we can't tell (a subtype that is not a concrete `DataType` and is not abstract). The types that are loaded now are
 # the closed world of the program that is compiled now: (it is looked up again in a newer world.)
-const CLOSED_SUBTYPES = Dict{Tuple{Any,UInt},Any}()
-function listed_union(@nospecialize(T))
+# (what the subtypes of a type are is a fact of the world, and of the limit that they are listed to: so it is kept for all compilations, by the type, the world and the limit; finding them is what takes the time)
+const CLOSED_SUBTYPES = Dict{Tuple{Any,UInt,Int},Any}()
+function listed_union(c::Compilation, @nospecialize(T))
     T isa DataType && isabstracttype(T) && T !== Any || return nothing
     # (the types of functions are not listed: there is one for each function and closure, and finding them all, which `subtypes(Function)` does, takes more than a minute the first time
     # in a process that has this package loaded. The functions that a call can have are the ones of closures.jl.)
     T <: Function && return nothing
-    get!(CLOSED_SUBTYPES, (T, Base.get_world_counter())) do
+    limit = c.settings.dispatch_limit
+    get!(CLOSED_SUBTYPES, (T, Base.get_world_counter(), limit)) do
         found = DataType[]
         function walk(S)
             for s in subtypes(S)
@@ -123,46 +120,44 @@ function listed_union(@nospecialize(T))
                 else
                     return false
                 end
-                length(found) <= DISPATCH_LIMIT[] || return false
+                length(found) <= limit || return false
             end
             return true
         end
-        walk(T) && 2 <= length(found) <= DISPATCH_LIMIT[] ? Union{found...} : nothing
+        walk(T) && 2 <= length(found) <= limit ? Union{found...} : nothing
     end
 end
 
 # The union of the registered types that are subtypes of `T` (`Any`, or an abstract type that can't be listed), or `nothing`. For a call of `show`, which is also made
 # for a `Vector{Any}` in a `Vector{Any}`, they are the types that `show` is registered for (see `add_show_candidates!`): those of calls in general, and `Vector{Any}`.
-const REGISTERED_UNIONS = Dict{Any,Any}() # (kept for what the lists are: the union of a few hundred types is made for each call of a program that has many, and is the same for all of them; emptied with `UNIVERSE_EXTRAS`)
-function registered_union(@nospecialize(T), show::Bool = false; universe::Bool = true)
-    key = (T, show, universe, UNIVERSE_MODE[], UNIVERSE_VERSION[], CANDIDATES_VERSION[], length(SHOW_CANDIDATES), length(FAMILY_CANDIDATES))
-    cached = get(REGISTERED_UNIONS, key, missing)
+function registered_union(c::Compilation, @nospecialize(T), show::Bool = false; universe::Bool = true)
+    key = (T, show, universe) # (the union of a type is the same for a whole pass: what it is made of is what the compilation was at its start, and the universe, which changes between passes)
+    cached = get(c.dispatch.unions, key, missing)
     cached === missing || return cached
-    return REGISTERED_UNIONS[key] = registered_union_(T, show, universe)
+    return c.dispatch.unions[key] = registered_union_(c, T, show, universe)
 end
-function registered_union_(@nospecialize(T), show::Bool, universe::Bool)
+function registered_union_(c::Compilation, @nospecialize(T), show::Bool, universe::Bool)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its instances are of the types of it that were registered)
     T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll) || return nothing # (`Type{X}` is not an abstract type of objects)
-    candidates = show ? show_candidates() : dispatch_candidates()
-    T === Any || (candidates = vcat(candidates, FAMILY_CANDIDATES))
+    candidates = show ? c.registered.show : c.registered.dispatch
+    T === Any || (candidates = vcat(candidates, c.registered.family))
     found = Type[C for C in candidates if C <: T]
-    if universe && !show && UNIVERSE_MODE[] !== :off
+    if universe && !show && c.settings.universe
         # (the types that the program makes, that are not Julia's own: see slots.jl. How many there are is the limit that the call is split in, once the methods are looked at (`close_abstract_arguments`))
-        for t in universe_extras(T)
+        for t in universe_extras(c, T)
             t in found || push!(found, t)
         end
         return isempty(found) ? nothing : Union{found...}
     end
-    1 <= length(found) <= SPLIT_LIMIT[] || return nothing
+    1 <= length(found) <= c.settings.split_limit || return nothing
     return Union{found...}
 end
 
-# The calls that were made over the registered types, for the warning: function, and the types of its arguments
-const REGISTERED_CALLS = Dict{String,Int}()
+# (The calls that were made over the registered types, for the warning: function, and the types of its arguments: `DispatchState.registered_calls`.)
 
 # The arguments of a call with the abstract types made unions, and the `Tuple` of their types (that of the function comes first, and
 # is not changed), or `nothing` if there is none to change; and whether one of them was made of the registered types
-function close_abstract_arguments(interp, arginfo::CC.ArgInfo, max_methods::Int)
+function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, max_methods::Int)
     argtypes = copy(arginfo.argtypes)
     changed = false
     registered = false
@@ -170,22 +165,22 @@ function close_abstract_arguments(interp, arginfo::CC.ArgInfo, max_methods::Int)
     for i in 2:length(argtypes)
         argtypes[i] isa Core.TypeofVararg && continue # (a call with the arguments that are the rest of a splat: not known)
         T = CC.widenconst(argtypes[i]) # (a constant is of a concrete type; the rest of what is known of an argument is lost)
-        u = listed_union(T)
+        u = listed_union(c, T)
         reg = false
         if u === nothing
-            u = registered_union(T, isshow)
+            u = registered_union(c, T, isshow)
             u === nothing && continue
             reg = true
             # (only the types that some method fits are kept: the others are `MethodError`s whatever the program does, and each of them counts for the limit on the number of cases that a call is split in)
-            u = with_methods(interp, arginfo, i, u, max_methods)
-            if Base.unionlen(u) > SPLIT_LIMIT[]
+            u = with_methods(c, interp, arginfo, i, u, max_methods)
+            if Base.unionlen(u) > c.settings.split_limit
                 # (too many with the types that the program makes: the registered ones only, as without them)
-                u = registered_union(T, isshow; universe = false)
+                u = registered_union(c, T, isshow; universe = false)
                 u === nothing && continue
-                u = with_methods(interp, arginfo, i, u, max_methods)
+                u = with_methods(c, interp, arginfo, i, u, max_methods)
             end
         else
-            u = with_methods(interp, arginfo, i, u, max_methods)
+            u = with_methods(c, interp, arginfo, i, u, max_methods)
         end
         registered |= reg
         argtypes[i] = u
@@ -200,21 +195,19 @@ end
 # if one has. The methods of the function are looked up once (a function that has more than `METHOD_FILTER_LIMIT` is not filtered), and a member fits a method if the types intersect:
 # what Julia does to find the methods, without looking up each member (which took much longer than what is saved).
 const METHOD_FILTER_LIMIT = 64
-const FILTER_BY_METHODS = Ref(true) # `STATIC_RUNTIME_METHOD_FILTER=0` turns it off
-const FUNCTION_METHOD_SIGS = Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}()
 
-function method_signatures(interp, @nospecialize(ft), n::Int)
+function method_signatures(c::Compilation, interp, @nospecialize(ft), n::Int)
     world = CC.get_inference_world(interp)
-    return get!(FUNCTION_METHOD_SIGS, (world, ft, n)) do
+    return get!(c.dispatch.signatures, (world, ft, n)) do
         found = CC.findall(Tuple{ft, Vararg{Any,n}}, CC.method_table(interp); limit = METHOD_FILTER_LIMIT)
         found === nothing || length(found.matches) > METHOD_FILTER_LIMIT ? nothing : Any[m.method.sig for m in found.matches]
     end
 end
 
-function with_methods(interp, arginfo::CC.ArgInfo, i::Int, u, max_methods::Int)
-    (FILTER_BY_METHODS[] && Base.unionlen(u) > 1) || return u
+function with_methods(c::Compilation, interp, arginfo::CC.ArgInfo, i::Int, u, max_methods::Int)
+    (c.settings.filter_by_methods && Base.unionlen(u) > 1) || return u
     ft = CC.widenconst(arginfo.argtypes[1])
-    sigs = method_signatures(interp, ft, length(arginfo.argtypes) - 1)
+    sigs = method_signatures(c, interp, ft, length(arginfo.argtypes) - 1)
     (sigs === nothing || isempty(sigs)) && return u
     others = Any[a isa Core.TypeofVararg ? Any : CC.widenconst(a) for a in arginfo.argtypes]
     kept = Any[]
@@ -252,8 +245,8 @@ method_matches(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::I
     CC.find_method_matches(interp, arginfo.argtypes, atype; max_methods, fargs = arginfo.fargs)
 
 # whether some method fits a call with these argument types: by the signatures of the methods of the function (looked up once: see `method_signatures`) when it has few, and else as inference finds them
-function some_method_fits(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
-    sigs = FILTER_BY_METHODS[] ? method_signatures(interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
+function some_method_fits(c::Compilation, interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
+    sigs = c.settings.filter_by_methods ? method_signatures(c, interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
     sigs === nothing || return any(sig -> typeintersect(atype, sig) !== Union{}, sigs)
     matches = method_matches(interp, arginfo, atype, max_methods)
     return matches isa CC.FailedMethodMatch || !isempty(matches.applicable) # (too many to count: some fit)
@@ -283,30 +276,32 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
                                      @nospecialize(atype), vtypes::Union{Nothing,Vector{CC.VarState}},
                                      sv::Union{CC.IRInterpretationState{I},CC.InferenceState{I}} where I<:CC.AbstractInterpreter,
                                      max_methods::Int)
+    c = compilation()
     registered = false
-    closed = close_abstract_arguments(interp, arginfo, max_methods)
+    closed = close_abstract_arguments(c, interp, arginfo, max_methods)
     # (a call that none of the types that the arguments are closed to has a method for is left as it is: it is not known what the
     # arguments are, and the result of the call is not that it is an error, which would make what calls it one too)
-    closed === nothing || some_method_fits(interp, closed[1], closed[2], max_methods) || (closed = nothing)
+    closed === nothing || some_method_fits(c, interp, closed[1], closed[2], max_methods) || (closed = nothing)
     if closed !== nothing && dispatch_needed(interp, arginfo, atype, max_methods)
         original = arginfo.argtypes
         arginfo, atype, registered = closed
         note_dispatch_split!(f, original, arginfo.argtypes, registered)
-        max_methods = max(max_methods, SPLIT_LIMIT[]) # (one method for each type, at most)
+        max_methods = max(max_methods, c.settings.split_limit) # (one method for each type, at most)
         if registered
             fname = f isa Function ? nameof(f) : f isa Type ? f : nameof(typeof(f))
             key = string(fname, "(", join(("::" * (T isa Core.TypeofVararg ? string(T) : string(CC.widenconst(T))) for T in original[2:end]), ", "), ")")
-            REGISTERED_CALLS[key] = get(REGISTERED_CALLS, key, 0) + 1
-            note_dispatch_used!()
+            calls = c.dispatch.registered_calls
+            calls[key] = get(calls, key, 0) + 1
+            note_dispatch_used!(c)
         end
     end
     # (an argument of an abstract type that is not split: what the slots of the program hold may make it a type that is, see slots.jl)
-    if !registered && !REGISTERED_DISPATCH_USED[] && SLOTS_MODE[] !== :off
+    if !registered && !c.dispatch.registered_used && c.slots.mode !== :off
         for T in arginfo.argtypes[2:end]
             T isa Core.TypeofVararg && continue
             T = CC.widenconst(T)
             if T isa DataType && isabstracttype(T) && !(T <: Function) && !(T <: Type)
-                note_dispatch_used!()
+                note_dispatch_used!(c)
                 break
             end
         end
@@ -325,22 +320,21 @@ end
 # is inferred for a `NamedTuple` that has no fields known, so what it does with them (`nfields`, `getfield(nt, i)`, `fieldname(typeof(nt), i)`) is not known, which is a dynamic call for each. A program that is compiled has
 # the types of the call, and needs what they give, since there is no runtime to look up what is not known: so the calls are inferred for the types that they have. The flag of the method is cleared for as long as a compilation runs
 # (`restore_nospecializeinfer!` puts it back) and its inference is that of any method. `STATIC_RUNTIME_NOSPECIALIZEINFER=0` leaves them as they are.
-const PRECISE_NOSPECIALIZEINFER = Ref(true)
-const CLEARED_NOSPECIALIZEINFER = Method[]
-
+# (the methods that were cleared are the compilation's, and are put back when it ends: `Compilation.nospecializeinfer`)
 function CC.abstract_call_method(interp::OverridesInterpreter, method::Method, @nospecialize(sig), sparams::Core.SimpleVector, hardlimit::Bool, si::CC.StmtInfo, sv::CC.AbsIntState)
-    if PRECISE_NOSPECIALIZEINFER[] && method.nospecializeinfer
+    c = compilation()
+    if c.settings.precise_nospecializeinfer && method.nospecializeinfer
         method.nospecializeinfer = false
-        push!(CLEARED_NOSPECIALIZEINFER, method)
+        push!(c.nospecializeinfer, method)
     end
     return @invoke CC.abstract_call_method(interp::CC.AbstractInterpreter, method::Method, sig::Any, sparams::Core.SimpleVector, hardlimit::Bool, si::CC.StmtInfo, sv::CC.AbsIntState)
 end
 
-function restore_nospecializeinfer!()
-    for m in CLEARED_NOSPECIALIZEINFER
+function restore_nospecializeinfer!(c::Compilation)
+    for m in c.nospecializeinfer
         m.nospecializeinfer = true
     end
-    empty!(CLEARED_NOSPECIALIZEINFER)
+    empty!(c.nospecializeinfer)
     return
 end
 
@@ -366,12 +360,13 @@ end
 # What the compile that has just been done did over the registered types, as a debug message (shown with
 # `JULIA_DEBUG=StaticRuntime`): a program that has a value of a type that is not one of them aborts when it
 # reaches such a call (and says which one)
-function report_registered_dispatch()
-    isempty(REGISTERED_CALLS) && return
-    calls = sort!(collect(keys(REGISTERED_CALLS)))
-    empty!(REGISTERED_CALLS)
+function report_registered_dispatch(c::Compilation)
+    registered = c.dispatch.registered_calls
+    isempty(registered) && return
+    calls = sort!(collect(keys(registered)))
+    empty!(registered)
     shown = join(("`$c`" for c in first(calls, 5)), ", ") * (length(calls) > 5 ? ", and $(length(calls) - 5) more" : "")
-    @debug "Dispatch on `Any` or on an abstract type with unlisted subtypes was resolved over registered types: a value of another type that reaches such a call aborts the program with a MethodError. Add types with `add_dispatch_candidates!`." calls = shown candidates = join(string.(dispatch_candidates()), ", ") _id = :static_dispatch_candidates
+    @debug "Dispatch on `Any` or on an abstract type with unlisted subtypes was resolved over registered types: a value of another type that reaches such a call aborts the program with a MethodError. Add types with `add_dispatch_candidates!`." calls = shown candidates = join(string.(c.registered.dispatch), ", ") _id = :static_dispatch_candidates
 end
 
 ## `invokelatest`
@@ -417,8 +412,9 @@ end
 # (before optimizing: the statements of `invokelatest` are the calls that inference took them for)
 function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
     code = opt.src.code
-    note_functions_of!(code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
-    caller.linfo isa Core.MethodInstance && learn_boxes!(opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
+    c = compilation()
+    note_functions_of!(c.closures, code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
+    caller.linfo isa Core.MethodInstance && learn_boxes!(c.boxes, opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
     for pc in eachindex(code)
         st = code[pc]
         # (a call that is assigned to a variable is the second of the arguments of `=`)
@@ -447,8 +443,9 @@ end
 const FIELD_BUILTINS = (Core.getfield, Core.setfield!)
 
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
-    ir = assert_assumed_returns!(ir, opt.linfo)
-    (CHECK_SLOT_TYPES[] || !isempty(ASSUMED_SLOTS) || !isempty(EMBEDDED_SLOTS)) && (ir = check_slot_reads!(ir))
+    c = compilation()
+    ir = assert_assumed_returns!(c, ir, opt.linfo)
+    (c.settings.check_types || !isempty(c.registered.fields) || !isempty(c.registered.embedded)) && (ir = check_slot_reads!(c, ir))
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
     ir = concretize_namedtuples!(ir)
@@ -457,7 +454,7 @@ end
 
 # What is read from a slot that has types (see slots.jl) is checked to be of them, for finding what stores a program has that are not seen: the read is `typeassert`ed to the type that it was given. (It would have
 # been `Any` otherwise, and the calls on it dispatched over the registered types.) Only for reads whose type is narrower than what the slot is declared to hold.
-function check_slot_reads!(ir::CC.IRCode)
+function check_slot_reads!(c::Compilation, ir::CC.IRCode)
     changed = false
     reads = Dict{Int,SlotKey}() # (the statements that read a slot that was given types, and are checked)
     for pc in 1:length(ir.stmts)
@@ -475,8 +472,8 @@ function check_slot_reads!(ir::CC.IRCode)
             continue
         end
         key === nothing && continue
-        slot_read_type(key) === nothing && continue
-        (CHECK_SLOT_TYPES[] || haskey(ASSUMED_SLOTS, key) || key in EMBEDDED_SLOTS) || continue # (what is assumed is always checked)
+        slot_read_type(c, key) === nothing && continue
+        (c.settings.check_types || haskey(c.registered.fields, key) || key in c.registered.embedded) || continue # (what is assumed is always checked)
         reads[pc] = key
         T = CC.widenconst(ir.stmts[pc][:type])
         (T !== Union{} && closed_type(T)) || continue

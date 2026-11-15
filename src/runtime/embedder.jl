@@ -26,7 +26,7 @@
 #    (`field_cut`). A program that reads them gets null, or an empty list.
 # 6. *A copy that fails fails whole.* If an object can't be copied (a `Module`, a task, something that is not an object), it and what refers to it are
 #    not, and the code that refers to its address stays as it was: strict mode refuses it, naming the address (`unresolved_pointer_uses`), and
-#    `EMBED_FAILURES` has why.
+#    the embedder's `failures` has why.
 #
 # `test/testembedfuzz.jl` checks all of it together: random nested constants and what a program does to a copy of them, with what Julia computes
 # from them as the answer, also with the collector run as often as it can.
@@ -36,6 +36,9 @@ mutable struct ObjectEmbedder
     mod::LLVM.Module
     globals::Dict{UInt,Union{LLVM.GlobalVariable,Nothing}} # object address => its global
     egal::Bool # whether the code compares objects with `jl_egal__unboxed`, and so needs the plans of the types for it
+    # (what is found while one program is linked is its own: an address is of an object of this process now, and may be another's the next time, so none of it is kept for another program)
+    failures::Dict{UInt,String} # why the objects that could not be embedded could not (for the messages of the ones that refer to them)
+    dangling::Vector{Tuple{Any,Symbol}} # the fields of the constants that hold an address of this process, which are null in the program: see `warn_dangling_pointer`
 end
 
 # (the plans are not made if nothing uses them: see `egal_layout!`)
@@ -43,7 +46,7 @@ end
 calls_genericmemory_copyto(mod::LLVM.Module) = any(g -> startswith(LLVM.name(g), "jlplt_jl_genericmemory_copyto"), LLVM.globals(mod))
 
 ObjectEmbedder(mod::LLVM.Module, globals) =
-    ObjectEmbedder(mod, globals, haskey(LLVM.functions(mod), "jl_egal__unboxed") || calls_genericmemory_copyto(mod))
+    ObjectEmbedder(mod, globals, haskey(LLVM.functions(mod), "jl_egal__unboxed") || calls_genericmemory_copyto(mod), Dict{UInt,String}(), Tuple{Any,Symbol}[])
 
 # an object we can't reproduce, and why
 struct EmbedFailure <: Exception
@@ -128,13 +131,10 @@ nullptr() = LLVM.PointerNull(LLVM.PointerType())
 
 i64(x) = LLVM.ConstantInt(Int64(x))
 
-# why the objects that could not be embedded could not (for the messages of the ones that refer to them)
-const EMBED_FAILURES = Dict{UInt,String}()
-
 function embed_global!(e::ObjectEmbedder, addr::UInt)
     if haskey(e.globals, addr)
         g = e.globals[addr]
-        g === nothing && throw(EmbedFailure(string("an object that failed, or that it refers to: ", get(EMBED_FAILURES, addr, "(in progress)"))))
+        g === nothing && throw(EmbedFailure(string("an object that failed, or that it refers to: ", get(e.failures, addr, "(in progress)"))))
         return g
     end
     wk = well_known_at(addr)
@@ -147,7 +147,7 @@ function embed_global!(e::ObjectEmbedder, addr::UInt)
     try
         return embed_new_global!(e, addr)
     catch err
-        err isa EmbedFailure && !haskey(EMBED_FAILURES, addr) && (EMBED_FAILURES[addr] = first(replace(err.reason, '\n' => ' '), 300))
+        err isa EmbedFailure && !haskey(e.failures, addr) && (e.failures[addr] = first(replace(err.reason, '\n' => ' '), 300))
         if err isa EmbedFailure && !isempty(err.reason)
             # (the path, from the object that can't be reproduced to the one we wanted)
             path = count("\n  <- ", err.reason) < 12 ? string(err.reason, "\n  <- ", object_type(addr), " at ", string(addr, base = 16)) : err.reason
@@ -439,7 +439,7 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 # An address in this process (of memory that a library allocated, of a function): it means nothing in the binary. Julia's own
                 # compiled code (a package image) writes these as null, which is what is done here: what has the pointer made again
                 # when it finds it null (a `Regex` compiles when its `regex` is null) goes on working, and what does not fails on the null.
-                warn_dangling_pointer(T, fieldname(T, i))
+                warn_dangling_pointer(e, T, fieldname(T, i))
                 add!(LLVM.PointerType(), g -> nullptr())
                 pos = off + sizeof(Ptr)
             elseif Base.allocatedinline(ft) && ft isa Union # a Union of types without pointers, and a byte that says which

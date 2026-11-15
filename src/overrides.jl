@@ -17,25 +17,16 @@ using .Runtime: link_runtime!, UnsupportedCodeError
 # The parameters of the compilations of this package. GPUCompiler's functions that we specialize (`inference_params`,
 # `optimize!`, ...) are for this type, which is ours, and so they don't change what StaticCompiler's own compilations do.
 #
-# It also has the number of times that the list of registered types (`add_show_candidates!`, `add_dispatch_candidates!`) has
-# changed. GPUCompiler keeps what it infers apart for each value of the parameters, so what is inferred with a list of types
-# is not used for compiling with another (it would be, if the type were just a type, with the dispatch that was made for the list
-# that was there when a method was first inferred).
+# GPUCompiler keeps what it infers apart for each value of the parameters (they are part of the token that owns the code instances, which is the same token if they are the same values), and what it asks of a job
+# for inference (`inference_params`, ...) has to be made of them. So they are all that inference can depend on, and what they hold is all that it does depend on: `key`, a number made of the state of the compilation
+# in the pass that is made (see `inference_key`: the settings, what is registered, and what the passes found), and the limit that is asked for by the job (`split_limit`). Two compilations at the same state have the same
+# parameters, and what is inferred for one is used for the other.
 struct OverridesParams <: GPUCompiler.AbstractCompilerParams
-    candidates::Int
+    key::Int
+    split_limit::Int
 end
-const CANDIDATES_VERSION = Ref(0)
-
-# The types of functions (the types of closures, `typeof(sin)`) that a call of a function that is not known when compiling (`f(x)` of an `f` of the type `Function` or `Any`, from a
-# `Vector{Function}`, a `Dict`, a variable that a closure captures and is changed) is made over: those that were found in the code that is compiled (see closures.jl). The
-# list is the one of the compilation that is made now, and what is inferred is kept apart for each (`OverridesParams()` has a number made from it).
-const FUNCTION_CANDIDATES = Type[]
-
-# The callbacks of the program that is compiled now: the types that were registered with `note_callback` (see closures.jl), each with the type of the value that it is called with
-const CALLBACK_CANDIDATES = Tuple{Type,Type}[]
-# (the settings that change what inference makes of a program, and the types that it has found of the program: each has to be in the key)
-inference_settings_hash() = hash((FILTER_BY_METHODS[], CHECK_SLOT_TYPES[], PRECISE_NOSPECIALIZEINFER[], SLOTS_MODE[], UNIVERSE_MODE[]))
-OverridesParams() = OverridesParams(hash(inference_settings_hash(), hash(universe_hash(), hash(assumptions_hash(), hash(slots_hash(), hash(BOX_VERSION[], hash(CALLBACK_CANDIDATES, hash(FUNCTION_CANDIDATES, hash(CANDIDATES_VERSION[])))))))) % Int)
+OverridesParams(c) = OverridesParams(c.key, c.settings.split_limit) # (the compilation `c`: see compilation.jl)
+OverridesParams() = OverridesParams(Compilation())                 # (of a compilation that has just begun)
 
 Base.Experimental.@MethodTable(method_table)
 @doc """
@@ -86,7 +77,11 @@ check_gc(gc) = (gc isa Bool || gc === :auto || gc isa Integer) ||
 # starts (`-no_data_const`): it is a page of 16 kB, and a program of a few kilobytes has a few hundred bytes in it. On Linux, the symbols (`-s`: not tried yet).
 function default_cflags(small::Bool = false)
     Sys.islinux() && return small ? `-lm -ldl -Wl,-s` : `-lm -ldl`
-    Sys.isapple() && small && return `-Wl,-x -Wl,-no_data_const`
+    if Sys.isapple()
+        # (clang does not find out which linker it has, and so gives it the version of the system with the option that is the old one, `-macosx_version_min`, which the linker of recent versions says
+        # has been renamed, once for each program that is made. With the version of the linker said, it gives the new one, `-platform_version`, which linkers have understood since Xcode 11 (version 520))
+        return small ? `-mlinker-version=900 -Wl,-x -Wl,-no_data_const` : `-mlinker-version=900`
+    end
     return ``
 end
 
@@ -112,20 +107,20 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
     @eval begin
         function $f(args...; method_table = method_table, params = nothing, strict::Bool = true, stub_errors::Bool = true, allow = (), gc = default_gc(), target = default_target(),
                     libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(),
-                    llvm_postprocess = mod -> (report_registered_dispatch(); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, bounded = $(f in (:compile_executable, :static_llvm_module)))), kwargs...)
+                    llvm_postprocess = mod -> (c = compilation(); report_registered_dispatch(c); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = c.closures.cfunction_roots, libraries_used = c.libraries)), kwargs...)
             libraries in (:system, :bundle) || throw(ArgumentError("`libraries` is `:system` or `:bundle`, not `$(repr(libraries))`"))
             check_gc(gc)
-            register_custom_deepcopy!() # (this can change the parameters: they have the version of the lists of types)
+            register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
             explicit_params = params
-            run(extra) = with_function_candidates(; strict) do
-                job_params = explicit_params === nothing ? OverridesParams() : explicit_params
+            run(extra) = compile_passes(; strict) do c
+                job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 $(f in (:compile_executable, :compile_shlib) ?
                     :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && check_entry(args[1], args[2]; method_table, params = job_params, target)) : :nothing)
-                entry_args = rooted_arguments(args)
+                entry_args = rooted_arguments(c, args)
                 Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess,
                                   $(f in (:compile_executable, :compile_shlib) ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs), extra)...) : :(merge(NamedTuple(kwargs), extra)...)))
             end
-            result = try
+            result, c = try
                 run((;))
             catch e
                 # (the debug information, which says where in the Julia code the calls of the runtime are, is removed before the code is checked: when it is not accepted, it is made again with it)
@@ -133,7 +128,7 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
                 detailed = try run((; strip = false)); nothing catch e2; e2 end
                 throw(detailed isa UnsupportedCodeError ? detailed : e)
             end
-            $(f in (:compile_executable, :compile_shlib) ? :(libraries === :bundle && result isa AbstractString && Runtime.bundle_libraries(result)) : :nothing)
+            $(f in (:compile_executable, :compile_shlib) ? :(libraries === :bundle && result isa AbstractString && Runtime.bundle_libraries(result, c.libraries[])) : :nothing)
             return result
         end
         @doc """

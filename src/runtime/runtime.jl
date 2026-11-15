@@ -60,16 +60,16 @@ include("libraries.jl")   # the functions of libraries that are called by their 
 include("cfunctions_link.jl") # the wrappers of `@cfunction`, that call the functions of the program
 
 # Define the runtime functions that `mod` calls but does not define.
-function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false)
-    link_cfunctions!(mod) && run!(GlobalDCEPass(), mod)
+function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()))
+    link_cfunctions!(mod, cfunctions) && run!(GlobalDCEPass(), mod)
     blas = resolve_blas_lookups!(mod) # (before what they are given is embedded)
     library_plan = resolve_library_lookups!(mod; libraries)
+    libraries_used[] = library_plan # (for what `libraries = :bundle` copies, when the program has been compiled)
     drop_ignorable_calls!(mod)
     define_field_index!(mod)
     define_subtype_builtins!(mod)
     null_methoderror_arguments!(mod)
     stub_cancel_handlers!(mod)
-    empty!(DANGLING_POINTERS_FOUND)
     e = ObjectEmbedder(mod, Dict())
     define_well_known_objects!(e)
     lower_gc_frames!(mod)
@@ -92,7 +92,7 @@ function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool 
         pointers = unresolved_pointer_uses(mod)
         isempty(dynamic) && isempty(pointers) || throw(UnsupportedCodeError(dynamic, pointers, isempty(dynamic) ? String[] : nonconst_globals(mod), dynamic_call_sites(mod, dynamic)))
     end
-    say_dangling_pointers()
+    say_dangling_pointers(e)
     define_dynamic_stubs!(mod)
     needed = filter(RUNTIME_SHIM_FUNCTIONS) do name
         haskey(LLVM.functions(mod), name) && LLVM.isdeclaration(LLVM.functions(mod)[name])

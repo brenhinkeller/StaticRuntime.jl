@@ -10,12 +10,9 @@
 #   that says what it was. The method is inferred as it is, and the check is in what it returns.
 # * For a field: what is read from it is of the type, in the code that reads it, as for the types that the slots hold (slots.jl), and the read is `typeassert`ed.
 #
-# What is stated has to be given where the module is initialized (`__init__`), as `add_dispatch_candidates!` is: the table is of the session, and is not kept by what is precompiled.
-
-const ASSUMED_RETURNS = Tuple{Any,Any}[] # (the signature as a `Tuple` type that starts with the type of the function, the type that it gives)
-const ASSUMED_SLOTS = Dict{SlotKey,Any}()
-const EMBEDDED_SLOTS = Set{SlotKey}() # (fields whose type is what the objects that are made when compiling hold)
-const ASSUMED_VERSION = Ref(0)
+# What is stated has to be given where the module is initialized (`__init__`), as `add_dispatch_candidates!` is: the registry (registry.jl) is of the session, and is not kept by what is precompiled. A compilation takes
+# a copy of it when it starts (`Compilation.registered`: the signatures as `Tuple` types that start with the type of the function, with the type that each gives; the slots, with the type of what is read from each; and the slots
+# that hold what the objects that are embedded hold), and what it infers is kept apart for the version of the registry that it had, as for the types that are registered.
 
 """
     StaticRuntime.assume_return!(signature::Type{<:Tuple}, T)
@@ -25,16 +22,7 @@ What `@assume` does: the calls that `signature` fits (`Tuple{typeof(f), A, B}` f
 function assume_return!(@nospecialize(sig), @nospecialize(T))
     sig isa Type && sig <: Tuple || throw(ArgumentError("the signature of an assumption is a `Tuple` type that starts with the type of the function, not $(repr(sig))"))
     T isa Type || throw(ArgumentError("the type that is assumed is a type, not $(repr(T))"))
-    for (i, (s, R)) in enumerate(ASSUMED_RETURNS)
-        if s == sig
-            R == T && return nothing
-            ASSUMED_RETURNS[i] = (sig, T)
-            ASSUMED_VERSION[] += 1
-            return nothing
-        end
-    end
-    push!(ASSUMED_RETURNS, (sig, T))
-    ASSUMED_VERSION[] += 1
+    register_return!(sig, T)
     return nothing
 end
 
@@ -47,10 +35,7 @@ function assume_field!(@nospecialize(S), name::Symbol, @nospecialize(T))
     S isa DataType && isconcretetype(S) && isstructtype(S) || throw(ArgumentError("`$(repr(S))` is not a struct that fields can be assumed of"))
     hasfield(S, name) || throw(ArgumentError("`$S` has no field `$name`"))
     T isa Type || throw(ArgumentError("the type that is assumed is a type, not $(repr(T))"))
-    key = (:field, S, name)
-    get(ASSUMED_SLOTS, key, nothing) == T && return nothing
-    ASSUMED_SLOTS[key] = T
-    ASSUMED_VERSION[] += 1
+    register_field!((:field, S, name), T)
     return nothing
 end
 
@@ -62,10 +47,7 @@ What `@assume_field_embedded` does: the field `name` of a struct of the type `S`
 function assume_field_embedded!(@nospecialize(S), name::Symbol)
     S isa DataType && isconcretetype(S) && isstructtype(S) || throw(ArgumentError("`$(repr(S))` is not a struct that fields can be assumed of"))
     hasfield(S, name) || throw(ArgumentError("`$S` has no field `$name`"))
-    key = (:field, S, name)
-    key in EMBEDDED_SLOTS && return nothing
-    push!(EMBEDDED_SLOTS, key)
-    ASSUMED_VERSION[] += 1
+    register_embedded!((:field, S, name))
     return nothing
 end
 
@@ -134,29 +116,15 @@ macro assume_field_embedded(ex)
 end
 
 # the type that a method is assumed to give (the one of all the assumptions that fit it): the specialization `mi` is one that a signature fits when its types are subtypes of that signature
-function assumed_return(mi::Core.MethodInstance)
-    isempty(ASSUMED_RETURNS) && return nothing
+function assumed_return(c::Compilation, mi::Core.MethodInstance)
+    returns = c.registered.returns
+    isempty(returns) && return nothing
     found = nothing
-    for (sig, R) in ASSUMED_RETURNS
+    for (sig, R) in returns
         mi.specTypes <: sig || continue
         found = found === nothing ? R : typeintersect(found, R)
     end
     return found
-end
-
-# a number for the key of the inference cache: what is assumed changes what is inferred
-function assumptions_hash()
-    h = UInt(ASSUMED_VERSION[])
-    for (sig, R) in ASSUMED_RETURNS
-        h = hash(objectid(sig), hash(objectid(R), h))
-    end
-    for ((_, S, name), T) in ASSUMED_SLOTS
-        h += hash(objectid(S), hash(name, hash(objectid(T))))
-    end
-    for (_, S, name) in EMBEDDED_SLOTS
-        h += hash(objectid(S), hash(name, UInt(1)))
-    end
-    return h
 end
 
 # the type that inference gives, as the type that is assumed where it is wider
@@ -169,14 +137,14 @@ function assumed_result(@nospecialize(found), @nospecialize(R))
 end
 
 function CC.finishinfer!(me::CC.InferenceState, interp::OverridesInterpreter, cycleid::Int, opt_cache::IdDict{Core.MethodInstance,Core.CodeInstance})
-    R = assumed_return(me.linfo)
+    R = assumed_return(compilation(), me.linfo)
     R === nothing || (me.bestguess = assumed_result(me.bestguess, R))
     return @invoke CC.finishinfer!(me::CC.InferenceState, interp::CC.AbstractInterpreter, cycleid::Int, opt_cache::IdDict{Core.MethodInstance,Core.CodeInstance})
 end
 
 # every `return` of the method gives a value of the type that is assumed (a `typeassert` where the code does not know it)
-function assert_assumed_returns!(ir::CC.IRCode, mi::Core.MethodInstance)
-    R = assumed_return(mi)
+function assert_assumed_returns!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstance)
+    R = assumed_return(c, mi)
     R === nothing && return ir
     changed = false
     for pc in 1:length(ir.stmts)

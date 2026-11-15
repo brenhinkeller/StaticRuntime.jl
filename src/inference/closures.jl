@@ -7,19 +7,12 @@
 # makes, and the functions that it passes or stores (`sin` in `Function[sin, cos]`, and what is in a constant, `const FS = Function[sin, x -> 2x]`).
 #
 # Where that code is is not known before it is inferred, and the call is inferred before all of it is. So a compilation that has such a call, and fails (or, with
-# `strict = false`, would abort at the call), is made again with the types that the first found (`with_function_candidates`), until it finds no more.
+# `strict = false`, would abort at the call), is made again with the types that the first found (`run_passes`), until it finds no more.
 
 const MAX_FUNCTION_PASSES = 8
 
-# The types of functions that were found (in the order that they were) by the compilation that is made now
-const SEEN_FUNCTIONS = Type[]
-const SEEN_FUNCTIONS_SET = Set{Type}()
-
-# Whether the compilation that is made now has a call of a function that is not known, that has been looked at
-const FUNCTION_DISPATCH_REQUESTED = Ref(false)
-
-# Whether a call has been made over the candidates in the compilation that is made now
-const FUNCTION_UNION_USED = Ref(false)
+# (What the compilation has found of this, and what the calls are made over, is in its `ClosureState`: the types of functions that were found in this pass, in the order that they were, whether it has a call of a
+# function that is not known that has been looked at, and whether a call has been made over the candidates.)
 
 # A type that a function can have that is of interest: not a function of the compiler (the types of builtins and intrinsics have no methods), and not
 # something that the runtime of the program does (the functions of this package that are run when the program starts, or ends)
@@ -34,41 +27,41 @@ function interesting_function_type(@nospecialize(T))
     return true
 end
 
-function note_function!(@nospecialize(T))
+function note_function!(cl::ClosureState, @nospecialize(T))
     interesting_function_type(T) || return
-    if !(T in SEEN_FUNCTIONS_SET)
-        push!(SEEN_FUNCTIONS_SET, T)
-        push!(SEEN_FUNCTIONS, T)
+    if !(T in cl.seen_functions_set)
+        push!(cl.seen_functions_set, T)
+        push!(cl.seen_functions, T)
     end
     return
 end
 
 # The functions in a value that the code refers to as a constant (`FS` of `const FS = Function[sin, cos]`): in an array, a tuple, a `Dict`, the fields of a struct.
 # (Not for what is large, or deep: a function in a constant of that kind is found when it is made, if it is.)
-function note_functions_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(2000))
+function note_functions_in!(cl::ClosureState, @nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(2000))
     budget[] <= 0 && return
     budget[] -= 1
     if x isa Function
-        note_function!(typeof(x))
+        note_function!(cl, typeof(x))
     elseif depth >= 3 || x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
         return
     elseif x isa Array || x isa Core.GenericMemory
         isbitstype(eltype(x)) && return
         for i in eachindex(x)
-            isassigned(x, i) && note_functions_in!(x[i], depth + 1, budget)
+            isassigned(x, i) && note_functions_in!(cl, x[i], depth + 1, budget)
         end
     elseif x isa Tuple
         for e in x
-            note_functions_in!(e, depth + 1, budget)
+            note_functions_in!(cl, e, depth + 1, budget)
         end
     elseif x isa Dict
         for (k, v) in x
-            note_functions_in!(k, depth + 1, budget)
-            note_functions_in!(v, depth + 1, budget)
+            note_functions_in!(cl, k, depth + 1, budget)
+            note_functions_in!(cl, v, depth + 1, budget)
         end
     elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName) && fieldcount(typeof(x)) <= 16
         for i in 1:fieldcount(typeof(x))
-            isdefined(x, i) && note_functions_in!(getfield(x, i), depth + 1, budget)
+            isdefined(x, i) && note_functions_in!(cl, getfield(x, i), depth + 1, budget)
         end
     end
     return
@@ -79,6 +72,7 @@ end
 # Only the code of the program is looked at (not that of Base, or of the standard libraries, whose functions pass the functions of the program around, and are
 # the ones that call them with the types that they have): a function that is stored where its type is lost is stored by the program (`Base.Fix2(+, 1)` is a call in
 # it, and its type is the type of that statement)
+# (what a module is is a fact of it, and the same in every compilation: it is kept)
 const USER_MODULES = Dict{Module,Bool}()
 function user_module(mod::Module)
     get!(USER_MODULES, mod) do
@@ -89,26 +83,26 @@ function user_module(mod::Module)
         return true
     end
 end
-function note_functions_of!(code, types, linfo)
+function note_functions_of!(cl::ClosureState, code, types, linfo)
     def = linfo isa Core.MethodInstance ? linfo.def : nothing
     mod = def isa Method ? def.module : def isa Module ? def : nothing
     mod === nothing && return
     user_module(mod) || return
     try
-        note_functions_in_code!(code, types)
+        note_functions_in_code!(cl, code, types)
     catch
         # (what is found is only what the calls of unknown functions are made over: not finding is not an error)
     end
     return
 end
-function note_functions_in_code!(code, types)
+function note_functions_in_code!(cl::ClosureState, code, types)
     for pc in eachindex(code)
         t = pc <= length(types) && isassigned(types, pc) ? types[pc] : nothing
         if t !== nothing
             if t isa Core.Const
-                note_functions_in!(t.val)
+                note_functions_in!(cl, t.val)
             else
-                note_function!(CC.widenconst(t))
+                note_function!(cl, CC.widenconst(t))
             end
         end
         st = code[pc]
@@ -120,7 +114,7 @@ function note_functions_in_code!(code, types)
             v = a isa GlobalRef ? (isdefined(a.mod, a.name) && isconst(a.mod, a.name) ? getglobal(a.mod, a.name) : nothing) :
                 a isa QuoteNode ? a.value : a isa Core.SSAValue || a isa Core.Argument || a isa Expr ? nothing : a
             v === nothing && continue
-            note_functions_in!(v)
+            note_functions_in!(cl, v)
         end
     end
     return
@@ -128,7 +122,7 @@ end
 
 # The types of the candidates that fit a call, as a union, or `nothing`: those that are subtypes of the type that the function is known to have, and that a method of the
 # call is for (the arity, and the types of the arguments that are known: the one that has none is not a case of it)
-function function_union(@nospecialize(T), argtypes::Vector{Any}, position::Int = 1; candidates = FUNCTION_CANDIDATES)
+function function_union(c::Compilation, @nospecialize(T), argtypes::Vector{Any}, position::Int = 1; candidates = c.closures.functions)
     any(a -> a isa Core.TypeofVararg, argtypes) && return nothing
     world = Base.get_world_counter()
     found = Type[]
@@ -138,7 +132,7 @@ function function_union(@nospecialize(T), argtypes::Vector{Any}, position::Int =
         ms = Base._methods_by_ftype(sig, nothing, -1, world)
         ms isa Vector && !isempty(ms) || continue
         push!(found, C)
-        length(found) > SPLIT_LIMIT[] && return nothing
+        length(found) > c.settings.split_limit && return nothing
     end
     isempty(found) && return nothing
     # (a call over one type is a call of that function, with no test that `f` is one: the type that is not callable, and that has no method, is the case that the others are tested against)
@@ -149,7 +143,7 @@ end
 ## Callbacks
 #
 # A program that keeps functions where their types are lost (the listeners of an `Observable`, in a `Vector{Pair{Int,Any}}`) calls them with a call of a function that is not known,
-# which is made over the types of all the functions that the program has (`FUNCTION_CANDIDATES`): `string`, `iterate` and the other functions that it passes as arguments are among them, and are
+# which is made over the types of all the functions that the program has (`ClosureState.functions`): `string`, `iterate` and the other functions that it passes as arguments are among them, and are
 # called with whatever the value is, which may be something that they can't be compiled for. The code that stores the functions says what is stored (`note_callback(T, f)`: `f` is
 # called with a value of the type `T`), and the code that calls them says that it does (`call_callback(T, f, args...)`, which is `f(args...)`), so that the call is made over
 # those of the type `T`, and no others.
@@ -170,17 +164,14 @@ that the program has.
 """
 call_callback(@nospecialize(T), @nospecialize(f), args...) = f(args...)
 
-# The callbacks that the compilation that is made now has found, and whether it has a call that they are for
-const SEEN_CALLBACKS = Tuple{Type,Type}[]
-const CALLBACK_CALL_REQUESTED = Ref(false)
-
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     if length(arginfo.argtypes) == 3
         V = callback_value_type(arginfo.argtypes[2])
         F = CC.widenconst(arginfo.argtypes[3])
-        if V !== nothing && F isa DataType && isconcretetype(F) && !(F <: Core.Builtin) && !((V, F) in SEEN_CALLBACKS)
-            push!(SEEN_CALLBACKS, (V, F))
+        seen = compilation().closures.seen_callbacks
+        if V !== nothing && F isa DataType && isconcretetype(F) && !(F <: Core.Builtin) && !((V, F) in seen)
+            push!(seen, (V, F))
         end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -198,18 +189,19 @@ end
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     if length(arginfo.argtypes) >= 3
-        CALLBACK_CALL_REQUESTED[] = true
+        c = compilation()
+        c.closures.callback_call_requested = true
         V = callback_value_type(arginfo.argtypes[2])
         inner = copy(arginfo.argtypes[3:end])
         T = CC.widenconst(inner[1])
         fargs = arginfo.fargs === nothing ? nothing : arginfo.fargs[3:end]
         if unknown_function_type(T) && V !== nothing
-            candidates = Type[F for (W, F) in CALLBACK_CANDIDATES if W === V]
+            candidates = Type[F for (W, F) in c.closures.callbacks if W === V]
             # (none registered for `T`: nothing is called, as far as is known; the compilation is made again if the code that is inferred registers one)
             isempty(candidates) && return CC.Future{CC.CallMeta}(CC.CallMeta(Union{}, Union{}, CC.EFFECTS_THROWS, CC.NoCallInfo()))
-            u = function_union(T, inner, 1; candidates)
+            u = function_union(c, T, inner, 1; candidates)
             if u !== nothing
-                FUNCTION_UNION_USED[] = true
+                c.closures.union_used = true
                 inner[1] = u
                 call = CC.abstract_call(interp, CC.ArgInfo(fargs, inner), si, vtypes, sv)
                 return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
@@ -229,9 +221,10 @@ end
 # finite many types (those registered), so the inference ends without the limit.
 function CC.edge_matches_sv(interp::OverridesInterpreter, frame::CC.AbsIntState, method::Method, @nospecialize(sig), sparams::Core.SimpleVector,
                             hardlimit::Bool, sv::CC.AbsIntState)
-    if !hardlimit && sig isa DataType && isconcretetype(sig) && !isempty(CALLBACK_CANDIDATES)
+    callbacks = compilation().closures.callbacks
+    if !hardlimit && sig isa DataType && isconcretetype(sig) && !isempty(callbacks)
         F = sig.parameters[1]
-        any(c -> c[2] === F, CALLBACK_CANDIDATES) && return false
+        any(cb -> cb[2] === F, callbacks) && return false
     end
     return @invoke CC.edge_matches_sv(interp::CC.AbstractInterpreter, frame::CC.AbsIntState, method::Method, sig::Any, sparams::Core.SimpleVector,
                                       hardlimit::Bool, sv::CC.AbsIntState)
@@ -249,10 +242,11 @@ function CC.abstract_call_unknown(interp::OverridesInterpreter, @nospecialize(ft
                                   vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
     T = CC.widenconst(ft)
     if unknown_function_type(T) && !(ft isa CC.PartialOpaque)
-        FUNCTION_DISPATCH_REQUESTED[] = true
-        u = isempty(FUNCTION_CANDIDATES) ? nothing : function_union(T, arginfo.argtypes)
+        c = compilation()
+        c.closures.dispatch_requested = true
+        u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes)
         if u !== nothing
-            FUNCTION_UNION_USED[] = true
+            c.closures.union_used = true
             argtypes = copy(arginfo.argtypes)
             argtypes[1] = u
             closed = CC.ArgInfo(arginfo.fargs, argtypes)
@@ -272,10 +266,11 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.kwc
     if length(arginfo.argtypes) >= 3
         T = CC.widenconst(arginfo.argtypes[3])
         if unknown_function_type(T)
-            FUNCTION_DISPATCH_REQUESTED[] = true
-            u = isempty(FUNCTION_CANDIDATES) ? nothing : function_union(T, arginfo.argtypes, 3)
+            c = compilation()
+            c.closures.dispatch_requested = true
+            u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes, 3)
             if u !== nothing
-                FUNCTION_UNION_USED[] = true
+                c.closures.union_used = true
                 argtypes = copy(arginfo.argtypes)
                 argtypes[3] = u
                 closed = CC.ArgInfo(arginfo.fargs, argtypes)
@@ -291,78 +286,61 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.kwc
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
-# Compile with the types of functions that the code has: `compile` is run, and again with what it found if it has a call of an unknown function that it could not
-# resolve (it failed, or it is not `strict`: such a call aborts the program), or a `@cfunction` (see cfunctions.jl), until it finds no more
-with_function_candidates(compile; strict::Bool = true) = try
-    with_function_candidates_passes(compile; strict)
-finally
-    restore_nospecializeinfer!() # (what was inferred with the types of the call is kept; the methods are as they were)
-end
+# Compile with the types of functions that the code has: `compile(c)` is run (`c` is the compilation: see compilation.jl), and again with what it found if it has a call of an unknown function that it could not
+# resolve (it failed, or it is not `strict`: such a call aborts the program), or a `@cfunction` (see cfunctions.jl), until it finds no more. The compilation is made for the call, and is not there after it.
+compile_passes(compile; strict::Bool = true) = with_compilation(c -> (run_passes(c, compile), c); strict) # (what it gives, and the compilation that made it)
 
-function with_function_candidates_passes(compile; strict::Bool = true)
-    empty!(FUNCTION_CANDIDATES)
-    empty!(Runtime.CFUNCTION_ROOTS)
-    empty!(CFUNCTION_FUNCTIONS)
-    empty!(CALLBACK_CANDIDATES)
-    reset_slots!(; strict) # (what the slots of a compilation hold is of the program that is compiled)
+function run_passes(c::Compilation, compile)
+    cl, bx, s = c.closures, c.boxes, c.slots
+    strict = c.settings.strict
     local failure = nothing
     for pass in 1:MAX_FUNCTION_PASSES
-        empty!(SEEN_FUNCTIONS)
-        empty!(SEEN_FUNCTIONS_SET)
-        empty!(SEEN_CFUNCTIONS)
-        empty!(SEEN_CALLBACKS)
-        empty!(SEEN_BOXES)
-        CALLBACK_CALL_REQUESTED[] = false
-        REGISTERED_DISPATCH_USED[] = false
-        reset_slots_pass!()
+        begin_pass!(c) # (what the last pass found is what this one is made with: see `inference_key`)
         slots_retry = false
-        FUNCTION_DISPATCH_REQUESTED[] = false
-        FUNCTION_UNION_USED[] = false
         failure = nothing
         result = nothing
         started = time()
         try
-            result = compile()
+            result = compile(c)
         catch e
             if e isa SlotsChanged
                 slots_retry = true # (the types of the slots are different: see slots.jl)
             else
                 (e isa UnsupportedCodeError || e isa InferenceError) || rethrow()
                 failure = e
-                if SLOTS_MODE[] === :on && !isempty(SLOT_TYPES) && !SLOTS_FALLBACK[]
+                if s.mode === :on && !isempty(s.types) && c.settings.slots_fallback && !s.fell_back
                     # (the types that the slots were given in this pass may be what failed: the first pass that has them uses what was stored that the analysis could type, and the passes that follow take back what it
                     # was wrong about; a pass that does not compile is not followed by one. The program is compiled once more without them, as it was before they were: with the failure that it has then, if it has one)
-                    SLOTS_FALLBACK[] = true
-                    empty!(SLOT_TYPES)
-                    SLOTS_MODE[] = :off
+                    s.fell_back = true
+                    empty!(s.types)
+                    s.mode = :off
                     slots_retry = true
                     failure = nothing
                 end
             end
         end
-        new = Type[T for T in SEEN_FUNCTIONS if !(T in FUNCTION_CANDIDATES)]
-        @debug "compilation pass" pass seconds = round(time() - started; digits = 1) candidates = length(FUNCTION_CANDIDATES) new = length(new) cfunctions = length(Runtime.CFUNCTION_ROOTS) failed = failure !== nothing requested = FUNCTION_DISPATCH_REQUESTED[] _id = :static_passes
-        newc = [c for c in SEEN_CFUNCTIONS if !any(r -> r.ftype === c[1] && r.args == c[2] && r.ret === c[3], Runtime.CFUNCTION_ROOTS)]
+        new = Type[T for T in cl.seen_functions if !(T in cl.functions)]
+        @debug "compilation pass" pass seconds = round(time() - started; digits = 1) candidates = length(cl.functions) new = length(new) cfunctions = length(cl.cfunction_roots) failed = failure !== nothing requested = cl.dispatch_requested _id = :static_passes
+        newc = [x for x in cl.seen_cfunctions if !any(r -> r.ftype === x[1] && r.args == x[2] && r.ret === x[3], cl.cfunction_roots)]
         # (a pass that was cut short, as the types of the slots are different, did not get as far as telling whether the functions that it found are needed)
-        more_functions = FUNCTION_DISPATCH_REQUESTED[] && !isempty(new) && (failure !== nothing || !strict || FUNCTION_UNION_USED[] || slots_retry)
-        newcb = Tuple{Type,Type}[c for c in SEEN_CALLBACKS if !(c in CALLBACK_CANDIDATES)]
-        more_callbacks = CALLBACK_CALL_REQUESTED[] && !isempty(newcb)
+        more_functions = cl.dispatch_requested && !isempty(new) && (failure !== nothing || !strict || cl.union_used || slots_retry)
+        newcb = Tuple{Type,Type}[x for x in cl.seen_callbacks if !(x in cl.callbacks)]
+        more_callbacks = cl.callback_call_requested && !isempty(newcb)
         # (the types of the boxes that were found with the types that the last pass had are the ones for the next: until they are the same)
-        more_boxes = any(((k, T),) -> T === Any ? haskey(BOX_TYPES, k) : get(BOX_TYPES, k, nothing) !== T, SEEN_BOXES)
+        more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
         retry = pass < MAX_FUNCTION_PASSES && (more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry)
         if retry
             if more_boxes
-                for (k, T) in SEEN_BOXES
-                    T === Any ? delete!(BOX_TYPES, k) : (BOX_TYPES[k] = T)
+                for (k, T) in bx.seen
+                    T === Any ? delete!(bx.types, k) : (bx.types[k] = T)
                 end
-                BOX_VERSION[] += 1
             end
-            more_callbacks && append!(CALLBACK_CANDIDATES, newcb)
-            more_functions && append!(FUNCTION_CANDIDATES, new)
-            for c in newc
-                id = length(Runtime.CFUNCTION_ROOTS) + 1
-                push!(Runtime.CFUNCTION_ROOTS, Runtime.CFunctionRoot(id, c[1], c[2], c[3]))
-                push!(CFUNCTION_FUNCTIONS, c[4])
+            more_callbacks && append!(cl.callbacks, newcb)
+            more_functions && append!(cl.functions, new)
+            for x in newc
+                id = length(cl.cfunction_roots) + 1
+                push!(cl.cfunction_roots, Runtime.CFunctionRoot(id, x[1], x[2], x[3]))
+                push!(cl.cfunction_functions, x[4])
             end
             continue
         end
