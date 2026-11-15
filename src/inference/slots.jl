@@ -211,6 +211,19 @@ function note_slot_store!(key::SlotKey, @nospecialize(T))
     end
     new = Union{cur, T}
     Base.unionlen(new) > SLOT_LIMIT[] ? push!(SEEN_UNKNOWN, key) : (SEEN_SLOTS[key] = new)
+    for t in Base.uniontypes(T)
+        note_stored_type!(t)
+    end
+    return
+end
+
+# A type that the program stores in a slot of an abstract type is one that a value of that type can have, whoever defines it (a `Vector{Int}` or a `Tuple{Int,Float64}` in a `Vector{Any}`: the types that are made by the
+# program that are not user types are not in the universe otherwise, and are not registered), so a call on a value of the type `Any` is made over it too, where the slot is one that is not known (see `note_universe!`).
+function note_stored_type!(@nospecialize(T))
+    UNIVERSE_MODE[] === :off && return
+    (T isa DataType && isconcretetype(T) && !(T <: Function) && !(T <: Type)) || return
+    (T in DEFAULT_DISPATCH_CANDIDATES || T in SHOW_CANDIDATES) && return # (registered already)
+    push!(UNIVERSE_SEEN, T)
     return
 end
 

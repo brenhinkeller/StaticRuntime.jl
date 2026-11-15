@@ -6,6 +6,8 @@ suse(x::Int) = x
 suse(x::Float64) = round(Int, x)
 suse(x::SMeters) = round(Int, 100 * x.m)
 suse(x::String) = length(x)
+suse(x::Vector{Int}) = 100 + length(x)
+suse(x::Tuple{Int,Float64}) = 200 + x[1]
 struct SBox; v::Any; end
 sget(b::SBox) = b.v
 @noinline sput!(v::Vector{Any}, @nospecialize(x)) = (push!(v, x); nothing)
@@ -25,6 +27,12 @@ slot_cases() = [
 @testset "Slots" begin
     @testset "values of types that were not registered" begin
         check_cases(slot_cases())
+    end
+    # types of Base that are not registered (`Vector{Int}`, `Tuple{Int,Float64}`), stored in a slot that has another store of a type that is not known (so it is not given the types that are stored in it): a call on what is read is made over
+    # the types that the program stores in slots, as well as the registered ones and the types that it defines
+    @testset "types of Base that are stored in a slot that is not known" begin
+        stores_base_types() = (v = Any[opaque(1), [opaque(2), 3], (opaque(4), 1.5)]; push!(v, Base.inferencebarrier(2.5)); s = 0; for x in v; s += suse(x); end; s)
+        @test static_status(stores_base_types)[1] == :ok
     end
     # (a program of its own: with the others the slot of the elements holds what they store in it)
     @testset "a constant that is returned" begin
