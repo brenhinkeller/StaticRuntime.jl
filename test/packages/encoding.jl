@@ -1,5 +1,8 @@
 # Base64 and CRC32c, compared with Julia (Base64 is the standard library's own: its streams are compiled as they are, with the tasks and locks of `tasks.jl` that they are not run with).
 
+# (`base64encode(::Any)` is made over the registered types: a `Vector{Int}` that comes out of `any_value` is one of them when it is added)
+StaticRuntime.add_dispatch_candidates!(Vector{Int})
+
 @testset "Base64" begin
     check_cases([
         "Base64 encode"            => () -> (println(base64encode(any_value("hello world")), base64encode(UInt8[]), base64encode("a"), base64encode("ab")); 0),

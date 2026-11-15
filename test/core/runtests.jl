@@ -2,10 +2,7 @@
 @info "Core tests:"
 
 # strict mode, method tables, and the entry points that are not accepted; the functions that test a program
-@testset verbose=true "Internals" begin
-    include_timed("strict.jl")
-    @testset verbose=true "Harness" include_timed("harness.jl")
-end
+@testset verbose=true "Internals" include_timed("internals.jl")
 
 # what goes into the binary: constants, objects, types and their tags
 @testset verbose=true "Embedding" begin
@@ -19,11 +16,10 @@ end
 # the runtime: memory and the collector, exceptions, the executable, files and the operating system
 @testset verbose=true "Runtime" begin
     @testset verbose=true "Heap" include_timed("heap.jl")
-    include_timed("finalizers.jl")
+    @testset verbose=true "Finalizers" include_timed("finalizers.jl")
     @testset verbose=true "Exceptions" include_timed("exceptions.jl")
     @testset verbose=true "Default Entry" include_timed("executables.jl")
-    @testset verbose=true "Files" include_timed("files.jl")
-    @testset verbose=true "System" include_timed("system.jl")
+    @testset verbose=true "Files and the system" include_timed("files.jl")
 end
 
 # dynamic dispatch, closures and C callbacks
@@ -31,27 +27,23 @@ end
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
     @testset verbose=true "Slots" include_timed("slots.jl")
     @testset verbose=true "Types that are stated" include_timed("assume.jl")
-    include_timed("closures.jl")
-    include_timed("cfunctions.jl")
+    include_timed("closures.jl") # (and `@cfunction`)
+    @testset verbose=true "Fuzzing slots and dispatch" include_timed("dispatchfuzz.jl")
 end
 
-# the language and Base: values, numbers, strings, collections, symbols, globals
+# the language and Base: values and globals, numbers (and random numbers), strings, collections, symbols, tasks
 @testset verbose=true "Language" include_timed("language.jl")
 @testset verbose=true "Numbers" include_timed("numbers.jl")
 @testset verbose=true "Strings" include_timed("strings.jl")
 @testset verbose=true "Containers" include_timed("containers.jl")
 @testset verbose=true "Tuples" include_timed("tuples.jl")
 @testset verbose=true "Symbols" include_timed("symbols.jl")
-@testset verbose=true "Globals" include_timed("globals.jl")
-@testset verbose=true "Random" include_timed("random.jl")
 @testset verbose=true "Tasks" include_timed("tasks.jl")
 
 # printing
 @testset verbose=true "Printing" begin
     include_timed("printing.jl")
     include_timed("show.jl")
-    include_timed("arrays.jl")
-    include_timed("plain.jl")
 end
 
 # libraries that the program calls

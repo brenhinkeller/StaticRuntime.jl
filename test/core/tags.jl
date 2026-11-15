@@ -64,7 +64,7 @@ tag_all() = (c = 0; for i in 1:length(TAG_VALUES); c = 11 * c + tag_code(TAG_VAL
                       catch e; e isa Exception ? (e isa ArgumentError ? 1 : 2) : 3; end
         end; c)
         @test static_result(abstract_catch) == abstract_catch()
-        # a type that is chosen when the program runs, from those in the binary, is answered from the table of all of them (`testsubtype.jl`)
+        # a type that is chosen when the program runs, from those in the binary, is answered from the table of all of them (`subtype.jl`)
         mktype(i) = Any[Number, AbstractString][i]
         @test static_result(() -> (isa(mixed(1), mktype(1)) ? 1 : 0)) == 1
         @test static_result(() -> (isa(mixed(1), mktype(2)) ? 1 : 0)) == 0

@@ -1,4 +1,4 @@
-# Printf: `@printf`, `@sprintf` and `Printf.format`, compared with Julia's (printf of StaticTools, with C's specifiers, is in `core/printing.jl`).
+# Printf: `@printf`, `@sprintf` and `Printf.format`, compared with Julia's (`printf` of StaticTools, with C's specifiers, is not tested here: `Printf` is the supported way).
 
 const FORMAT = Printf.Format("%s=%08.3f\n") # made once, as `@printf` does
 

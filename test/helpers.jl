@@ -3,9 +3,11 @@
 using Test, Random, Printf, Libdl
 using StaticRuntime
 
-# `include` of a file of the tests that is timed (`TEST_TIMING=1` prints the times at the end of `runtests.jl`)
+# `include` of a file of the tests that is timed (`TEST_TIMING=1` prints the times at the end of `runtests.jl`; `TEST_PROGRESS=1` says to the error output which file is being run, which is what shows where a run
+# that has no output yet is: the standard output is not flushed when it is a file)
 const FILE_TIMES = Pair{String,Float64}[]
 function include_timed(path::AbstractString)
+    isempty(get(ENV, "TEST_PROGRESS", "")) || (println(stderr, "TEST_PROGRESS ", path); flush(stderr))
     t0 = time()
     include(path)
     push!(FILE_TIMES, path => time() - t0)

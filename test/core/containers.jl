@@ -53,7 +53,7 @@ runtime_dict() = (d = Dict{AddrKey,Int}(); k = AddrKey(1); d[k] = 3; get(d, k, -
 
 @testset "Dict, Set and IdDict constants that are hashed by address" begin
     for f in (addr_haskey, addr_get, addr_in_set, addr_iddict, addr_wrapped)
-        status, detail = static_status(f)
+        status, detail = static_status(f; strip = true) # (`strip = true`: the refusal is not compiled a second time, for the places in the code that the message names, which are not what is checked)
         @testset "$(nameof(f))" begin
             @test status == :compile_error # (it is refused, and says why)
             @test occursin("address", string(detail))
