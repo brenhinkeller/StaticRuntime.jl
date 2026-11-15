@@ -76,6 +76,41 @@ const KEY_PROBE = """
     @test StaticRuntime.type_hash(Union{Int,String}) == StaticRuntime.type_hash(Union{String,Int})
 end
 
+# The version of the registry is a hash of what it has: the same content is the same version, in any order of registering and in any process (what was inferred for a version is found by every session that has it), and
+# another content is another version. (A registry of its own is used here, not the one of the process.)
+const REGISTRY_PROBE = """
+    using StaticRuntime
+    S = StaticRuntime
+    r = S.Registry()
+    for T in (Vector{Int}, Tuple{Int,Float64}, Dict{Symbol,Any}); S.register_new!(r, r.show, T); end
+    S.register_new!(r, r.family, Val{3})
+    string(r.version)
+    """
+@testset "The version of the registry is made of what it has" begin
+    S = StaticRuntime
+    registry(types) = (r = S.Registry(); for T in types; S.register_new!(r, r.show, T); end; r)
+    @test registry([Int8, Int16]).version == registry([Int16, Int8]).version  # (the order does not matter)
+    @test registry([Int8, Int16]).version != registry([Int8, Int32]).version  # (another content)
+    @test registry([Int8]).version != registry([Int8, Int16]).version
+    @test registry([Int8, Int8]).version == registry([Int8]).version          # (a type that is there is not added again)
+    @test S.Registry().version == 0
+    here = Base.invokelatest(include_string, Module(:RegistryProbe), REGISTRY_PROBE)
+    there = read(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $(string("print(begin\n", REGISTRY_PROBE, "\nend)"))`, String)
+    @test here == there                                                       # (nor does the process)
+end
+
+# What a program shows of a value of the type `Any` is made over the registered types (`show_element`), by a generator whose code Julia could keep from the time that it was first made: what is registered after a program
+# that has it was compiled has to be what the next one has, as the registry is in the key of what is inferred, and what is inferred is made again when it is not the same
+struct RegHolder; v::Any; end
+struct RegShown; v::Int; end
+@testset "A type that is registered after another program was compiled is shown by the next one" begin
+    holder(x) = () -> (println(RegHolder(Base.inferencebarrier(x))); 0)
+    @test static_status(holder(1))[1] == :ok                        # (the generated code for `Any` is made, with what is registered now)
+    @test static_status(holder(RegShown(7)))[1] == :runtime_error   # (a type that is not registered is not shown: it says so when the program runs)
+    StaticRuntime.add_show_candidates!(RegShown)
+    @test static_status(holder(RegShown(7)))[1] == :ok
+end
+
 # What the workload inferred when the package was compiled is found by the programs that are the same, and the slots of such a program are analyzed all the same (what is true of its inference, `DISPATCH_USED_KEYS` and `SLOT_FACTS`,
 # is kept with it): a program of the workload that is compiled in another process has more than one pass, as it did when the workload compiled it
 @testset "What is found of the programs of the workload is found whole" begin
