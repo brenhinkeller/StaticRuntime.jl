@@ -125,10 +125,10 @@ gl_vec_untyped() = (push!(gl_untyped_vec, 9); sum(gl_untyped_vec))
 
     # a global of a type that is not known (`Any`) that holds a value that is not of the registered types can't be used: and the message says why
     @testset "untyped globals of other types" begin
-        status, detail = static_status(gl_ref_untyped; strip = true)
+        status, detail = static_status(gl_ref_untyped)
         @test status == :compile_error
         @test occursin("global variables that are not `const`", detail) || occursin("not `const`", detail)
-        status, detail = static_status(gl_vec_untyped; strip = true)
+        status, detail = static_status(gl_vec_untyped)
         @test status == :compile_error
         @test occursin("not `const`", detail)
     end

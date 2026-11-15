@@ -59,8 +59,21 @@ include("loader.jl")      # the functions of libraries, found when the program n
 include("libraries.jl")   # the functions of libraries that are called by their library: libm, and the others loaded when the program runs
 include("cfunctions_link.jl") # the wrappers of `@cfunction`, that call the functions of the program
 
+# What this module finds out about the process that it is in (the addresses of its objects and the tags of its types, which are different in every process; the IR of the heap and of the loader, which refers to
+# them) is kept for the process, and is found out again when a package that was precompiled is loaded: a package that makes a workload when it is compiled (see `src/precompile.jl`) has what the workload found out
+# in its image, and that is the process that made it.
+function forget_process_state!()
+    PIPE_FDS .= -1 # (the descriptors of a pipe that was made by the process that compiled the package are numbers that mean nothing here, and are not closed: another file may have them)
+    DATATYPE_TAG[] = TYPENAME_TAG[] = SVEC_TAG[] = SYMBOL_TAG[] = EMPTY_SVEC[] = 0
+    empty!(WELL_KNOWN_ADDRESSES)
+    empty!(SIZED_SVECS)
+    empty!(HEAP_IR)
+    LOADER_IR[] = ""
+    return nothing
+end
+
 # Define the runtime functions that `mod` calls but does not define.
-function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()))
+function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()), strip::Bool = false)
     link_cfunctions!(mod, cfunctions) && run!(GlobalDCEPass(), mod)
     blas = resolve_blas_lookups!(mod) # (before what they are given is embedded)
     library_plan = resolve_library_lookups!(mod; libraries)
@@ -93,6 +106,7 @@ function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool 
         isempty(dynamic) && isempty(pointers) || throw(UnsupportedCodeError(dynamic, pointers, isempty(dynamic) ? String[] : nonconst_globals(mod), dynamic_call_sites(mod, dynamic)))
     end
     say_dangling_pointers(e)
+    strip && LLVM.strip_debuginfo!(mod) # (what refusing the code needed it for is done: see the entry points in `overrides.jl`)
     define_dynamic_stubs!(mod)
     needed = filter(RUNTIME_SHIM_FUNCTIONS) do name
         haskey(LLVM.functions(mod), name) && LLVM.isdeclaration(LLVM.functions(mod)[name])

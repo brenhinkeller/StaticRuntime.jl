@@ -184,18 +184,20 @@ end
 
 ## The key of the inference cache
 
-# `hash` of a `Union` does not tell unions apart, so a type is its members' `objectid`s. The order does not matter.
-type_id(@nospecialize(T)) = hash(sort!(UInt[objectid(t) for t in Base.uniontypes(T)]))
+# A hash of a type that is the same in every process: the `objectid` of a type is not, and a key made of them is only that of the session that made it, so that nothing that a workload infers when a package is compiled (see
+# `src/precompile.jl`) could be used by the sessions that load it. `hash` of a `DataType` is made of its name and its parameters, and is the same; of a `Union` it does not tell unions apart (it is the same for all),
+# so a union is its members, in order. (A type that a session makes, in a module that it makes, has a hash of its own: what is inferred for it is not found by another session, which can't have it.)
+type_hash(@nospecialize(T)) = T isa Union ? hash(sort!(UInt[hash(t) for t in Base.uniontypes(T)])) : hash(T)
 
 # what the types of the slots are, and what the universe is (both are sets: the order does not matter)
 function slots_hash(s::SlotState)
     h = UInt(0)
     for (k, T) in s.types
-        h += hash(type_id(T), hash(objectid(k[2]), hash(k[1], hash(k[3]))))
+        h += hash(type_hash(T), hash(type_hash(k[2]), hash(k[1], hash(k[3]))))
     end
     u = UInt(0)
     for t in s.universe
-        u += UInt(objectid(t))
+        u += type_hash(t)
     end
     return hash(s.mode, hash(length(s.types), hash(h, hash(length(s.universe), u))))
 end
@@ -203,22 +205,29 @@ end
 function boxes_hash(b::BoxState)
     h = UInt(0)
     for ((k, n), T) in b.types
-        h += hash(type_id(T), hash(n, hash(objectid(k))))
+        h += hash(type_hash(T), hash(n, type_hash(k)))
     end
     return hash(length(b.types), h)
+end
+
+# the functions that the calls of unknown functions are made over (in the order that they were found: the union is made in it), and the callbacks
+function closures_hash(cl::ClosureState)
+    h = foldl((h, T) -> hash(type_hash(T), h), cl.functions; init = UInt(0))
+    h = hash(length(cl.functions), h)
+    h = foldl((h, (V, F)) -> hash(type_hash(F), hash(type_hash(V), h)), cl.callbacks; init = h)
+    return hash(length(cl.callbacks), h)
 end
 
 """
     inference_key(c::Compilation) -> Int
 
-The number that the inference of this pass of the compilation is kept apart by (the parameters of the job: see `OverridesParams`): a hash of all that it is made with. Each state that inference reads is in it, by what it *is*.
+The number that the inference of this pass of the compilation is kept apart by (the parameters of the job: see `OverridesParams`): a hash of all that it is made with. Each state that inference reads is in it, by what it *is*,
+and in a way that is the same in every process (`type_hash`).
 """
 function inference_key(c::Compilation)
-    cl = c.closures
     h = hash(c.settings)
     h = hash(c.registered.version, h)
-    h = hash(length(cl.functions), foldl((h, T) -> hash(objectid(T), h), cl.functions; init = h)) # (in the order that they were found: the union is made in it)
-    h = hash(length(cl.callbacks), foldl((h, (V, F)) -> hash(objectid(F), hash(objectid(V), h)), cl.callbacks; init = h))
+    h = hash(closures_hash(c.closures), h)
     h = hash(boxes_hash(c.boxes), h)
     h = hash(slots_hash(c.slots), h)
     return h % Int

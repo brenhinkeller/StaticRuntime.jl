@@ -51,6 +51,44 @@ struct StateProbe; x::Int; end
     @test StaticRuntime.Compilation().key == after.key
 end
 
+# The key is the same in every process (the `objectid` of a type is not): so what a workload infers when the package is compiled is found by the sessions that load it. The same state, of types that every process has, is made
+# here and in another process, and what its key is made of has to be the same.
+const KEY_PROBE = """
+    using StaticRuntime
+    S = StaticRuntime
+    c = S.Compilation()
+    append!(c.closures.functions, [typeof(sin), typeof(cos), typeof(identity)])
+    push!(c.closures.callbacks, (Int, typeof(sin)))
+    c.boxes.types[(Tuple{typeof(sin),Float64}, 1)] = Union{Int,String}
+    c.boxes.types[(typeof(sin), :contents)] = Float64
+    c.slots.types[(:elem, Any, nothing)] = Union{Int,String,Vector{Int}}
+    c.slots.types[(:field, Base.RefValue{Any}, :x)] = Float64
+    union!(c.slots.universe, [Vector{Int}, Tuple{Int,Float64}, Dict{Symbol,Any}])
+    join((S.closures_hash(c.closures), S.boxes_hash(c.boxes), S.slots_hash(c.slots)), ",")
+    """
+@testset "The key is the same in every process" begin
+    here = Base.invokelatest(include_string, Module(:KeyProbe), KEY_PROBE)
+    code = string("print(begin\n", KEY_PROBE, "\nend)")
+    there = read(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $code`, String)
+    @test here == there
+    # (and a union is told from another: the `hash` of one is not)
+    @test StaticRuntime.type_hash(Union{Int,String}) != StaticRuntime.type_hash(Union{Int,Symbol})
+    @test StaticRuntime.type_hash(Union{Int,String}) == StaticRuntime.type_hash(Union{String,Int})
+end
+
+# What the workload inferred when the package was compiled is found by the programs that are the same, and the slots of such a program are analyzed all the same (what is true of its inference, `DISPATCH_USED_KEYS` and `SLOT_FACTS`,
+# is kept with it): a program of the workload that is compiled in another process has more than one pass, as it did when the workload compiled it
+@testset "What is found of the programs of the workload is found whole" begin
+    code = """
+        using StaticRuntime
+        compile_executable(StaticRuntime.PrecompileWorkload.showing, (Int, Ptr{Ptr{UInt8}}), mktempdir(), "showing")
+        c = StaticRuntime.LAST_COMPILATION[]
+        print(c.slots.passes, ",", length(c.slots.types))
+        """
+    passes, known = parse.(Int, split(read(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $code`, String), ','))
+    @test passes > 0 && known > 0
+end
+
 # The globals that a program has are its own state (they are the initial values of those of the binary): the process that compiles never runs the code that changes them, so each is still as it was made. If one is
 # not, the programs that are compiled after it have what it was changed to.
 @testset "The state of the programs is as it was made" begin

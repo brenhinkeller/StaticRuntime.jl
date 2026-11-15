@@ -3,8 +3,8 @@
 # part of the language or of the library that it belongs to, and change the manual (the section "Known limitations"); if something that was refused now compiles and does not work, that is
 # worse than the refusal.
 
-# (this file has a budget of two minutes. `static_status` does not compile a refusal a second time for the places in the code (`strip = true`), and the two programs that reach so much of Base that they take about a
-# minute to compile (starting another program, `Markdown.parse`) are compiled by processes of their own, which run while the rest of the file does; the last test says if the budget was not kept)
+# (this file has a budget of two minutes. The two programs that reach so much of Base that they take about a minute to compile (starting another program, `Markdown.parse`) are compiled by processes of their own,
+# which run while the rest of the file does; the last test says if the budget was not kept)
 const LIMITATIONS_START = time()
 
 # the refusal of the program `code` (the source of a function of no arguments) by a process of its own that is started now: `(process, file)`, to be read by `refusal_of`
@@ -13,7 +13,7 @@ function refusal_in_process(code::AbstractString)
     script = """
         using Test, Random, Printf, Libdl, Markdown
         include($(repr(joinpath(@__DIR__, "..", "helpers.jl"))))
-        status, detail = static_status($code; strip = true)
+        status, detail = static_status($code)
         write($(repr(file)), string(status, '\\n', detail))
         """
     cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`
@@ -66,7 +66,7 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
     ]
     for (name, f) in cases
         @testset "$name" begin
-            status, detail = static_status(f; strip = true) # (the refusal is not compiled a second time, with the debug information that says where in the code: the message is what is checked)
+            status, detail = static_status(f)
             @test status == :compile_error
             @test occursin(REFUSAL, string(detail))
         end

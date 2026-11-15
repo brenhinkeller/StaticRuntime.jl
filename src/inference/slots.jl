@@ -283,7 +283,10 @@ end
 # The stores of a method as they are before the inliner and the scalar replacement have been at it (a `Pair` that only holds the value that is read from a `Dict` for a moment is not there afterwards, and the type of its field is
 # read all the same), as facts about the method that are kept, so that the method is not looked at again when it is taken from the cache: (the method, the key of the cache) => the stores as (slot, type)
 # (it is a cache of what is true of a method for a key of the inference cache, which is made of all that inference depends on: it is kept for as long as what is inferred is, which is longer than a compilation)
-const SLOT_FACTS = Dict{Tuple{Core.MethodInstance,Int},Vector{Tuple{SlotKey,Any}}}()
+# (An `IdDict` by the method, and the key inside it: the key of a table that is looked in is a number made of the address of the method, which is not the same when the image of a package that has the table is loaded. Julia makes
+# an `IdDict` again when it loads one, but not every entry of it is found by what is looked for afterwards, so `rehash_slot_facts!` makes it again when this package is loaded. The workload of `precompile.jl` has filled it in, and
+# what is found of the programs of it is found with it.)
+const SLOT_FACTS = IdDict{Core.MethodInstance,Dict{Int,Vector{Tuple{SlotKey,Any}}}}()
 
 function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstance)
     s = c.slots
@@ -305,8 +308,18 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     finally
         s.facts_sink = nothing
     end
-    SLOT_FACTS[(mi, c.key)] = facts
+    get!(Dict{Int,Vector{Tuple{SlotKey,Any}}}, SLOT_FACTS, mi)[c.key] = facts
     return
+end
+
+# the table of the facts made again, as it has to be when it was loaded from the image of the package (the entries are all there, by iterating, and not all of them are found by their keys)
+function rehash_slot_facts!()
+    entries = collect(SLOT_FACTS)
+    empty!(SLOT_FACTS)
+    for (mi, bykey) in entries
+        SLOT_FACTS[mi] = bykey
+    end
+    return nothing
 end
 
 # The facts of every method that the code that was compiled depends on, which the inlined ones are among (the edges of a method are the methods that it calls and those that were inlined into it)
@@ -329,7 +342,9 @@ end
 
 function replay_slot_facts!(c::Compilation, mi::Core.MethodInstance)
     s = c.slots
-    facts = get(SLOT_FACTS, (mi, c.key), nothing)
+    bykey = get(SLOT_FACTS, mi, nothing)
+    bykey === nothing && return
+    facts = get(bykey, c.key, nothing)
     facts === nothing && return
     for (key, T) in facts
         key[1] === :raw ? push!(s.raw_store_types, key[2]) : key[1] === :universe ? push!(s.universe_seen, key[2]) : key[1] === :truncated ? (s.scan_truncated = true) : note_slot_store!(c, key, T)
@@ -567,10 +582,12 @@ function update_slot_types!(c::Compilation)
         elseif T === Union{} || T === used
             continue
         elseif T <: used
+            @debug "slot narrowed" key = k from = used to = T _id = :static_slot_changes
             s.types[k] = T
             changed = true
         else
             new = Union{used, T}
+            @debug "slot widened" key = k from = used added = T _id = :static_slot_changes
             if Base.unionlen(new) > c.settings.slot_limit
                 delete!(s.types, k)
                 push!(s.open, k)

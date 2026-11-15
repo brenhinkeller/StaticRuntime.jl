@@ -60,4 +60,21 @@ export StaticIO, StaticFile, STDIN, STDOUT, STDERR
 export static_result, static_status, static_status_batch, undefined_symbols, allocation_sites, @static_test
 export gc_live_bytes, gc_collections, gc_heap_bytes
 
+# What a process finds out about itself (the addresses of its objects, its worlds, which of its modules are Julia's) is the process's: when this package is loaded from its compiled image it is found out again, and not
+# taken from the process that compiled it (which a workload, see `precompile.jl`, has filled it in). The registrations (`REGISTRY`) are the package's, and are kept, and so are `SLOT_FACTS` and `DISPATCH_USED_KEYS`: they
+# are what is true of what was inferred for a key (`inference_key`, which is the same in every process), and what the workload inferred is kept for it, so that they have to go with it: a program whose inference is found
+# but whose slots are not analyzed (nothing in it has seen a call over the registered types) would be compiled without the types of its slots.
+function __init__()
+    Runtime.forget_process_state!()
+    rehash_slot_facts!()
+    empty!(CLOSED_SUBTYPES)
+    empty!(USER_MODULES); empty!(JULIA_OWNED_MODULES)
+    CURRENT_COMPILATION[] = nothing
+    LAST_COMPILATION[] = nothing
+    return nothing
+end
+
+# Precompilation: what every compilation runs is compiled with the package (`PrecompileTools`)
+include("precompile.jl")
+
 end # module StaticRuntime

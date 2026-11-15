@@ -71,7 +71,7 @@ dopen(a::DOpenE) = 5
     @testset "abstract types that can't be listed stay dynamic (and are rejected)" begin
         # (what is stored in the slot is not known: the type of it is only `DOpen`)
         f() = (v = DOpen[Base.inferencebarrier(DOpenB(1))::DOpen, DOpenB(2)]; sum(dopen, v))
-        @test static_status(f; strip = true)[1] == :compile_error
+        @test static_status(f)[1] == :compile_error
         # (what is stored is known: the types that the slot holds are what is dispatched on)
         f2() = (v = DOpen[DOpenB(1), DOpenC(2)]; sum(dopen, v))
         @test static_result(f2) == f2()
@@ -214,7 +214,7 @@ end
     # (and with the old behavior, which is asked for by `STATIC_RUNTIME_NOSPECIALIZEINFER=0`, the fields are not known)
     try
         ENV["STATIC_RUNTIME_NOSPECIALIZEINFER"] = "0"
-        @test static_status(() -> round(Int, 10 * nsi_total((a = opaque(2), b = 2.5, c = 3))); strip = true)[1] == :compile_error
+        @test static_status(() -> round(Int, 10 * nsi_total((a = opaque(2), b = 2.5, c = 3))))[1] == :compile_error
         @test only(methods(nsi_total)).nospecializeinfer
     finally
         delete!(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER")

@@ -106,27 +106,22 @@ end
 for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_module)
     @eval begin
         function $f(args...; method_table = method_table, params = nothing, strict::Bool = true, stub_errors::Bool = true, allow = (), gc = default_gc(), target = default_target(),
-                    libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(),
-                    llvm_postprocess = mod -> (c = compilation(); report_registered_dispatch(c); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = c.closures.cfunction_roots, libraries_used = c.libraries)), kwargs...)
+                    libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(), strip::Bool = true, llvm_postprocess = nothing, kwargs...)
             libraries in (:system, :bundle) || throw(ArgumentError("`libraries` is `:system` or `:bundle`, not `$(repr(libraries))`"))
             check_gc(gc)
             register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
             explicit_params = params
-            run(extra) = compile_passes(; strict) do c
+            # (The code keeps its debug information until it has been accepted, which is what says where in the Julia code the calls of the runtime that it refuses are: `link_runtime!` removes it then, as `strip` says. The code
+            # was made without it, and made again with it when it was refused: that was twice the time of what is refused. With a postprocess of the caller's, the code is given to it as `strip` says.)
+            ours = llvm_postprocess === nothing
+            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries))) : llvm_postprocess
+            result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 $(f in (:compile_executable, :compile_shlib) ?
                     :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && check_entry(args[1], args[2]; method_table, params = job_params, target)) : :nothing)
                 entry_args = rooted_arguments(c, args)
-                Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess,
-                                  $(f in (:compile_executable, :compile_shlib) ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs), extra)...) : :(merge(NamedTuple(kwargs), extra)...)))
-            end
-            result, c = try
-                run((;))
-            catch e
-                # (the debug information, which says where in the Julia code the calls of the runtime are, is removed before the code is checked: when it is not accepted, it is made again with it)
-                (e isa UnsupportedCodeError && strict && !haskey(kwargs, :strip)) || rethrow()
-                detailed = try run((; strip = false)); nothing catch e2; e2 end
-                throw(detailed isa UnsupportedCodeError ? detailed : e)
+                Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess = postprocess, strip = !ours && strip,
+                                  $(f in (:compile_executable, :compile_shlib) ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs))...) : :(NamedTuple(kwargs)...)))
             end
             $(f in (:compile_executable, :compile_shlib) ? :(libraries === :bundle && result isa AbstractString && Runtime.bundle_libraries(result, c.libraries[])) : :nothing)
             return result
