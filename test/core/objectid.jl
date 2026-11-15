@@ -43,6 +43,6 @@ const OID_PTS = Dict(OidPt(1, 2.0) => 1, OidPt(3, 4.0) => 2)
         "objectid"         => () -> (objectid(OidNamed("a", 1)) == objectid(OidNamed(mk("a")[1:1], 1))),
     ]
     check_cases(cases)
-    # an `objectid` of a type that is not known when compiling is reported
-    @test static_status(() -> Int(objectid(Base.inferencebarrier(OidNamed("a", 1))) % 2))[1] == :compile_error
+    # an `objectid` of a value of the type `Any` is a call over the types that the program makes (and those that are registered), as any call of a method that is not for one type is
+    @test static_status(() -> Int(objectid(Base.inferencebarrier(OidNamed("a", 1))) % 2))[1] == :ok
 end

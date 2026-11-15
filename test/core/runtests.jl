@@ -43,6 +43,7 @@ end
 @testset verbose=true "Symbols" include_timed("symbols.jl")
 @testset verbose=true "Globals" include_timed("globals.jl")
 @testset verbose=true "Random" include_timed("random.jl")
+@testset verbose=true "Tasks" include_timed("tasks.jl")
 
 # printing
 @testset verbose=true "Printing" begin

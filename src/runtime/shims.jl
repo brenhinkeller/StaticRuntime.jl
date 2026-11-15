@@ -444,6 +444,15 @@ define linkonce_odr void @jl_genericmemory_copyto(ptr %dm, ptr %dd, ptr %sm, ptr
   ret void
 }
 
+; a `Task`, zero, of `%sz` bytes (the fields that Julia can see: `new` of `Task` is refused, as it has fields that only the runtime of Julia writes): the heap gives it zeroed, and it has the tag of the type (a small one, like
+; those of the types that Julia has the tags of in a table, which is what `isa Task` compares)
+define linkonce_odr ptr @static_new_task(i64 %sz) {
+  %obj = call ptr @gpu_gc_pool_alloc(i64 %sz)
+  %tagslot = getelementptr inbounds i8, ptr %obj, i64 -8
+  store i64 {{TAG_TASK}}, ptr %tagslot, align 8
+  ret ptr %obj
+}
+
 ; there are no tasks: hand out a zeroed dummy task/ptls
 define linkonce_odr ptr @"julia.get_pgcstack"() {
   ret ptr getelementptr inbounds (i8, ptr @_static_task, i64 512)
@@ -469,6 +478,8 @@ define linkonce_odr ptr @"julia.get_pgcstack_or_new"() {
 @_static_handlers = internal global [256 x ptr] zeroinitializer, align 16
 @_static_nhandlers = internal global i64 0
 @_static_excstack = internal global [256 x ptr] zeroinitializer, align 16
+; the scope of the task (`ScopedValue`s), as it was when each handler was entered: a handler that is left puts it back, as Julia's does (`jl_handler_t` has it), which is what ends a `with`
+@_static_scopes = internal global [256 x ptr] zeroinitializer, align 16
 @_static_nexc = internal global i64 0
 @_static_uncaught_msg = private unnamed_addr constant [51 x i8] c"fatal: uncaught exception (no handler to catch it)\00"
 @_static_overflow_msg = private unnamed_addr constant [40 x i8] c"fatal: exception handler stack overflow\00"
@@ -492,6 +503,9 @@ over:
 ok:
   %slot = getelementptr inbounds ptr, ptr @_static_handlers, i64 %n
   store ptr %h, ptr %slot, align 8
+  %scope_now = load ptr, ptr getelementptr inbounds ({ [49 x i64], ptr, [78 x i64] }, ptr @_static_task, i32 0, i32 1), align 8
+  %scope_slot = getelementptr inbounds ptr, ptr @_static_scopes, i64 %n
+  store ptr %scope_now, ptr %scope_slot, align 8
   %n1 = add i64 %n, 1
   store i64 %n1, ptr @_static_nhandlers, align 8
   ret void
@@ -502,6 +516,14 @@ define linkonce_odr void @ijl_pop_handler(ptr %task, i32 %k) {
   %k64 = zext i32 %k to i64
   %m = sub i64 %n, %k64
   store i64 %m, ptr @_static_nhandlers, align 8
+  %some = icmp ugt i64 %k64, 0
+  br i1 %some, label %restore, label %done
+restore:
+  %old_slot = getelementptr inbounds ptr, ptr @_static_scopes, i64 %m
+  %old_scope = load ptr, ptr %old_slot, align 8
+  store ptr %old_scope, ptr getelementptr inbounds ({ [49 x i64], ptr, [78 x i64] }, ptr @_static_task, i32 0, i32 1), align 8
+  br label %done
+done:
   ret void
 }
 
@@ -595,7 +617,7 @@ function shim_ir()
                              "TAG_INT8" => Int8(1), "TAG_UINT8" => UInt8(1), "TAG_INT16" => Int16(1),
                              "TAG_UINT16" => UInt16(1), "TAG_CHAR" => 'a', "TAG_FLOAT32" => 1f0, "TAG_FLOAT64" => 1.0,
                              "TAG_SYMBOL" => :a, "TAG_BOOL" => true, "TAG_NOTHING" => nothing,
-                             "TAG_MEMORY_UINT8" => Memory{UInt8}(undef, 1))
+                             "TAG_MEMORY_UINT8" => Memory{UInt8}(undef, 1), "TAG_TASK" => current_task())
         ir = replace(ir, "{{$token}}" => string(object_tag(example)))
     end
     return ir
@@ -614,7 +636,7 @@ const RUNTIME_SHIM_FUNCTIONS = (
     "ijl_alloc_string", "ijl_pchar_to_string", "jl_pchar_to_string", "ijl_cstr_to_string", "jl_cstr_to_string", "jl_string_to_genericmemory", "jl_genericmemory_to_string",
     "jl_genericmemory_copyto",
     "ijl_gc_add_ptr_finalizer", "jl_gc_have_pending_finalizers", "jl_gc_run_pending_finalizers",
-    "ijl_ptr_to_genericmemory", "jl_ptr_to_genericmemory",
+    "ijl_ptr_to_genericmemory", "jl_ptr_to_genericmemory", "static_new_task",
 )
 
 # Functions of the C library and of the math library, which every executable links to: a `ccall` to

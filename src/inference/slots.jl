@@ -21,6 +21,8 @@ const SLOT_TYPES = Dict{SlotKey,Any}()
 const SLOT_OPEN = Set{SlotKey}()
 const SEEN_UNKNOWN = Set{SlotKey}()
 const SLOT_PASSES = Ref(0)
+# whether a compilation that failed with the types of the slots was made again without them (once)
+const SLOTS_FALLBACK = Ref(false)
 const SLOT_PASS_LIMIT = 4
 # (for finding out why a slot is given up: the first stores of a type that is not known, as text; kept when `STATIC_RUNTIME_SLOTS_WHY` is set)
 const SLOTS_WHY = Ref(false)
@@ -157,6 +159,7 @@ function reset_slots!(; strict::Bool = true)
     empty!(SEEN_SLOTS)
     empty!(SEEN_UNKNOWN)
     SLOT_PASSES[] = 0
+    SLOTS_FALLBACK[] = false
     SCAN_TRUNCATED[] = false
     mode = get(ENV, "STATIC_RUNTIME_SLOTS", "on")
     SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on

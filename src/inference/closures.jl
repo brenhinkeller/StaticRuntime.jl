@@ -329,6 +329,15 @@ function with_function_candidates_passes(compile; strict::Bool = true)
             else
                 (e isa UnsupportedCodeError || e isa InferenceError) || rethrow()
                 failure = e
+                if SLOTS_MODE[] === :on && !isempty(SLOT_TYPES) && !SLOTS_FALLBACK[]
+                    # (the types that the slots were given in this pass may be what failed: the first pass that has them uses what was stored that the analysis could type, and the passes that follow take back what it
+                    # was wrong about; a pass that does not compile is not followed by one. The program is compiled once more without them, as it was before they were: with the failure that it has then, if it has one)
+                    SLOTS_FALLBACK[] = true
+                    empty!(SLOT_TYPES)
+                    SLOTS_MODE[] = :off
+                    slots_retry = true
+                    failure = nothing
+                end
             end
         end
         new = Type[T for T in SEEN_FUNCTIONS if !(T in FUNCTION_CANDIDATES)]

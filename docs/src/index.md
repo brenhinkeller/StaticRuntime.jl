@@ -760,7 +760,7 @@ the library needs). The point-to-point and collective operations (`Send`, `Recv!
 `Alltoall`, `Scan`, `Exscan`, `Barrier`), communicators (`Comm_split`, `Comm_dup`, which are freed by their finalizers, `Cart_create`), one-sided communication (`Win_create`, `Put!`, `Win_fence`), parallel files (`MPI.File`),
 `Wtime`, the status of a message, and MPI errors (an `MPI.MPIError` that can be caught) are compared with Julia's in `test/packages/mpi.jl`. What is different:
 
-* `MPI.Init` does not register `MPI.Finalize` to be called when the program ends (a compiled program does not run `atexit` functions): **call `MPI.Finalize()` at the end** (`finalize_atexit` is ignored).
+* `MPI.Init` does not register `MPI.Finalize` to be called when the program ends (the extension does not register it with `atexit`): **call `MPI.Finalize()` at the end** (`finalize_atexit` is ignored).
 * The handles of the constants (`MPI.COMM_WORLD`, `MPI.INT`, `MPI.SUM`, ...) are the numbers that the library has them as when compiling, which are the same on each run for the MPICH family (MPICH, Intel MPI, the MPI ABI libraries);
   they are addresses in Open MPI, which a compiled program can't use.
 * Not supported: a reduction with an operator that is a function of yours (`MPI.Allreduce(x, f, comm)`): MPI.jl makes its C function with `@cfunction($w, ...)` of a value that holds the function, which Julia makes with a trampoline that it generates when the program runs (see [Callbacks: `@cfunction`](@ref)); and `MPI.send` / `MPI.recv` of any object (they use `Serialization`): use the
@@ -780,6 +780,28 @@ library allocated (a `Regex` made when the program runs, a sparse factorization,
 * The collector is conservative: an object that a word of the stack happens to have the address of is not freed by that collection (so a finalizer may run at a later collection than in Julia, or, for one of the last
   objects made, not at all in a short program). The collector zeroes the unused part of the stack before it looks at it, which is most of the cases.
 * Memory that a library allocated is not counted by the collector, so an object that has a finalizer counts as 1 KiB of allocation towards the next collection.
+
+## Tasks
+
+A program has one thread and one stack, so a task is not run beside the others: it runs to its end when something waits. `@async`, `Threads.@spawn` and `Task` make a task that is put in a queue (`schedule`); `wait(task)`, `fetch(task)`, `wait(condition)`, `take!` of a `Channel`, `yield()`, `sleep` and the end of a `@sync` block are what block, and what a block does is run the tasks of the queue, one after another, each to its end, until the task that waits can go on. A task that waits itself runs the others in the same way, on top of the first. As in Julia, the tasks run when the one that made them waits or yields, in the order that they were scheduled:
+
+```julia
+log = Int[]
+a = @async push!(log, 1)
+b = @async push!(log, 2)
+push!(log, 0)
+wait(a); wait(b)
+log   # [0, 1, 2], as in Julia
+```
+
+What is the same as in Julia: `current_task()` is a `Task` (the main one has no code), `task_local_storage` is the storage of the current task, the `ScopedValue`s that are set where a task is made are the ones that it has (and `@with` puts them back when it ends, also when it ends in an error), a task that fails gives a `TaskFailedException` to `fetch` and `wait`, and `@sync` gives a `CompositeException` of them.
+
+What is not:
+
+* A task that waits goes on when the tasks that it ran have returned, and **a task that is lower on the stack can't be resumed before the ones above it return**. A program in which tasks hand values to each other many times stops with a message that says so, as does one in which every task waits for something that none gives (a deadlock: in Julia it waits for ever).
+* **A `Channel` never makes `put!` wait**: it holds what is put in it, whatever its size (also with no buffer), and `take!` waits. A producer that is a task runs to its end, and then the one that takes goes on, so what the tasks print is in that order, and not mixed.
+* `sleep` runs the tasks that are scheduled, and then waits; `Timer` and tasks on other threads are not supported.
+* **`atexit`**: the functions are run when the program ends, last registered first, by the C library: when `main` returns and when `exit` is called, before the streams are flushed. A function that fails does not stop the others. (`exit(code)` ends the program with that status.)
 
 ## Random numbers
 
@@ -895,11 +917,13 @@ What does not work yet, or works differently from Julia, gathered in one place. 
   `cholesky`, `lu`, `schur`, `ordschur`, `hessenberg`, `inv`, `det`, `\`, `opnorm`, ...), Sockets' address types, and the file system (see [The file system](@ref)).
 * Do not: `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own); `readdlm` / `writedlm`; `@time` and `@allocated` (use `@elapsed`);
   `TOML.parse` (the parser keeps a `Module`); `Markdown.parse` is refused when compiling, or stops with a message when it is run (its parser needs Julia's own); `Mmap` of an open stream, and anonymous ones (only the files that are named by their path are mapped); `Test` (`@test` and `@testset`); `with_logger` with a logger other than `NullLogger`; starting other programs;
-  `Base64` of anything but a string or bytes; `atexit` (the function would not be run, so the program stops when it is registered, except for SuiteSparse's own).
+  `Base64` of anything but a string or bytes.
 
-**Threads, tasks and `eval`**
+**Tasks, threads and `eval`**
 
-* There are **no tasks, `Channel`s, `@async` or `Threads.@spawn`**, no `eval`, and no keyword form of `invokelatest`; **`@cfunction`** of a function with captured state (a closure over a variable) does not work (see [Callbacks: `@cfunction`](@ref)). (`Regex`, `BigInt` and `BigFloat` work: see
+* **Tasks run to their end** (see [Tasks](@ref) below): `@async`, `Threads.@spawn`, `Task`, `schedule`, `wait`, `fetch`, `yield`, `@sync`, `Condition` and `Channel` work, on the one thread, and a task runs when something waits.
+
+* There is **no `eval`**, and no keyword form of `invokelatest`; **`@cfunction`** of a function with captured state (a closure over a variable) does not work (see [Callbacks: `@cfunction`](@ref)). (`Regex`, `BigInt` and `BigFloat` work: see
   [Libraries: `BigInt`, `BigFloat`, `Regex`, JLLs and libraries of your own](@ref).)
 * **The heap is not thread-safe.** A program, or a library from `compile_shlib`, allocates from one thread at a time. A library that
   is called on a stack that is not that of the thread (a task of Julia running on another thread) **frees nothing** in that call
@@ -940,7 +964,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
   and exits. An exception that nothing catches prints `fatal: uncaught exception (no handler to catch it)` and exits with status 1,
   without a backtrace or the message of the exception.
 * **There is no stack overflow check:** infinite recursion crashes (segmentation fault) instead of throwing `StackOverflowError`.
-* **Locks do nothing** (there is one thread), `islocked` is `false`, and `yield` returns at once.
+* **Locks do nothing** (there is one thread), and `islocked` is `false`.
 * **Files** are libc streams: `eachline` of a file closes it only when the loop reaches the end (not on `break`), `seek` and
   `skip` don't report errors, `open` takes only a C `fopen` mode, and the keyword arguments of `readline` and `eachline` (`keep = true`)
   are not supported. The file system (`isfile`, `mkdir`, `readdir`, ...) and sockets are not available.

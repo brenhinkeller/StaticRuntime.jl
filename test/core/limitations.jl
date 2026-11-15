@@ -24,11 +24,6 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
 
 @testset "Refused when compiling" begin
     cases = [
-        # tasks and what is made of them (there is no scheduler)
-        "@async and fetch"            => () -> fetch(@async 1 + 1),
-        "Threads.@spawn and fetch"    => () -> fetch(Threads.@spawn 1 + 1),
-        "a Channel"                   => () -> (c = Channel{Int}(2); put!(c, 1); take!(c)),
-        "a Task that is scheduled"    => () -> (t = Task(() -> 1); schedule(t); wait(t); 1),
         # a tuple that has an element of a `Union` of types, and is made when the program runs
         "a tuple with a Union element, not inlined" => () -> (p = union_tuple(opaque(1)); p[2] * 10 + length(p[1])),
         # code that is made when the program runs
@@ -41,7 +36,6 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
         "@time"                       => () -> (@time opaque(1) + 1; 0),
         "starting another program"    => () -> (run(`true`); 0),
         "TOML.parse"                  => () -> length(TOML.parse(opaque("a = 1"))),
-        "a function that atexit calls, with state" => () -> (x = opaque(1); atexit(() -> println(x)); 0),
     ]
     for (name, f) in cases
         @testset "$name" begin

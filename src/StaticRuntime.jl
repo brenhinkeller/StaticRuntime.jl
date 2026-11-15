@@ -35,6 +35,7 @@ include("overrides/random.jl")     # Random number generation without tasks
 include("overrides/logging.jl")    # @warn, @info and @error, to the standard error
 include("overrides/gc.jl")         # The garbage collector, from the program
 include("overrides/finalizers.jl") # finalizer(f, x) of a Julia function
+include("overrides/tasks.jl")      # Tasks that run to completion: @async, Channel, wait, fetch
 
 # Inference: what the compiler does with calls that are not resolved by Julia
 include("inference/dispatch.jl")    # dynamic dispatch on abstract types, by union splitting

@@ -102,10 +102,11 @@ end
     return v
 end
 
-# `sleep` is a timer of libuv, which needs the event loop. Here it is `nanosleep` (started again with the time that is left if a signal interrupts it)
+# `sleep` is a timer of libuv, which needs the event loop. Here it is the tasks that are scheduled, run, and then `nanosleep` (started again with the time that is left if a signal interrupts it)
 @device_override function Base.sleep(sec::Real)
     sec >= 0 || throw(ArgumentError("sleep time must be nonnegative, got $sec"))
     isnan(sec) && throw(ArgumentError("sleep time must not be NaN"))
+    yield() # (the tasks that are scheduled run while the program sleeps: see `tasks.jl`)
     whole = floor(min(Float64(sec), 1e15))
     nanos = round(Int64, (min(Float64(sec), 1e15) - whole) * 1e9)
     whole_s = Int64(whole)
@@ -125,9 +126,6 @@ end
 @device_override Base.unlock(::ReentrantLock) = nothing
 @device_override Base.trylock(::ReentrantLock) = true
 @device_override Base.islocked(::ReentrantLock) = false
-
-# Letting another task run: there is no other task
-@device_override Base.yield() = nothing
 
 # `string(chars, strings, symbols...)` (`_string`) loops over its arguments twice, the first time to
 # add up their lengths and the second to copy them, again with arguments of different types: so
@@ -210,15 +208,46 @@ end
     return tv[]
 end
 
-# `atexit(f)`: a program that is compiled does not run the functions that were registered when it ends, except the ones that are of the standard libraries
-# (SuiteSparse registers one that shuts it down, which the system does by ending the process): for those it is not needed, and for any other, which would not be run, the
-# program stops when it is reached, and does not go on without what it was asked for.
-@generated function static_atexit(::Type{F}) where {F}
+# `exit(code)` ends the program with the status `code`, through the C library (which runs the functions of `atexit` and flushes the streams); Julia's tells the runtime, and runs them itself
+@device_override Base.exit(code::Integer) = ccall(:exit, Union{}, (Cint,), Cint(code))
+@device_override Base.exit() = ccall(:exit, Union{}, (Cint,), Cint(0))
+
+# `atexit(f)`: the functions are run when the program ends, last registered first, as in Julia. The first `atexit` of the program registers one function of the C library (`atexit`), which runs them: it is run by the
+# C library when `main` returns and when `exit` is called, whatever the entry point is, and before the streams are flushed. (The functions that the standard libraries register, SuiteSparse's, which shuts it down,
+# which the system does by ending the process, are not kept.) An error in one of them does not stop the others. The functions are called by `call_callback`: they are the ones that were registered.
+struct AtExit end
+const ATEXIT_HOOKS = Any[]
+const ATEXIT_INSTALLED = Ref(false)
+
+function run_atexit_hooks()
+    while !isempty(ATEXIT_HOOKS)
+        f = pop!(ATEXIT_HOOKS)
+        try
+            call_callback(AtExit, f)
+        catch
+        end
+    end
+    return nothing
+end
+
+@noinline function install_atexit_runner()
+    ATEXIT_INSTALLED[] && return nothing
+    ATEXIT_INSTALLED[] = true
+    ccall(:atexit, Cint, (Ptr{Cvoid},), @cfunction(run_atexit_hooks, Cvoid, ()))
+    return nothing
+end
+
+@generated function static_atexit(f::F) where {F}
     parent = parentmodule(F)
     standard = parent in (Base, Core) || nameof(parent) in (:LibSuiteSparse, :SparseArrays, :CHOLMOD, :UMFPACK, :SPQR)
-    return standard ? :(nothing) : :(error("`atexit` is not supported in compiled programs: the function would not be run"))
+    return standard ? :(nothing) : quote
+        note_callback(AtExit, f)
+        push!(ATEXIT_HOOKS, f)
+        install_atexit_runner()
+        return nothing
+    end
 end
-@device_override Base.atexit(f::Function) = static_atexit(typeof(f))
+@device_override Base.atexit(f::Function) = static_atexit(f)
 
 # the path of a `LazyLibrary`, as the compiler has it (see `host_dlpath` in `runtime/libraries.jl`)
 @device_override Runtime.Libdl.dlpath(lib::Runtime.Libdl.LazyLibrary) = Runtime.host_dlpath(lib)
