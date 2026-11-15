@@ -158,7 +158,7 @@ See [Known limitations](https://brenhinkeller.github.io/StaticRuntime.jl/dev/#Kn
 * `src/inference/`: what the compiler does with calls that Julia does not resolve: dynamic dispatch (`dispatch.jl`), closures (`closures.jl`), `@cfunction` (`cfunctions.jl`) and the errors that say why a program does not infer (`diagnostics.jl`).
 * `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and BLAS and the loader of libraries.
 * `src/pipeline.jl` and `src/tags.jl`: the LLVM passes; `src/testing.jl`: `static_status` and the other functions that compare a compiled program with Julia.
-* `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, Dates, Base64, Mmap, MPI).
+* `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, StyledStrings, Observables, Makie, Mmap, MPI).
 
 ### Running the tests
 
