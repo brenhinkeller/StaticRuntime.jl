@@ -27,7 +27,7 @@ end
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
     @testset verbose=true "Slots" include_timed("slots.jl")
     @testset verbose=true "Types that are stated" include_timed("assume.jl")
-    include_timed("closures.jl") # (and `@cfunction`)
+    @testset verbose=true "Functions" include_timed("closures.jl")
     @testset verbose=true "Fuzzing slots and dispatch" include_timed("dispatchfuzz.jl")
 end
 
@@ -35,9 +35,9 @@ end
 @testset verbose=true "Language" include_timed("language.jl")
 @testset verbose=true "Numbers" include_timed("numbers.jl")
 @testset verbose=true "Strings" include_timed("strings.jl")
+@testset verbose=true "Symbols" include_timed("symbols.jl")
 @testset verbose=true "Containers" include_timed("containers.jl")
 @testset verbose=true "Tuples" include_timed("tuples.jl")
-@testset verbose=true "Symbols" include_timed("symbols.jl")
 @testset verbose=true "Tasks" include_timed("tasks.jl")
 
 # printing
@@ -51,3 +51,6 @@ end
 
 # what is not supported, and what happens then
 @testset verbose=true "Limitations" include_timed("limitations.jl")
+
+# what the others left behind: the state of the process that compiles
+@testset verbose=true "State" include_timed("state.jl")

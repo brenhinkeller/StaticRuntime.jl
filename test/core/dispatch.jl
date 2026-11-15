@@ -200,7 +200,7 @@ invokelatest_square(x) = x * x
 end
 
 # A method that is `@nospecializeinfer` (`Makie`'s `node_pairs`) is inferred for the types that it is declared with, so what it does with the fields of a `NamedTuple` that has no fields known (`nfields`, `getfield(nt, i)`)
-# is a call of the runtime. A compilation infers it for the types of the call (`PRECISE_NOSPECIALIZEINFER`), and puts the flag of the method back when it is done.
+# is a call of the runtime. A compilation infers it for the types of the call (`Settings.precise_nospecializeinfer`), and puts the flag of the method back when it is done.
 Base.@nospecializeinfer @noinline function nsi_total(@nospecialize(nt::NamedTuple))
     s = 0.0
     for i in 1:nfields(nt)

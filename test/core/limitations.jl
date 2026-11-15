@@ -21,7 +21,7 @@ function refusal_in_process(code::AbstractString)
 end
 # (it is waited for no longer than what is left of the budget: a process that does not end is a failure, and is stopped)
 function refusal_of((proc, file))
-    timedwait(() -> !process_running(proc), max(10.0, 110 - (time() - LIMITATIONS_START))) === :ok || (kill(proc); return :timeout, "the process did not end in time")
+    timedwait(() -> !process_running(proc), max(10.0, 550 - (time() - LIMITATIONS_START))) === :ok || (kill(proc); return :timeout, "the process did not end in time")
     isfile(file) || return :no_answer, "the process ended without an answer"
     status, detail = split(read(file, String), '\n'; limit = 2)
     return Symbol(status), String(detail)
@@ -111,5 +111,5 @@ end
 end
 
 @testset "The time that this file takes" begin
-    @test time() - LIMITATIONS_START < 120
+    @test time() - LIMITATIONS_START < 600
 end

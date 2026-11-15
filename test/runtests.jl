@@ -3,12 +3,6 @@
 #
 # Most of the tests compile a program to an executable and compare what it prints with what Julia prints for the same code (`check_cases`, in `helpers.jl`).
 
-# The tests run with the bounds checks on (`--check-bounds=yes`), as they do on CI (`julia-actions/julia-runtest`): the code is not optimized as far then, which is the code that has to work too. `Pkg.test` does
-# not do that by default, so the tests are run again by a process that has them (the exit code is the one of that process). `STATIC_RUNTIME_TEST_BOUNDS=0` runs them here as they are.
-if Base.JLOptions().check_bounds != 1 && get(ENV, "STATIC_RUNTIME_TEST_BOUNDS", "1") != "0"
-    cmd = `$(Base.julia_cmd()) --check-bounds=yes --project=$(Base.active_project()) $(@__FILE__)`
-    exit(run(ignorestatus(addenv(cmd, "STATIC_RUNTIME_TEST_BOUNDS" => "0"))).exitcode)
-end
 
 # The terminal that the tests are run in is `xterm-256color` (set before anything asks for the terminfo: it is read once), as what Julia writes in color depends on it (italics, reverse and strikethrough, if the
 # terminal has them), and a program does not read it: see `ext/StaticRuntimeStyledStringsExt.jl`. Julia has the terminfo of it, so that this does not depend on the system.

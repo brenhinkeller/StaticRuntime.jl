@@ -5,10 +5,14 @@ struct ShowPt; x::Int; y::Float64; end
 struct ShowBox{T}; v::T; end
 StaticRuntime.add_show_candidates!(ShowPt, Tuple{Int,Float64})
 
-@testset "show of containers" begin
+@testset "Basic `show` and `repr`" begin
     S = StaticRuntime
     # (the output is compared with that of Julia by `static_status`)
     cases = [
+        "show String/Char" => @opaque(() -> (show("a \"quoted\"\n string"); show('x'); show('\n'); show('λ'); println(); 1)),
+        "show escapes"     => @opaque(() -> (show("tab\there \u00e9 \u2200 \e"); println(); 1)),
+        "show unprintable" => @opaque(() -> (show("a\u200bb\ue000\u00ad\U0001f600\u0378"); println(); 1)),
+        "@show String"     => () -> (s = "abc"; @show s; c = 'z'; @show c; 1),
         "Vector{Int}"      => () -> (println([1, 2, 3]); 1),
         "empty Vector"     => () -> (println(Int[]); println(Float64[]); println(String[]); 1),
         "Vector{Bool}"     => () -> (println([true, false]); 1),
@@ -42,55 +46,24 @@ StaticRuntime.add_show_candidates!(ShowPt, Tuple{Int,Float64})
         "repr"             => () -> length(repr([1, 2]) * repr(Any[1, "a"]) * repr((1, 'c'))),
     ]
     check_cases(cases)
+end
 
-    # the keys of a dictionary that are Strings are compared by their text (`===` of two Strings is `jl_egal__unboxed`),
-    # also when they are not the same object
-    @testset "String keys" begin
-        keys_by_text() = (d = Dict("one" => 1, "two" => 2); n = 0;
-                          for i in 1:2; n = 10 * n + d[i == 1 ? string("o", "ne") : "t" * "wo"]; end;
-                          n + 100 * haskey(d, "thr" * "ee") + 1000 * (("a" * "b") == "ab") + 10000 * (Set(["x"]) == Set(["x" * ""])))
-        @test static_result(keys_by_text) == keys_by_text()
+# Strings that are made when compiling
+@testset "Compile-time strings" begin
+    S = StaticRuntime
+    @test S.host_string(show, Int) == "Int64"
+    @test S.host_string(show, Vector{Float64}) == "Vector{Float64}"
+    @test S.host_string(show, ShowPt) == "ShowPt"       # no `Main.`, as when Julia shows it to a stream
+    @test S.host_string(print, Pair{Int,ShowPt}) == "Pair{Int64, ShowPt}"
+    # `typeinfo_prefix` (the prefix that Base makes from the context): for each of the types of containers
+    for x in ([1], Int[], Float64[], Any[1], Any[], String[], [(1, 2)], Union{Int,Nothing}[1], [ShowPt(1, 2.0)], [UInt8(1)])
+        expected = Base.typeinfo_prefix(IOContext(IOBuffer()), x)
+        got = S.typeinfo_prefix_static(Any, x)
+        @test got == expected
     end
-
-    # types and values that are not supported are rejected when compiling, or are an error when run (not wrong output)
-    @testset "unsupported" begin
-        @test static_status(() -> (println(Any[Base.inferencebarrier(ShowBox(1))]); 1))[1] == :runtime_error # not in the candidates, and what is in the list is not known when compiling
-        @test static_status(() -> (println(Any[ShowBox(1)]); 1))[1] == :ok # (the types that a list holds are those that the program puts in it: see slots.jl)
-        # (a symbol that is not an ASCII identifier is written as Julia writes it if the binary has it; one that the program makes is an error unless
-        # it is certainly not an identifier or an operator: see `symbols.jl`)
-        @test static_status(() -> (println(Any[Symbol("+")]); 1))[1] == :ok
-        @test static_status(() -> (println(Any[Symbol("a+" * Base.inferencebarrier("b"))]); 1))[1] == :runtime_error # made by the program, and not clearly an operator or not
-        @test static_status(() -> (println(Any[Base.inferencebarrier(Dict(1 => 2))]); 1))[1] == :runtime_error # not in the candidates
-        @test static_status(() -> (println(Any[Dict(1 => 2)]); 1))[1] == :ok
-        @test static_status(() -> (println(Base.inferencebarrier(Any[1])); 1))[1] == :runtime_error # (a call with an `Any`: over the types that are registered, which have not `Vector{Any}`)
-    end
-
-    # the strings that are made when compiling
-    @testset "compile-time strings" begin
-        @test S.host_string(show, Int) == "Int64"
-        @test S.host_string(show, Vector{Float64}) == "Vector{Float64}"
-        @test S.host_string(show, ShowPt) == "ShowPt"       # no `Main.`, as when Julia shows it to a stream
-        @test S.host_string(print, Pair{Int,ShowPt}) == "Pair{Int64, ShowPt}"
-        # `typeinfo_prefix` (the prefix that Base makes from the context): for each of the types of containers
-        for x in ([1], Int[], Float64[], Any[1], Any[], String[], [(1, 2)], Union{Int,Nothing}[1], [ShowPt(1, 2.0)], [UInt8(1)])
-            expected = Base.typeinfo_prefix(IOContext(IOBuffer()), x)
-            got = S.typeinfo_prefix_static(Any, x)
-            @test got == expected
-        end
-        # with a context that knows the type of the elements
-        @test S.typeinfo_prefix_static(Vector{Int}, [1]) == Base.typeinfo_prefix(IOContext(IOBuffer(), :typeinfo => Vector{Int}), [1])
-        @test S.typeinfo_prefix_static(Vector{Any}, Any[1]) == Base.typeinfo_prefix(IOContext(IOBuffer(), :typeinfo => Vector{Any}), Any[1])
-    end
-
-    # the stream types write like the streams of libc, and `sprint` makes the same text as Julia's
-    @testset "streams" begin
-        io = S.BufIO(IOBuffer())
-        show(io, [1, 2, 3]); show(io, (1, "a")); show(io, Any[1, :a])
-        @test String(take!(io.buf)) == sprint(show, [1, 2, 3]) * sprint(show, (1, "a")) * sprint(show, Any[1, :a])
-        @test S.typeinfo_io(io, Int) isa IO
-        @test get(S.typeinfo_io(io, Int), :typeinfo, Any) === Int
-        @test get(io, :typeinfo, Any) === Any
-    end
+    # with a context that knows the type of the elements
+    @test S.typeinfo_prefix_static(Vector{Int}, [1]) == Base.typeinfo_prefix(IOContext(IOBuffer(), :typeinfo => Vector{Int}), [1])
+    @test S.typeinfo_prefix_static(Vector{Any}, Any[1]) == Base.typeinfo_prefix(IOContext(IOBuffer(), :typeinfo => Vector{Any}), Any[1])
 end
 
 # `show` of arrays of more than one dimension (`println(A)`, `repr(A)`, `string(A)`, "$A"), which is Base's own: its code for matrices makes the matrix a value of the
@@ -100,7 +73,7 @@ end
 struct ArrPoint; x::Int; y::Int; end
 Base.show(io::IO, p::ArrPoint) = print(io, "P(", p.x, ",", p.y, ")")
 
-@testset "show of arrays of more than one dimension" begin
+@testset "`show` of arrays of more than one dimension" begin
     check_cases([
         "int"             => () -> (println([1 2; 3 4]); 0),
         "float64"         => () -> (println([1.5 2.0; 3.0 4.25]); 0),
@@ -141,7 +114,7 @@ pl_nl() = print(STDOUT, "\n")
 
 # the properties of a context, written as Julia does (to the standard output of libc, with the same stream in Julia and in the program)
 
-@testset "text/plain and the properties of a context" begin
+@testset "`text/plain` and the properties of a context" begin
     # (the properties of a context are in the type of its stream, so asking for them is done when compiling: what the three of them ask has no program left)
     check_cases([
         "matrix int"            => () -> pl_text([1 2; 3 4]),
@@ -185,34 +158,53 @@ pl_nl() = print(STDOUT, "\n")
     ]; folded_ok = ("ctx query", "ctx nested", "ctx displaysize"))
 end
 
+# structured matrices (the module `LinearAlgebra` is loaded before this package in the tests, so its types are written without the module, as Julia does: when a module is loaded
+# after the package, its types are written with the module, see `show.jl`)
+pl_structured() = (pl_text(Diagonal([1, 2, 3])); pl_text(UpperTriangular([1 2 3; 4 5 6; 7 8 9])); pl_text(LowerTriangular([1.5 2.0; 3.0 4.0])); pl_text(Tridiagonal([1, 2], [3, 4, 5], [6, 7]));
+                   pl_text(Symmetric([1 2; 2 3])); pl_text(Hermitian([1.0 2.0im; -2.0im 3.0])); 0)
+@testset "Structured matrices" begin
+    expected = join(sprint(show, PL_TP, x) * "\n" for x in Any[Diagonal([1, 2, 3]), UpperTriangular([1 2 3; 4 5 6; 7 8 9]), LowerTriangular([1.5 2.0; 3.0 4.0]),
+                                                               Tridiagonal([1, 2], [3, 4, 5], [6, 7]), Symmetric([1 2; 2 3]), Hermitian([1.0 2.0im; -2.0im 3.0])]) * "0\n"
+    @test compiled_stdout(pl_structured) == expected
+end
+
 # `display(x)` of Julia writes to the terminal that Julia was started with, which a test can't capture: the output of the program is compared with the `text/plain` text instead
 pl_display_values() = (display([1 2; 3 4]); display([1, 2, 3]); display(3); display("a"); display(1.5); display(:s); display(nothing); display(Dict(:a => 1)); display(1:3); 0)
 pl_display_floats() = (display([1.5 2.0; 3.0 0.1+0.2]); display(Any[1, "a", 2.5]); display(reshape(1:8, 2, 2, 2)); 0)
-@testset "display" begin
+@testset "Display" begin
     expected = join(sprint(show, PL_TP, x) * "\n" for x in Any[[1 2; 3 4], [1, 2, 3], 3, "a", 1.5, :s, nothing, Dict(:a => 1), 1:3]) * "0\n"
     @test compiled_stdout(pl_display_values) == expected
     expected = join(sprint(show, PL_TP, x) * "\n" for x in Any[[1.5 2.0; 3.0 0.1+0.2], Any[1, "a", 2.5], reshape(1:8, 2, 2, 2)]) * "0\n"
     @test compiled_stdout(pl_display_floats) == expected
 end
 
-# structured matrices (the module `LinearAlgebra` is loaded before this package in the tests, so its types are written without the module, as Julia does: when a module is loaded
-# after the package, its types are written with the module, see `show.jl`)
-pl_structured() = (pl_text(Diagonal([1, 2, 3])); pl_text(UpperTriangular([1 2 3; 4 5 6; 7 8 9])); pl_text(LowerTriangular([1.5 2.0; 3.0 4.0])); pl_text(Tridiagonal([1, 2], [3, 4, 5], [6, 7]));
-                   pl_text(Symmetric([1 2; 2 3])); pl_text(Hermitian([1.0 2.0im; -2.0im 3.0])); 0)
-@testset "structured matrices" begin
-    expected = join(sprint(show, PL_TP, x) * "\n" for x in Any[Diagonal([1, 2, 3]), UpperTriangular([1 2 3; 4 5 6; 7 8 9]), LowerTriangular([1.5 2.0; 3.0 4.0]),
-                                                               Tridiagonal([1, 2], [3, 4, 5], [6, 7]), Symmetric([1 2; 2 3]), Hermitian([1.0 2.0im; -2.0im 3.0])]) * "0\n"
-    @test compiled_stdout(pl_structured) == expected
+
+# # the keyword `context` of `sprint` with a pair that is written in the call: its value is not known to the compiler inside the method of `sprint` (not yet supported for the show of an array)
+# pl_sprint_context_vector() = (println(sprint(show, [1, 2, 3]; context = :compact => true)); 0)
+# @testset "sprint with a context in the call" begin
+#     @test_broken static_status(pl_sprint_context_vector)[1] == :ok
+# end
+
+# types and values that are not supported are rejected when compiling, or are an error when run (not wrong output)
+@testset "Unsupported" begin
+    @test static_status(() -> (println(Any[Base.inferencebarrier(ShowBox(1))]); 1))[1] == :runtime_error # not in the candidates, and what is in the list is not known when compiling
+    @test static_status(() -> (println(Any[ShowBox(1)]); 1))[1] == :ok # (the types that a list holds are those that the program puts in it: see slots.jl)
+    # (a symbol that is not an ASCII identifier is written as Julia writes it if the binary has it; one that the program makes is an error unless
+    # it is certainly not an identifier or an operator: see `symbols.jl`)
+    @test static_status(() -> (println(Any[Symbol("+")]); 1))[1] == :ok
+    @test static_status(() -> (println(Any[Symbol("a+" * Base.inferencebarrier("b"))]); 1))[1] == :runtime_error # made by the program, and not clearly an operator or not
+    @test static_status(() -> (println(Any[Base.inferencebarrier(Dict(1 => 2))]); 1))[1] == :runtime_error # not in the candidates
+    @test static_status(() -> (println(Any[Dict(1 => 2)]); 1))[1] == :ok
+    @test static_status(() -> (println(Base.inferencebarrier(Any[1])); 1))[1] == :runtime_error # (a call with an `Any`: over the types that are registered, which have not `Vector{Any}`)
 end
 
-# the keyword `context` of `sprint` with a pair that is written in the call: its value is not known to the compiler inside the method of `sprint` (not yet supported for the show of an array)
-pl_sprint_context_vector() = (println(sprint(show, [1, 2, 3]; context = :compact => true)); 0)
-@testset "sprint with a context in the call" begin
-    @test_broken static_status(pl_sprint_context_vector)[1] == :ok
-end
-
-# the two letters of the category of a character, from the table of categories (the same as utf8proc's for every character)
-pl_category_abbrevs() = (n = 0; for cp in 0x00:0x2ff; n = 31 * n + codeunit(Base.Unicode.category_abbrev(Char(cp)), 1) + 7 * codeunit(Base.Unicode.category_abbrev(Char(cp)), 2); end; n)
-@testset "categories of characters" begin
-    @test static_status(pl_category_abbrevs)[1] == :ok
+# the stream types write like the streams of libc, and `sprint` makes the same text as Julia's
+@testset "streams" begin
+    S = StaticRuntime
+    io = S.BufIO(IOBuffer())
+    show(io, [1, 2, 3]); show(io, (1, "a")); show(io, Any[1, :a])
+    @test String(take!(io.buf)) == sprint(show, [1, 2, 3]) * sprint(show, (1, "a")) * sprint(show, Any[1, :a])
+    @test S.typeinfo_io(io, Int) isa IO
+    @test get(S.typeinfo_io(io, Int), :typeinfo, Any) === Int
+    @test get(io, :typeinfo, Any) === Any
 end

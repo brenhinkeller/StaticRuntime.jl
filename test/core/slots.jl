@@ -82,6 +82,18 @@ universe_cases() = [
     "registered types as before" => () -> uuse(anyvalue(opaque(3))) + uuse(anyvalue(2.5)),
     "both"                       => () -> uuse(anyvalue(UMeters(opaque(2) + 0.0))) + uuse(anyvalue(opaque(5))),
 ]
+# The process that compiles is not part of the program: `Base.roottask` is a constant of the code that waits, and has the scope that the code that compiles runs in (what it binds, and the values of the logger and of
+# `with`), which analysis of the constants must not take for what the program makes
+struct UHostMarker; x::Int; end
+@testset "The scope of the compiling process is not part of a program" begin
+    sv = Base.ScopedValues.ScopedValue{Any}(nothing)
+    Base.ScopedValues.with(sv => UHostMarker(1)) do
+        facts = StaticRuntime.scan_facts(Base.roottask)
+        @test !any(f -> f[1][1] === :universe && f[1][2] === UHostMarker, facts)
+        @test !any(f -> f[1][1] === :universe && f[1][2] === StaticRuntime.Compilation, facts)
+    end
+end
+
 @testset "The universe" begin
     # (what is in it: types that the program makes. A `Val{MyType}` is not one: it is the argument of a method that is made from it, and a call with an argument of the type `Val` made over it can't succeed, which made
     # what called it one that does not return, where the code is not inlined, as it is under `--code-coverage`)

@@ -52,6 +52,8 @@ opaque(x::AbstractFloat) = x + oftype(x, time_ns() >> 63)
 # (a value that is chosen when the program runs, between `x` and another: the clock is not at 2262 yet)
 opaque(x::Symbol) = time_ns() >> 63 == 0 ? x : :opaque_other
 opaque(x::String) = time_ns() >> 63 == 0 ? x : "opaque_other"
+# (a type that is chosen when the program runs, between `T` and another)
+opaque(::Type{T}) where {T} = time_ns() >> 63 == 0 ? T : Nothing
 
 # The calls whose arguments stay as they are in `@opaque`: the ones that have to be constants for the types to be known (`Val(3)`, `ntuple(f, 3)`), the fields that are named, and the calls to C
 const OPAQUE_KEEP = (:Val, :ntuple, :getfield, :setfield!, :getproperty, :setproperty!, :fieldtype, :hasfield, :NamedTuple, :ccall, :Symbol, :Tuple, :NTuple, :reshape, :zeros, :ones, :fill, :Matrix, :Vector, :Array, :ones, :rand, :randn)

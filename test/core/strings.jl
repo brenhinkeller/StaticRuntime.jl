@@ -1,22 +1,6 @@
 # Strings and characters: construction, interpolation, parsing and searching, `SubString`, and the properties of characters (case, category, width), compared with Julia, and the tables
 # that those use (src/unicode.jl), compared with utf8proc's for every character.
 
-@testset "Strings" begin
-    check_cases([
-    "String length"         => () -> length("hello" * " world"),
-    "string(Int)" => @opaque(() -> length(string(12345))),
-    "parse Int"             => () -> parse(Int, "42"),
-    "parse Float64"         => () -> round(Int, parse(Float64, "3.14159") * 1000),
-    "findfirst String"      => () -> first(findfirst("lo", "hello")), # a pointer into the middle of a string
-    "SubString"             => () -> (s = SubString("hello world", 7, 11); length(s) + (s == "world")),
-    "split loop"            => () -> (n = 0; for w in split("a b a c b a"); n += length(w); end; n), # a vector of structs with references, grown
-
-        "string(1, x::Any)"       => () -> (println(string(1, any_value(5), 2.5, any_value("q"), :s, 'c')); 0),
-        "interpolating an Any"    => () -> (x = any_value(7); println("x=$(1 + 1) y=$(x) z=$(any_value("w"))"); 0),
-        "string of a few ints"    => () -> (println(string(1, 2, 3)); 0),
-    ])
-end
-
 @testset "Characters" begin
     check_cases([
     "lowercase/uppercase"   => () -> (println(lowercase("HeLLo ÀÉÎ"), uppercase("HeLLo àéî"), uppercasefirst("élan")); 1),
@@ -26,6 +10,12 @@ end
     "strip and parse of spaces that are not ASCII" => () -> (t = strip(opaque("\u00a0 \u2003 42\u3000 ")); parse(Int, t) + length(t) * 100 + parse(Int, opaque(" 7\u00a0"))),
     "unicode" => @opaque(() -> (println("héllo ∑ 日本"); println('λ'); 1)),
     ])
+end
+
+# the two letters of the category of a character, from the table of categories (the same as utf8proc's for every character)
+pl_category_abbrevs() = (n = 0; for cp in 0x00:0x2ff; n = 31 * n + codeunit(Base.Unicode.category_abbrev(Char(cp)), 1) + 7 * codeunit(Base.Unicode.category_abbrev(Char(cp)), 2); end; n)
+@testset "Categories of characters" begin
+    @test static_status(pl_category_abbrevs)[1] == :ok
 end
 
 # the tables of the properties of characters (src/unicode.jl) agree with utf8proc for every code point
@@ -59,4 +49,29 @@ end
         end
         @test bad == 0
     end
+end
+
+@testset "Basic strings" begin
+    check_cases([
+    "String length"         => () -> length("hello" * " world"),
+    "string(Int)" => @opaque(() -> length(string(12345))),
+    "parse Int"             => () -> parse(Int, "42"),
+    "parse Float64"         => () -> round(Int, parse(Float64, "3.14159") * 1000),
+    "findfirst String"      => () -> first(findfirst("lo", "hello")), # a pointer into the middle of a string
+    "SubString"             => () -> (s = SubString("hello world", 7, 11); length(s) + (s == "world")),
+    "split loop"            => () -> (n = 0; for w in split("a b a c b a"); n += length(w); end; n), # a vector of structs with references, grown
+    "string(1, x::Any)"       => () -> (println(string(1, any_value(5), 2.5, any_value("q"), :s, 'c')); 0),
+    "interpolating an Any"    => () -> (x = any_value(7); println("x=$(1 + 1) y=$(x) z=$(any_value("w"))"); 0),
+    "string of a few ints"    => () -> (println(string(1, 2, 3)); 0),
+    ])
+end
+
+
+# the keys of a dictionary that are Strings are compared by their text (`===` of two Strings is `jl_egal__unboxed`),
+# also when they are not the same object
+@testset "Strings as dict keys" begin
+    keys_by_text() = (d = Dict("one" => 1, "two" => 2); n = 0;
+                        for i in 1:2; n = 10 * n + d[i == 1 ? string("o", "ne") : "t" * "wo"]; end;
+                        n + 100 * haskey(d, "thr" * "ee") + 1000 * (("a" * "b") == "ab") + 10000 * (Set(["x"]) == Set(["x" * ""])))
+    @test static_result(keys_by_text) == keys_by_text()
 end

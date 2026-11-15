@@ -8,6 +8,7 @@
     "println Vector Float64" => () -> (println([1.5, 2.0]); 1),
     "string mixed"          => () -> length(string("a", 1, 'b', 2.5)),
     "sprint"                => () -> length(sprint(print, 12345)),
+    "stdout"                => () -> (println(stdout, "to stdout"); 1),
     "stderr"                => () -> (println(stderr, "to stderr"); 1),
     "STDOUT"                => () -> (println(STDOUT, "explicit ", 1, ' ', 2.5); print(STDOUT, "x", 'y'); println(STDOUT); 1),
     "STDERR"                => () -> (println(STDERR, "to stderr"); print(STDERR, 1, 2, 3); println(STDERR); 1),
@@ -16,12 +17,8 @@
     "print String vararg"   => () -> (print("a", "b", "c", "d"); println(); println("x", 1, 2, 3, "y"); 1),
     "println nothing"       => () -> (println(); println(nothing); println(missing); 1),
     "println Symbol/Float32" => () -> (println(:sym, ' ', 1.5f0, ' ', 0x1f, ' ', -3); 1),
-    "show String/Char"       => @opaque(() -> (show("a \"quoted\"\n string"); show('x'); show('\n'); show('λ'); println(); 1)),
-    "show escapes"           => @opaque(() -> (show("tab\there \u00e9 \u2200 \e"); println(); 1)),
-    "show unprintable"       => @opaque(() -> (show("a\u200bb\ue000\u00ad\U0001f600\u0378"); println(); 1)),
-    "@show String"          => () -> (s = "abc"; @show s; c = 'z'; @show c; 1),
     "big output"            => () -> (for i in 1:2000; print(i, ' '); end; println(); 1),
-    ]; broken = ("stderr",))
+    ]; broken = ("stdout", "stderr",))
 end
 
 @testset "Functions, `Colon()`, summaries and types written to a buffer" begin

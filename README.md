@@ -155,7 +155,7 @@ See [Known limitations](https://brenhinkeller.github.io/StaticRuntime.jl/dev/#Kn
 ### Source layout
 
 * `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`show.jl`, `files.jl`, `random.jl`, `bignum.jl`, ...); `src/overrides.jl` is the method table and the entry points (`compile_executable` and the rest).
-* `src/inference/`: what the compiler does with calls that Julia does not resolve: dynamic dispatch (`dispatch.jl`), closures (`closures.jl`), `@cfunction` (`cfunctions.jl`) and the errors that say why a program does not infer (`diagnostics.jl`).
+* `src/inference/`: what the compiler does with calls that Julia does not resolve: dynamic dispatch (`dispatch.jl`), closures (`closures.jl`), the slots of abstract types (`slots.jl`), `@cfunction` (`cfunctions.jl`) and the errors that say why a program does not infer (`diagnostics.jl`). What a compilation finds and is made with, over its passes, is one value that exists for that compilation (`compilation.jl`); what packages register is the one `REGISTRY` that a compilation takes a copy of when it starts (`src/registry.jl`).
 * `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and BLAS and the loader of libraries.
 * `src/pipeline.jl` and `src/tags.jl`: the LLVM passes; `src/testing.jl`: `static_status` and the other functions that compare a compiled program with Julia.
 * `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, StyledStrings, Observables, Makie, Mmap, MPI).
