@@ -41,9 +41,6 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
         "@time"                       => () -> (@time opaque(1) + 1; 0),
         "starting another program"    => () -> (run(`true`); 0),
         "TOML.parse"                  => () -> length(TOML.parse(opaque("a = 1"))),
-        # `Markdown.parse` is a parser that is a list of functions, for blocks and for text in a line, and the parser of the Julia language for the code and the `$` that it finds: the list of functions is
-        # not found by the registry of closures (the functions of the standard libraries are not collected), and Julia's parser is in libjulia. The compiler sees that, and refuses
-        "Markdown.parse"              => () -> length(string(Markdown.parse(opaque("# a")))),
         "a function that atexit calls, with state" => () -> (x = opaque(1); atexit(() -> println(x)); 0),
     ]
     for (name, f) in cases
@@ -53,6 +50,13 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
             @test occursin(REFUSAL, string(detail))
         end
     end
+end
+
+# `Markdown.parse` is a parser that is a list of functions, for blocks and for text in a line, and the parser of the Julia language for the code and the `$` that it finds: the list of functions is not found by the registry of closures, and Julia's parser is in
+# libjulia. It is refused when compiling, or (when what the slots hold lets the calls on it be compiled) the program stops when it gets there, with a message: either way it does not give a wrong answer
+@testset "Markdown.parse" begin
+    status, detail = static_status(() -> length(string(Markdown.parse(opaque("# a")))))
+    @test status in (:compile_error, :runtime_error)
 end
 
 # what a program does that is not what Julia does, as the manual says (the section "Differences from Julia when the program runs")

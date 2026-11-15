@@ -24,7 +24,7 @@ const SLOT_PASSES = Ref(0)
 const SLOT_PASS_LIMIT = 4
 # (for finding out why a slot is given up: the first stores of a type that is not known, as text; kept when `STATIC_RUNTIME_SLOTS_WHY` is set)
 const SLOTS_WHY = Ref(false)
-# `STATIC_RUNTIME_CHECK_TYPES=1`: every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed
+# Every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed. It is on when the compilation is `strict` (the default), and `STATIC_RUNTIME_CHECK_TYPES=0` turns it off (`1` turns it on for `strict = false`); it costs nothing that could be measured in the benchmarks of `bench/dispatch.jl`
 const UNKNOWN_STORES = Dict{SlotKey,Vector{String}}()
 const STORE_CONTEXT = Ref{Any}(nothing)
 const CHECK_SLOT_TYPES = Ref(false)
@@ -75,6 +75,9 @@ function user_relevant(@nospecialize(T), depth::Int = 0)
     T isa DataType && isconcretetype(T) && depth <= 2 || return false
     T <: Function && return false # (the types of functions and closures: see closures.jl)
     T <: Type && return false
+    # (`Val{X}` is a type that holds a type or a number for a method that is generated from it, not a value that the program makes: with the code not inlined, as it is under `--code-coverage`, a call of such a method with an
+    # argument of the type `Val` was made over `Val{MyType}`, which the method does not take, and that was all that it was made over, so that it was a call that cannot succeed, and so was what called it)
+    T <: Val && return false
     julia_owned_module(T.name.module) || return true
     for p in T.parameters
         p isa DataType && user_relevant(p, depth + 1) && return true
@@ -141,18 +144,20 @@ function reset_slots_pass!()
     PASS_PARAMS_KEY[] = OverridesParams().candidates
     empty!(UNIVERSE_SEEN)
     empty!(RAW_STORE_TYPES)
+    SCAN_TRUNCATED[] = false
     empty!(SEEN_SLOTS)
     empty!(SEEN_UNKNOWN)
     empty!(UNKNOWN_STORES)
     return
 end
 
-function reset_slots!()
+function reset_slots!(; strict::Bool = true)
     empty!(SLOT_TYPES)
     empty!(SLOT_OPEN)
     empty!(SEEN_SLOTS)
     empty!(SEEN_UNKNOWN)
     SLOT_PASSES[] = 0
+    SCAN_TRUNCATED[] = false
     mode = get(ENV, "STATIC_RUNTIME_SLOTS", "on")
     SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on
     PRECISE_NOSPECIALIZEINFER[] = get(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER", "1") != "0"
@@ -163,7 +168,9 @@ function reset_slots!()
     empty!(UNIVERSE_EXTRAS)
     UNIVERSE_VERSION[] += 1
     SLOTS_WHY[] = haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY")
-    CHECK_SLOT_TYPES[] = get(ENV, "STATIC_RUNTIME_CHECK_TYPES", "0") ∉ ("", "0")
+    # (the check is on when the compilation is `strict`, and `STATIC_RUNTIME_CHECK_TYPES` is `1` (on) or `0` (off) for either)
+    check = get(ENV, "STATIC_RUNTIME_CHECK_TYPES", "")
+    CHECK_SLOT_TYPES[] = isempty(check) ? strict : check != "0"
     empty!(BLIND_TYPES)
     union!(BLIND_TYPES, filter(!isempty, split(get(ENV, "STATIC_RUNTIME_SLOTS_BLIND", ""), ',')))
     empty!(UNKNOWN_STORES)
@@ -361,7 +368,7 @@ function replay_slot_facts!(mi::Core.MethodInstance)
     facts = get(SLOT_FACTS, (mi, PASS_PARAMS_KEY[]), nothing)
     facts === nothing && return
     for (key, T) in facts
-        key[1] === :raw ? push!(RAW_STORE_TYPES, key[2]) : key[1] === :universe ? push!(UNIVERSE_SEEN, key[2]) : note_slot_store!(key, T)
+        key[1] === :raw ? push!(RAW_STORE_TYPES, key[2]) : key[1] === :universe ? push!(UNIVERSE_SEEN, key[2]) : key[1] === :truncated ? (SCAN_TRUNCATED[] = true) : note_slot_store!(key, T)
     end
     return
 end
@@ -374,12 +381,22 @@ function CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState{<:Override
     return @invoke CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState, propagate_inbounds::Bool)
 end
 
-# What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type
-function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(2000), seen = Base.IdSet{Any}())
-    budget[] <= 0 && return
-    budget[] -= 1
+# What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type. A constant that is too large to be looked at all of (`SCAN_BUDGET` objects,
+# `SCAN_DEPTH` levels deep, `SCAN_FIELDS` fields) is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls on what is read from them are made over the registered types
+const SCAN_BUDGET = 10_000
+const SCAN_DEPTH = 6
+const SCAN_FIELDS = 64
+const SCAN_TRUNCATED = Ref(false)
+note_truncated!() = FACTS_SINK[] === nothing ? (SCAN_TRUNCATED[] = true) : push!(FACTS_SINK[], ((:truncated, nothing, nothing), Any))
+
+function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(SCAN_BUDGET), seen = Base.IdSet{Any}())
     note_universe!(typeof(x))
-    (x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char || depth >= 4) && return
+    (x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char) && return
+    if budget[] <= 0 || depth >= SCAN_DEPTH
+        note_truncated!()
+        return
+    end
+    budget[] -= 1
     ismutable(x) && (x in seen ? (return) : push!(seen, x))
     if x isa Core.GenericMemory
         key = (:elem, eltype(x), nothing)
@@ -398,8 +415,12 @@ function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{
         for e in x
             note_slots_in!(e, depth + 1, budget, seen)
         end
-    elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName) && fieldcount(typeof(x)) <= 16
+    elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName)
         S = typeof(x)
+        if fieldcount(S) > SCAN_FIELDS
+            note_truncated!()
+            return
+        end
         for i in 1:fieldcount(S)
             isdefined(x, i) || continue
             v = getfield(x, i)
@@ -410,15 +431,34 @@ function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{
     return
 end
 
+# The operands of a statement that can be constants: those of a call (the function too: a closure has what it captured), and what a `return`, a `φ` or a `π` has, which is where a function that is not inlined gives
+# a container that is a constant (`f() = TABLE`); a statement that is only a constant (a global, a `QuoteNode`, an object) is its own operand.
+function statement_operands(st)
+    if st isa Expr
+        st.head === :foreigncall && return ()
+        skip = st.head === :call ? 1 : st.head === :invoke ? 2 : st.head === :new ? 2 : 1
+        return (st.args[i] for i in skip:length(st.args))
+    end
+    st isa Core.ReturnNode && return isdefined(st, :val) ? (st.val,) : ()
+    st isa Core.PiNode && return (st.val,)
+    st isa Core.UpsilonNode && return isdefined(st, :val) ? (st.val,) : ()
+    (st isa Core.PhiNode || st isa Core.PhiCNode) && return (st.values[i] for i in eachindex(st.values) if isassigned(st.values, i))
+    st isa Union{Core.GotoNode,Core.GotoIfNot,Core.EnterNode,Core.SlotNumber,Core.NewvarNode,LineNumberNode,Core.SSAValue,Core.Argument,Nothing} && return ()
+    return (st,)
+end
+
+# the value that a constant operand stands for, or `nothing`
+function constant_operand(a)
+    a isa GlobalRef && return isdefined(a.mod, a.name) && isconst(a.mod, a.name) ? getglobal(a.mod, a.name) : nothing
+    a isa QuoteNode && return a.value
+    a isa Core.BindingPartition && return is_const_partition(a) ? a.restriction : nothing # (optimized code refers to a global through its binding)
+    return a isa Core.SSAValue || a isa Core.Argument || a isa Expr ? nothing : a
+end
+
 function note_slots_in_constants!(code)
     for st in code
-        st isa Expr || continue
-        skip = st.head === :call ? 2 : st.head === :invoke ? 3 : st.head === :new ? 2 : st.head === :foreigncall ? 0 : 1
-        skip == 0 && continue
-        for i in skip:length(st.args)
-            a = st.args[i]
-            v = a isa GlobalRef ? (isdefined(a.mod, a.name) && isconst(a.mod, a.name) ? getglobal(a.mod, a.name) : nothing) :
-                a isa QuoteNode ? a.value : a isa Core.SSAValue || a isa Core.Argument || a isa Expr ? nothing : a
+        for a in statement_operands(st)
+            v = constant_operand(a)
             v === nothing && continue
             note_slots_in!(v)
         end
@@ -442,6 +482,15 @@ function analyze_slots!(interp, root)
         note_slots_in_constants!(src.code)
     end
     replay_reachable_facts!(root)
+    if SCAN_TRUNCATED[]
+        # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
+        @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
+        had_types = !isempty(SLOT_TYPES)
+        empty!(SLOT_TYPES)
+        SLOTS_MODE[] = :off
+        had_types && throw(SlotsChanged())
+        return
+    end
     if !isempty(RAW_STORE_TYPES)
         for k in union(collect(keys(SEEN_SLOTS)), collect(keys(SLOT_TYPES)))
             declared = k[1] === :elem ? k[2] : fieldtype(k[2], k[3])

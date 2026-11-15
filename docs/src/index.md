@@ -292,6 +292,11 @@ a message and abort if they are ever called (and the addresses will crash the pr
 `allow = ("function_name", ...)` accepts specific runtime functions, and keeps the check for the rest.
 Run with `JULIA_DEBUG=StaticRuntime` to see which are defined this way.
 
+With `strict = true` (the default) a read of the elements of a `Vector{Any}`, or of a field of an abstract type, that the compiler gave a narrower type than it declares (from the types that
+the program stores there) is also checked when the program runs: a value of another type stops the program with a type error, where it would otherwise be treated as one of the types that
+were found. The compiler finds the stores in the code that it compiles and in the constants that this refers to, and this is for any that it does not find. It costs nothing that the benchmarks
+(`bench/dispatch.jl`) could measure. The environment variable `STATIC_RUNTIME_CHECK_TYPES` is `0` to leave the check out, or `1` to have it with `strict = false`.
+
 ## Dynamic dispatch on abstract types and on `Any`
 
 *How this is done without changing other compilations.* The changes to inference (resolving the dispatch, `invokelatest`) are methods of functions of Julia's compiler
@@ -889,7 +894,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * Work: Base64 (of a string or bytes), CRC32c, SHA, UUIDs (`uuid4()` too), `Random.RandomDevice`, Mmap (`Mmap.mmap(path, Vector{T}, dims, offset)`: the memory is not unmapped before the program ends), Statistics, Random, Printf, Logging (`NullLogger`), Dates, SparseArrays (with the factorizations), most of LinearAlgebra (`exp`, `sqrt`, `log` and powers of a matrix, `eigen`, `svd`, `qr`,
   `cholesky`, `lu`, `schur`, `ordschur`, `hessenberg`, `inv`, `det`, `\`, `opnorm`, ...), Sockets' address types, and the file system (see [The file system](@ref)).
 * Do not: `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own); `readdlm` / `writedlm`; `@time` and `@allocated` (use `@elapsed`);
-  `TOML.parse` (the parser keeps a `Module`); `Markdown.parse` is refused when compiling (its parser needs Julia's own); `Mmap` of an open stream, and anonymous ones (only the files that are named by their path are mapped); `Test` (`@test` and `@testset`); `with_logger` with a logger other than `NullLogger`; starting other programs;
+  `TOML.parse` (the parser keeps a `Module`); `Markdown.parse` is refused when compiling, or stops with a message when it is run (its parser needs Julia's own); `Mmap` of an open stream, and anonymous ones (only the files that are named by their path are mapped); `Test` (`@test` and `@testset`); `with_logger` with a logger other than `NullLogger`; starting other programs;
   `Base64` of anything but a string or bytes; `atexit` (the function would not be run, so the program stops when it is registered, except for SuiteSparse's own).
 
 **Threads, tasks and `eval`**

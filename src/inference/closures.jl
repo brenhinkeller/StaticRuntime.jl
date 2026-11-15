@@ -304,7 +304,7 @@ function with_function_candidates_passes(compile; strict::Bool = true)
     empty!(Runtime.CFUNCTION_ROOTS)
     empty!(CFUNCTION_FUNCTIONS)
     empty!(CALLBACK_CANDIDATES)
-    reset_slots!() # (what the slots of a compilation hold is of the program that is compiled)
+    reset_slots!(; strict) # (what the slots of a compilation hold is of the program that is compiled)
     local failure = nothing
     for pass in 1:MAX_FUNCTION_PASSES
         empty!(SEEN_FUNCTIONS)

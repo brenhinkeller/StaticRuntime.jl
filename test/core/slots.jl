@@ -9,6 +9,9 @@ suse(x::String) = length(x)
 struct SBox; v::Any; end
 sget(b::SBox) = b.v
 @noinline sput!(v::Vector{Any}, @nospecialize(x)) = (push!(v, x); nothing)
+# (a constant that a function that is not inlined gives, and that holds types that the code does not store anywhere else: they are found in the `return` of the function)
+const STABLE = Any[1, 2.5, "abc"]
+@noinline stable() = STABLE
 
 slot_cases() = [
     "elements"      => () -> (v = Any[opaque(1), 2.5, SMeters(1.5)]; s = 0; for x in v; s += suse(x); end; s),
@@ -23,12 +26,22 @@ slot_cases() = [
     @testset "values of types that were not registered" begin
         check_cases(slot_cases())
     end
+    # (a program of its own: with the others the slot of the elements holds what they store in it)
+    @testset "a constant that is returned" begin
+        returned() = (v = Any[opaque(7), opaque(8)]; s = suse(v[1]) + suse(v[2]); for x in stable(); s += suse(x); end; s)
+        @test static_status(returned)[1] == :ok
+    end
     # the check: a read of a slot that was given types is `typeassert`ed (`STATIC_RUNTIME_CHECK_TYPES`), so that a program that stores what the analysis does not find stops
     @testset "checked reads" begin
         withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
             check_cases(slot_cases())
         end
         stores_string() = (v = Any[opaque(1), "ab", opaque(3)]; s = 0; for x in v; s += x isa String ? length(x) : x; end; s)
+        # (it is on by default, as the compilation is `strict`)
+        @test static_status(stores_string)[1] == :ok
+        withenv("STATIC_RUNTIME_SLOTS_BLIND" => "String") do
+            @test static_status(stores_string)[1] == :runtime_error
+        end
         withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
             @test static_status(stores_string)[1] == :ok
             # (the analysis is made to miss the stores of `String`, as it would a store that it can't see: the read is then not of the type that it was said to be)
@@ -56,6 +69,11 @@ universe_cases() = [
     "both"                       => () -> uuse(anyvalue(UMeters(opaque(2) + 0.0))) + uuse(anyvalue(opaque(5))),
 ]
 @testset "The universe" begin
+    # (what is in it: types that the program makes. A `Val{MyType}` is not one: it is the argument of a method that is made from it, and a call with an argument of the type `Val` made over it can't succeed, which made
+    # what called it one that does not return, where the code is not inlined, as it is under `--code-coverage`)
+    @test StaticRuntime.user_relevant(UMeters)
+    @test StaticRuntime.user_relevant(Vector{UMeters})
+    @test !StaticRuntime.user_relevant(Val{UMeters})
     check_cases(universe_cases())
     withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
         check_cases(universe_cases())

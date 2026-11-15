@@ -52,13 +52,6 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v1
-      # TODO: until the `llvm_postprocess` option of `compile_executable` etc. is in a release of
-      # StaticCompiler.jl, use the version that has it, and remove this step once it is released:
-      # - name: Use the development version of StaticCompiler.jl
-      #   shell: julia --project=. {0}
-      #   run: |
-      #     using Pkg
-      #     Pkg.add(PackageSpec(url = "https://github.com/OWNER/StaticCompiler.jl", rev = "BRANCH"))
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         env:
@@ -81,19 +74,6 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-        experiment:
-          - ''
-        include:
-          # TEMPORARY: a program of `StyledStrings` crashes on ubuntu-latest (x64) (`interpolation`, then `annotate!`): these find which part of the runtime it is (the SLP vectorizer, the collector)
-          - os: ubuntu-latest
-            experiment: ' (no SLP vectorizer)'
-            slp: '0'
-          - os: ubuntu-latest
-            experiment: ' (no collector)'
-            gc: 'false'
-          - os: ubuntu-latest
-            experiment: ' (collector in every program, a collection every 3 allocations)'
-            gc: '3'
     steps:
       - uses: actions/checkout@v2
       - uses: julia-actions/setup-julia@v2

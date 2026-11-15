@@ -65,6 +65,7 @@ const S_XROOTS, S_XROOTS_N, S_STRESS, S_STRESS_LEFT, S_SCAN_STACK = 25, 26, 27, 
 const S_FIN, S_FIN_N, S_FIN_CAP, S_FIN_PENDING, S_FIN_KIND = 125, 126, 127, 128, 129 # the finalizers: (object, function or site, kind) triples
 const S_PEND, S_PEND_N, S_PEND_CAP, S_FINALIZING = 130, 131, 132, 133 # objects that wait for their finalizer to run: (object, site)
 const S_DISABLED = 31 # (collections are off: `GC.enable(false)`)
+const S_EXT_SORTED = 30 # (how many of the extents, from the first, are in order: see `sort_extents!`)
 const S_REGS = 192 # (64 words from here: where the registers are saved, while the stack is scanned)
 const S_CUR = 32 # per kind and class: the block that is allocated from (2 * NCLASSES words)
 const S_PARTIAL = S_CUR + 2 * NCLASSES # and the list of those with free cells
@@ -259,7 +260,7 @@ end
     return 18 + Int((total - 1024 + 255) >> 8)
 end
 
-## the extents: where there are objects, sorted, as (start, end, header) triples: what an address is in
+## the extents: where there are objects, as (start, end, header) triples, in order when a collection looks things up (`sort_extents!`): what an address is in
 
 @noinline function register_extent(start::UInt, stop::UInt, header::UInt)
     n = sget(S_EXT_N) % Int
@@ -279,14 +280,9 @@ end
         sset(S_EXT_CAP, newcap % UInt)
         ext = new
     end
-    # where it goes: after the extents that start before it
+    # (at the end: they are put in order when a collection needs them to be, `sort_extents!`. Putting each where it goes, in an array that is in order, took as long as the number of extents, for each object that was
+    # allocated: a program with many large objects, as live as there were 80000 of, was 30 times slower than Julia)
     i = n
-    while i > 0 && ld(ext, 3 * (i - 1)) > start
-        st(ext, 3i, ld(ext, 3 * (i - 1)))
-        st(ext, 3i + 1, ld(ext, 3 * (i - 1) + 1))
-        st(ext, 3i + 2, ld(ext, 3 * (i - 1) + 2))
-        i -= 1
-    end
     st(ext, 3i, start)
     st(ext, 3i + 1, stop)
     st(ext, 3i + 2, header)
@@ -822,7 +818,7 @@ end
         nxt = ld(l, L_ALLNEXT)
         if ld(l, L_MARK) == 0
             prev == 0 ? sset(S_LARGE, nxt) : st(prev, L_ALLNEXT, nxt)
-            remove_extent(l)
+            drop_extent(l)
             sset(S_BYTES, sget(S_BYTES) - (LARGE_HEADER + ld(l, L_SIZE)))
             free(Ptr{UInt8}(l))
         else
@@ -832,25 +828,110 @@ end
         end
         l = nxt
     end
+    compact_extents!()
     return live
 end
 
-@noinline function remove_extent(header::UInt)
+# The large object that starts at `l` is not in the heap any more: its extent is marked as dropped (the header is 0), and `compact_extents!` takes the dropped ones out when the sweep has gone through all of them
+# (which is once, and not once for each: the array has as many as there are objects). The extents are in order when this is called, as a collection puts them (`sort_extents!`), and none is added during it.
+@inline function drop_extent(l::UInt)
+    e = find_extent(l)
+    e > 0 || return
+    ext = sget(S_EXT)
+    ld(ext, 3 * (e - 1)) == l && st(ext, 3 * (e - 1) + 2, UInt(0))
+    return
+end
+
+@noinline function compact_extents!()
     ext = sget(S_EXT)
     n = sget(S_EXT_N) % Int
+    keep = 0
     i = 0
-    while i < n && ld(ext, 3i + 2) != header
+    while i < n
+        if ld(ext, 3i + 2) != 0
+            if keep != i
+                st(ext, 3keep, ld(ext, 3i))
+                st(ext, 3keep + 1, ld(ext, 3i + 1))
+                st(ext, 3keep + 2, ld(ext, 3i + 2))
+            end
+            keep += 1
+        end
         i += 1
     end
-    i < n || return
-    while i + 1 < n
-        st(ext, 3i, ld(ext, 3 * (i + 1)))
-        st(ext, 3i + 1, ld(ext, 3 * (i + 1) + 1))
-        st(ext, 3i + 2, ld(ext, 3 * (i + 1) + 2))
-        i += 1
-    end
-    sset(S_EXT_N, (n - 1) % UInt)
+    sset(S_EXT_N, keep % UInt)
+    sset(S_EXT_SORTED, keep % UInt)
     return
+end
+
+# Put the extents in order of where they start, as the lookups need them to be: the ones that were added since the last time (the end of the array) are sorted (a heap sort, in place), and merged with the ones that were in order
+@noinline function sort_extents!()
+    n = sget(S_EXT_N) % Int
+    m = sget(S_EXT_SORTED) % Int
+    m < n || return
+    ext = sget(S_EXT)
+    k = n - m
+    base = m # (the first extent of the part that is not in order)
+    # heap sort of `k` triples from `base`
+    start = (k - 2) >> 1
+    while start >= 0
+        sift_down!(ext, base, start, k)
+        start -= 1
+    end
+    last = k - 1
+    while last > 0
+        swap_extents!(ext, base, base + last)
+        sift_down!(ext, base, 0, last)
+        last -= 1
+    end
+    # merge with the part that is in order, from the end (the part that is not is copied: it is the one that the part in order is moved over)
+    if m > 0 && ld(ext, 3 * (m - 1)) > ld(ext, 3 * m)
+        tmp = UInt(calloc(1, k * 24))
+        tmp == 0 && out_of_memory()
+        i = 0
+        while i < 3k
+            st(tmp, i, ld(ext, 3m + i))
+            i += 1
+        end
+        a = m - 1
+        b = k - 1
+        dst = n - 1
+        while b >= 0
+            if a >= 0 && ld(ext, 3a) > ld(tmp, 3b)
+                st(ext, 3dst, ld(ext, 3a)); st(ext, 3dst + 1, ld(ext, 3a + 1)); st(ext, 3dst + 2, ld(ext, 3a + 2))
+                a -= 1
+            else
+                st(ext, 3dst, ld(tmp, 3b)); st(ext, 3dst + 1, ld(tmp, 3b + 1)); st(ext, 3dst + 2, ld(tmp, 3b + 2))
+                b -= 1
+            end
+            dst -= 1
+        end
+        free(Ptr{UInt8}(tmp))
+    end
+    sset(S_EXT_SORTED, n % UInt)
+    return
+end
+
+@inline function swap_extents!(ext::UInt, i::Int, j::Int)
+    for w in 0:2
+        x = ld(ext, 3i + w)
+        st(ext, 3i + w, ld(ext, 3j + w))
+        st(ext, 3j + w, x)
+    end
+    return
+end
+
+# (the heap of the sort: the extent `root` of the `count` that start at `base`, moved down until the one that starts last of its children is not after it)
+@inline function sift_down!(ext::UInt, base::Int, root::Int, count::Int)
+    while true
+        child = 2root + 1
+        child < count || return
+        if child + 1 < count && ld(ext, 3 * (base + child)) < ld(ext, 3 * (base + child + 1))
+            child += 1
+        end
+        ld(ext, 3 * (base + root)) < ld(ext, 3 * (base + child)) || return
+        swap_extents!(ext, base + root, base + child)
+        root = child
+    end
 end
 
 ## collecting
@@ -902,6 +983,7 @@ end
         end
     end
     sset(S_COLLECTING, UInt(1))
+    sort_extents!() # (the lookups of the marking need them in order)
     scan_roots()
     if scan_stack
         # the registers are saved in the state (a buffer in memory that is not the stack), and the stack is from here to the base

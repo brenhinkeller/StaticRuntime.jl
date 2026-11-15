@@ -23,6 +23,9 @@ GROUP in ("Core", "Packages", "All") || throw(ArgumentError("GROUP is `Core`, `P
 
 include("helpers.jl")
 
+# (the code that is compiled is for the CPU of the machine that compiles it: a failure that is seen on some of the machines that CI runs on and not on others is one of those that depend on it, so the log says what it was)
+@info "Host CPU" cpu = LLVM.host_cpu_name() features = LLVM.host_cpu_features() threads = Threads.nthreads() julia = VERSION
+
 GROUP in ("Core", "All") && @time "Core tests:" include("core/runtests.jl")
 GROUP in ("Packages", "All") && @time "Package tests:" include("packages/runtests.jl")
 
