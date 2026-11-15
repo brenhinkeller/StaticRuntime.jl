@@ -29,6 +29,9 @@ const SLOTS_WHY = Ref(false)
 # Every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed. It is on when the compilation is `strict` (the default), and `STATIC_RUNTIME_CHECK_TYPES=0` turns it off (`1` turns it on for `strict = false`); it costs nothing that could be measured in the benchmarks of `bench/dispatch.jl`
 const UNKNOWN_STORES = Dict{SlotKey,Vector{String}}()
 const STORE_CONTEXT = Ref{Any}(nothing)
+# (for `STATIC_RUNTIME_SLOTS_WHY`: the operand of the store that is being noted, and the stores of a type that is not known that were found while the code was looked at: (slot, what is stored is a parameter of the method, where))
+const STORE_OPERAND = Ref{Any}(nothing)
+const UNKNOWN_CENSUS = Tuple{SlotKey,Bool,String}[]
 const CHECK_SLOT_TYPES = Ref(false)
 # (for testing the check: `STATIC_RUNTIME_SLOTS_BLIND=String,Int` makes the analysis miss the stores of these types, as it would a store that it can not see)
 const BLIND_TYPES = Set{String}()
@@ -58,8 +61,10 @@ const UNIVERSE_MODE = Ref(:add)
 const UNIVERSE_SEEN = Set{Any}()
 const UNIVERSE_USED = Set{Any}()
 const UNIVERSE_VERSION = Ref(0)
+const UNIVERSE_FREEZE_PASS = 2 # (from this pass on the universe is not added to: the types that the passes find go on growing for a program that reaches much, and a pass that is made with more of them takes longer than the one before)
 const UNIVERSE_LIMIT = 512 # (the types of a program that is compiled: more are not added, so that what is found settles)
 const UNIVERSE_EXTRAS = Dict{Any,Vector{Any}}()
+const STORED_BY_SLOT = Dict{SlotKey,Set{Any}}() # (the types that were stored in each slot of an abstract type, in this pass: those of the slots that are open are in the universe, see `note_stored_type!`)
 
 # whether a module is one of Julia's own (the standard library, Base and Core, and this package), whose types are the ones that are registered when a program is likely to have them
 const JULIA_OWNED_MODULES = Dict{Module,Bool}()
@@ -145,6 +150,7 @@ end
 function reset_slots_pass!()
     PASS_PARAMS_KEY[] = OverridesParams().candidates
     empty!(UNIVERSE_SEEN)
+    empty!(STORED_BY_SLOT)
     empty!(RAW_STORE_TYPES)
     SCAN_TRUNCATED[] = false
     empty!(SEEN_SLOTS)
@@ -159,7 +165,8 @@ function reset_slots!(; strict::Bool = true)
     empty!(SEEN_SLOTS)
     empty!(SEEN_UNKNOWN)
     SLOT_PASSES[] = 0
-    SLOTS_FALLBACK[] = false
+    empty!(SCAN_CACHE)
+    SLOTS_FALLBACK[] = get(ENV, "STATIC_RUNTIME_SLOTS_FALLBACK", "1") == "0" # (`0`: a compilation that fails with the types of the slots is not made again without them, for finding out what failed)
     SCAN_TRUNCATED[] = false
     mode = get(ENV, "STATIC_RUNTIME_SLOTS", "on")
     SLOTS_MODE[] = mode == "0" ? :off : mode == "observe" ? :observe : :on
@@ -195,7 +202,9 @@ end
 function note_slot_store!(key::SlotKey, @nospecialize(T))
     T = stored_type(T)
     T === Union{} && return
+    !isempty(EMBEDDED_SLOTS) && key in EMBEDDED_SLOTS && !closed_type(T) && return # (see `@assume_field_embedded`: the reads are checked)
     if FACTS_SINK[] !== nothing
+        SLOTS_WHY[] && !closed_type(T) && push!(UNKNOWN_CENSUS, (key, STORE_OPERAND[] isa Core.Argument, string(STORE_CONTEXT[])))
         push!(FACTS_SINK[], (key, T))
         return
     end
@@ -212,18 +221,32 @@ function note_slot_store!(key::SlotKey, @nospecialize(T))
     new = Union{cur, T}
     Base.unionlen(new) > SLOT_LIMIT[] ? push!(SEEN_UNKNOWN, key) : (SEEN_SLOTS[key] = new)
     for t in Base.uniontypes(T)
-        note_stored_type!(t)
+        note_stored_type!(key, t)
     end
     return
 end
 
 # A type that the program stores in a slot of an abstract type is one that a value of that type can have, whoever defines it (a `Vector{Int}` or a `Tuple{Int,Float64}` in a `Vector{Any}`: the types that are made by the
 # program that are not user types are not in the universe otherwise, and are not registered), so a call on a value of the type `Any` is made over it too, where the slot is one that is not known (see `note_universe!`).
-function note_stored_type!(@nospecialize(T))
+# Only for a slot that is open at the end of the pass (`add_stored_types!`): a slot that has types has those for what is read from it, and the types that all the slots of a program store, as the types that a call is made over,
+# are many (the program that is made of `String`s and `Symbol`s of a `Vector{Any}` has hundreds), which a call over a value that is not known is split by.
+# (the types of the type system, that the code of Base keeps in a `Vector{Any}` while it works with types (`typejoin`), are not values of a program: a call that is made over them is one that is not wanted)
+const REFLECTION_TYPES = Any[TypeVar, Core.TypeofVararg, Core.TypeName, Module, Method, Core.MethodInstance, Core.CodeInstance, Core.SimpleVector]
+function note_stored_type!(key::SlotKey, @nospecialize(T))
     UNIVERSE_MODE[] === :off && return
     (T isa DataType && isconcretetype(T) && !(T <: Function) && !(T <: Type)) || return
+    any(R -> T <: R, REFLECTION_TYPES) && return
     (T in DEFAULT_DISPATCH_CANDIDATES || T in SHOW_CANDIDATES) && return # (registered already)
-    push!(UNIVERSE_SEEN, T)
+    push!(get!(Set{Any}, STORED_BY_SLOT, key), T)
+    return
+end
+
+# the types that were stored in the slots that are open, as types of the universe
+function add_stored_types!()
+    for (key, types) in STORED_BY_SLOT
+        (key in SLOT_OPEN || key in SEEN_UNKNOWN) || continue
+        union!(UNIVERSE_SEEN, types)
+    end
     return
 end
 
@@ -262,16 +285,17 @@ const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer
 
 # What a statement stores in the slots: `called(x)` is the function (or the type) that the operand `x` is, and `optype(x)` the type of an operand
 function learn_statement!(call::Expr, called, optype)
+    store!(key, operand) = (STORE_OPERAND[] = operand; note_slot_store!(key, optype(operand)))
     if call.head === :call && length(call.args) >= 3
         f = called(call.args[1])
         if f === Core.memoryrefset!
             key = elem_slot_key(optype(call.args[2]))
-            key === nothing || note_slot_store!(key, optype(call.args[3]))
+            key === nothing || store!(key, call.args[3])
         elseif f === Core.memoryrefswap! || f === Core.memoryrefsetonce! || f === Core.memoryrefreplace!
             # (the value that is stored: the second of the arguments after the reference for `swap` and `setonce`, the third for `replace`)
             key = elem_slot_key(optype(call.args[2]))
             i = f === Core.memoryrefreplace! ? 4 : 3
-            key === nothing || note_slot_store!(key, length(call.args) >= i ? optype(call.args[i]) : Any)
+            key === nothing || (length(call.args) >= i ? store!(key, call.args[i]) : note_slot_store!(key, Any))
         elseif f === Core.memoryrefmodify!
             key = elem_slot_key(optype(call.args[2]))
             key === nothing || note_slot_store!(key, Any) # (what a function that is given gives: not followed)
@@ -280,14 +304,15 @@ function learn_statement!(call::Expr, called, optype)
             i = f === Core.replacefield! ? 5 : 4
             name = const_field_name(call.args[3])
             S = optype(call.args[2])
-            T = f === Core.modifyfield! || length(call.args) < i ? Any : optype(call.args[i])
+            operand = f === Core.modifyfield! || length(call.args) < i ? nothing : call.args[i]
+            T = operand === nothing ? Any : optype(operand)
             if name === nothing
                 # (a field that is not known when compiling: any of the fields that hold an unknown type may be it)
                 S isa DataType && isconcretetype(S) && isstructtype(S) &&
                     for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!((:field, S, fieldname(S, i)), Any); end
             else
                 key = field_slot_key(S, name)
-                key === nothing || note_slot_store!(key, T)
+                key === nothing || (STORE_OPERAND[] = operand; note_slot_store!(key, T))
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
@@ -303,7 +328,7 @@ function learn_statement!(call::Expr, called, optype)
         for (i, a) in enumerate(call.args[2:end])
             i <= fieldcount(S) || break
             needs_slot_type(fieldtype(S, i)) || continue
-            note_slot_store!((:field, S, fieldname(S, i)), optype(a))
+            store!((:field, S, fieldname(S, i)), a)
         end
     elseif call.head === :splatnew && length(call.args) >= 2
         # (`new(t...)`: the fields are the elements of the tuple)
@@ -351,6 +376,10 @@ function record_slot_facts!(ir::CC.IRCode, mi::Core.MethodInstance)
         optype = x -> CC.widenconst(CC.argextype(x, ir))
         for pc in 1:length(ir.stmts)
             st = ir.stmts[pc][:stmt]
+            if SLOTS_WHY[]
+                STORE_OPERAND[] = nothing
+                STORE_CONTEXT[] = string(mi, " #", pc, ": ", first(string(st), 120))
+            end
             st isa Expr && learn_statement!(st, called, optype)
         end
         note_universe_statements!((ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
@@ -397,52 +426,74 @@ function CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState{<:Override
     return @invoke CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState, propagate_inbounds::Bool)
 end
 
-# What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type. A constant that is too large to be looked at all of (`SCAN_BUDGET` objects,
-# `SCAN_DEPTH` levels deep, `SCAN_FIELDS` fields) is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls on what is read from them are made over the registered types
-const SCAN_BUDGET = 10_000
-const SCAN_DEPTH = 6
+# What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type, and the types of what is in them (for the universe). A constant is
+# looked at with a list of what is to be looked at (not by calls of itself: what a program embeds can be a long chain, or deep, as a graph of objects is), each mutable object once (it can refer to itself), and as many objects
+# as `SCAN_BUDGET`. One that is larger, or a struct that has more than `SCAN_FIELDS` fields, is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls
+# on what is read from them are made over the registered types. What is found in a constant is kept for the compilation (`SCAN_CACHE`): the same constant is the operand of many statements.
+const SCAN_BUDGET = 200_000
 const SCAN_FIELDS = 64
 const SCAN_TRUNCATED = Ref(false)
+const SCAN_CACHE = IdDict{Any,Vector{Tuple{SlotKey,Any}}}()
 note_truncated!() = FACTS_SINK[] === nothing ? (SCAN_TRUNCATED[] = true) : push!(FACTS_SINK[], ((:truncated, nothing, nothing), Any))
 
-function note_slots_in!(@nospecialize(x), depth::Int = 0, budget::Base.RefValue{Int} = Ref(SCAN_BUDGET), seen = Base.IdSet{Any}())
-    note_universe!(typeof(x))
-    (x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char) && return
-    if budget[] <= 0 || depth >= SCAN_DEPTH
-        note_truncated!()
-        return
-    end
-    budget[] -= 1
-    ismutable(x) && (x in seen ? (return) : push!(seen, x))
-    if x isa Core.GenericMemory
-        key = (:elem, eltype(x), nothing)
-        if needs_slot_type(eltype(x))
+scan_leaf(@nospecialize(x)) = x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
+
+# the facts about the slots, and the universe, that are in `x0` and in what it refers to: `(slot, type of what is stored)`, `((:universe, type, nothing), Any)` and `((:truncated, nothing, nothing), Any)`, each once
+function scan_facts(@nospecialize(x0))
+    facts = Set{Tuple{SlotKey,Any}}()
+    seen = Base.IdSet{Any}()
+    stack = Any[x0]
+    budget = SCAN_BUDGET
+    while !isempty(stack)
+        x = pop!(stack)
+        push!(facts, ((:universe, typeof(x), nothing), Any))
+        scan_leaf(x) && continue
+        if budget <= 0
+            push!(facts, ((:truncated, nothing, nothing), Any))
+            break
+        end
+        budget -= 1
+        ismutable(x) && (x in seen ? continue : push!(seen, x))
+        if x isa Core.GenericMemory
+            key = (:elem, eltype(x), nothing)
+            slot = needs_slot_type(eltype(x))
+            (slot || !isbitstype(eltype(x))) || continue
             for i in eachindex(x)
                 isassigned(x, i) || continue
-                note_slot_store!(key, typeof(x[i]))
-                note_slots_in!(x[i], depth + 1, budget, seen)
+                e = x[i]
+                slot && push!(facts, (key, typeof(e)))
+                push!(stack, e)
             end
-        elseif !isbitstype(eltype(x))
-            for i in eachindex(x)
-                isassigned(x, i) && note_slots_in!(x[i], depth + 1, budget, seen)
+        elseif x isa Tuple
+            for e in x
+                push!(stack, e)
+            end
+        elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName)
+            S = typeof(x)
+            if fieldcount(S) > SCAN_FIELDS
+                push!(facts, ((:truncated, nothing, nothing), Any))
+                continue
+            end
+            for i in 1:fieldcount(S)
+                isdefined(x, i) || continue
+                v = getfield(x, i)
+                needs_slot_type(fieldtype(S, i)) && push!(facts, ((:field, S, fieldname(S, i)), typeof(v)))
+                push!(stack, v)
             end
         end
-    elseif x isa Tuple
-        for e in x
-            note_slots_in!(e, depth + 1, budget, seen)
-        end
-    elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName)
-        S = typeof(x)
-        if fieldcount(S) > SCAN_FIELDS
-            note_truncated!()
-            return
-        end
-        for i in 1:fieldcount(S)
-            isdefined(x, i) || continue
-            v = getfield(x, i)
-            needs_slot_type(fieldtype(S, i)) && note_slot_store!((:field, S, fieldname(S, i)), typeof(v))
-            note_slots_in!(v, depth + 1, budget, seen)
-        end
+    end
+    return collect(facts)
+end
+
+function note_slots_in!(@nospecialize(x))
+    if scan_leaf(x)
+        note_universe!(typeof(x))
+        return
+    end
+    facts = get!(() -> scan_facts(x), SCAN_CACHE, x)
+    for (key, T) in facts
+        k = key[1]
+        k === :universe ? note_universe!(key[2]) : k === :truncated ? note_truncated!() : note_slot_store!(key, T)
     end
     return
 end
@@ -489,7 +540,7 @@ end
 # what was used
 function analyze_slots!(interp, root)
     SLOTS_MODE[] === :off && return
-    (isempty(SLOT_TYPES) && !dispatch_was_used() && SLOTS_MODE[] !== :observe) && return
+    (isempty(SLOT_TYPES) && !dispatch_was_used() && isempty(EMBEDDED_SLOTS) && SLOTS_MODE[] !== :observe) && return
     # (what the roots that were made before in this pass stored is kept: a `@cfunction` is a root of its own, and the slots are those of the whole program)
     for (ci, src) in GPUCompiler.CompilerCaching.get_codeinfos(interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
@@ -515,6 +566,22 @@ function analyze_slots!(interp, root)
     end
     SLOTS_MODE[] === :observe && return
     if SLOTS_WHY[]
+        if !isempty(UNKNOWN_CENSUS)
+            by = Dict{SlotKey,Vector{Int}}() # (slot) => [stores of a type that is not known, of which a parameter of the method]
+            example = Dict{SlotKey,String}()
+            for (k, param, ctx) in UNKNOWN_CENSUS
+                c = get!(by, k, [0, 0]); c[1] += 1; c[2] += param
+                haskey(example, k) || (example[k] = ctx)
+            end
+            println(stderr, "== unknown stores found while looking at the code (all methods): ", length(UNKNOWN_CENSUS), ", of which the value is a parameter of the method: ", count(c -> c[2], UNKNOWN_CENSUS))
+            for (k, c) in sort!(collect(by); by = p -> -p[2][1])[1:min(end, 12)]
+                println(stderr, "   ", k[1], " ", k[2], " ", k[3], ": ", c[1], " stores, ", c[2], " of a parameter")
+                println(stderr, "        e.g. ", first(example[k], 260))
+            end
+            for (k, param, ctx) in first(UNKNOWN_CENSUS, 6)
+                println(stderr, "     e.g. ", param ? "[parameter] " : "", first(ctx, 200))
+            end
+        end
         println(stderr, "== slots, pass ", SLOT_PASSES[], ": ", length(SLOT_TYPES), " known, ", length(SLOT_OPEN), " open; unknown stores in ", length(SEEN_UNKNOWN), " slots")
         for (k, T) in SEEN_SLOTS
             println(stderr, "   seen ", k[1], " ", k[2], " ", k[3], " => ", T)
@@ -528,7 +595,8 @@ function analyze_slots!(interp, root)
     end
     changed = update_slot_types!()
     # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
-    if UNIVERSE_MODE[] !== :off && dispatch_was_used()
+    if UNIVERSE_MODE[] !== :off && dispatch_was_used() && SLOT_PASSES[] < UNIVERSE_FREEZE_PASS
+        add_stored_types!()
         new = Any[t for t in UNIVERSE_SEEN if !(t in UNIVERSE_USED)]
         length(UNIVERSE_USED) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(UNIVERSE_USED))])
         if !isempty(new)

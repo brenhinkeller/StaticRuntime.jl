@@ -260,7 +260,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
-    isempty(BOX_TYPES) && isempty(SLOT_TYPES) && isempty(ASSUMED_SLOTS) && return call
+    isempty(BOX_TYPES) && isempty(SLOT_TYPES) && isempty(ASSUMED_SLOTS) && isempty(EMBEDDED_SLOTS) && return call
     # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
     (sv isa CC.InferenceState || CC.isready(call)) || return call
     argtypes = arginfo.argtypes

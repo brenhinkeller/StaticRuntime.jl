@@ -336,7 +336,10 @@ function stub_error_paths!(mod::LLVM.Module; allow = ())
     found = unsupported_instructions(mod; allow)
     isempty(found) && return stubbed
     error_fns = error_functions(mod, cache)
+    done = Set{Ptr{Cvoid}}() # (an instruction can be found twice, as a call of the runtime that has an address in it: it is replaced once)
     for (inst, why) in found
+        ref = Ptr{Cvoid}(inst.ref)
+        ref in done && continue
         bb = LLVM.parent(inst)
         fn = LLVM.parent(bb)
         fn in error_fns || bb in get!(() -> error_blocks(fn), cache, fn) || continue
@@ -349,6 +352,7 @@ function stub_error_paths!(mod::LLVM.Module; allow = ())
         ty = LLVM.value_type(inst)
         isempty(collect(LLVM.uses(inst))) || ty == LLVM.VoidType() || LLVM.replace_uses!(inst, LLVM.PoisonValue(ty))
         LLVM.erase!(inst)
+        push!(done, ref)
         push!(stubbed, string(where_, ": ", why))
     end
     return stubbed

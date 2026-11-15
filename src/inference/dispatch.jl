@@ -441,7 +441,7 @@ const FIELD_BUILTINS = (Core.getfield, Core.setfield!)
 
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
     ir = assert_assumed_returns!(ir, opt.linfo)
-    (CHECK_SLOT_TYPES[] || !isempty(ASSUMED_SLOTS)) && (ir = check_slot_reads!(ir))
+    (CHECK_SLOT_TYPES[] || !isempty(ASSUMED_SLOTS) || !isempty(EMBEDDED_SLOTS)) && (ir = check_slot_reads!(ir))
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
     ir = concretize_namedtuples!(ir)
@@ -469,7 +469,7 @@ function check_slot_reads!(ir::CC.IRCode)
         end
         key === nothing && continue
         slot_read_type(key) === nothing && continue
-        (CHECK_SLOT_TYPES[] || haskey(ASSUMED_SLOTS, key)) || continue # (what is assumed is always checked)
+        (CHECK_SLOT_TYPES[] || haskey(ASSUMED_SLOTS, key) || key in EMBEDDED_SLOTS) || continue # (what is assumed is always checked)
         reads[pc] = key
         T = CC.widenconst(ir.stmts[pc][:type])
         (T !== Union{} && closed_type(T)) || continue

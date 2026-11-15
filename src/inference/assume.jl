@@ -14,6 +14,7 @@
 
 const ASSUMED_RETURNS = Tuple{Any,Any}[] # (the signature as a `Tuple` type that starts with the type of the function, the type that it gives)
 const ASSUMED_SLOTS = Dict{SlotKey,Any}()
+const EMBEDDED_SLOTS = Set{SlotKey}() # (fields whose type is what the objects that are made when compiling hold)
 const ASSUMED_VERSION = Ref(0)
 
 """
@@ -49,6 +50,21 @@ function assume_field!(@nospecialize(S), name::Symbol, @nospecialize(T))
     key = (:field, S, name)
     get(ASSUMED_SLOTS, key, nothing) == T && return nothing
     ASSUMED_SLOTS[key] = T
+    ASSUMED_VERSION[] += 1
+    return nothing
+end
+
+"""
+    StaticRuntime.assume_field_embedded!(S::DataType, name::Symbol)
+
+What `@assume_field_embedded` does: the field `name` of a struct of the type `S` holds what the objects that are in the program as constants hold (and what the code stores in it of a type that is known).
+"""
+function assume_field_embedded!(@nospecialize(S), name::Symbol)
+    S isa DataType && isconcretetype(S) && isstructtype(S) || throw(ArgumentError("`$(repr(S))` is not a struct that fields can be assumed of"))
+    hasfield(S, name) || throw(ArgumentError("`$S` has no field `$name`"))
+    key = (:field, S, name)
+    key in EMBEDDED_SLOTS && return nothing
+    push!(EMBEDDED_SLOTS, key)
     ASSUMED_VERSION[] += 1
     return nothing
 end
@@ -104,6 +120,19 @@ macro assume_field(ex)
     return :($assume_field!($(esc(field.args[1])), $(field.args[2]), $(esc(T))))
 end
 
+"""
+    @assume_field_embedded S.name
+
+State that the field `name` of a struct of the type `S` holds only what the objects that the program has as constants hold at the time of compiling (the state that is made by running the initialization of a package, and
+embedded), and what the code stores in it of a type that is known. A store of a value of a type that is not known (a function that sets a field by its name, `setproperty!(x, ::Symbol, ::Any)`) does not count, which
+is what makes the type of the field known; what is read from the field is checked, so that a program in which it holds another type stops with a type error that says so. Use it where the module is initialized (`__init__`).
+"""
+macro assume_field_embedded(ex)
+    ex isa Expr && ex.head === :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode ||
+        throw(ArgumentError("`@assume_field_embedded` is given a field: `@assume_field_embedded S.name`"))
+    return :($assume_field_embedded!($(esc(ex.args[1])), $(ex.args[2])))
+end
+
 # the type that a method is assumed to give (the one of all the assumptions that fit it): the specialization `mi` is one that a signature fits when its types are subtypes of that signature
 function assumed_return(mi::Core.MethodInstance)
     isempty(ASSUMED_RETURNS) && return nothing
@@ -123,6 +152,9 @@ function assumptions_hash()
     end
     for ((_, S, name), T) in ASSUMED_SLOTS
         h += hash(objectid(S), hash(name, hash(objectid(T))))
+    end
+    for (_, S, name) in EMBEDDED_SLOTS
+        h += hash(objectid(S), hash(name, UInt(1)))
     end
     return h
 end

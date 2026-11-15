@@ -294,7 +294,10 @@ end
               "MallocScribble" => "1", "MALLOC_CHECK_" => "3", "MALLOC_PERTURB_" => "165")
     expected = "$(Base.invokelatest(heap_work))\n"
     for _ in 1:5
-        @test read(setenv(`$exe`, checks...), String) == expected
+        # (the allocator writes what it was asked to check to the error output of the program: it is kept, and is shown if the output is not what it should be)
+        err = IOBuffer()
+        out = read(pipeline(setenv(`$exe`, checks...); stderr = err), String)
+        @test out == expected || (@info "heap_main wrote" stderr = String(take!(err)); false)
     end
 end
 
@@ -361,7 +364,7 @@ odd_allocates(n::Int) = n == 0 ? [1] : push!(even_allocates(n - 1), n)
 raw_mutual_recursion(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(length(even_allocates(argc + 100))); 0)
 loop_helper(n::Int) = length(collect(1:n))
 raw_loop_calls_function(argc::Int, argv::Ptr{Ptr{UInt8}}) = (s = 0; for i in 1:argc * 1000; s += loop_helper(10 + i % 3); end; println(s); 0)
-args_nothing(args::Vector{String}) = println("hello")
+heap_args_nothing(args::Vector{String}) = println("hello")
 args_sum(args::Vector{String}) = (println(sum(length, args)); 0)
 args_loop(args::Vector{String}) = (s = 0; for i in 1:1000 + length(args); s += length(zeros(Int, 10 + i % 5)); end; println(s); 0)
 @testset "The collector is in the programs that need it" begin
@@ -376,7 +379,7 @@ args_loop(args::Vector{String}) = (s = 0; for i in 1:1000 + length(args); s += l
     # (a finite amount: what is allocated once, and a `try` that catches and goes on, if it is not in a loop either)
     @test !has_collector(raw_once)
     @test !has_collector(raw_catch_once)
-    @test !has_collector_args(args_nothing) # (what makes `args` is not counted)
+    @test !has_collector_args(heap_args_nothing) # (what makes `args` is not counted)
     @test !has_collector_args(args_sum)
     # (these allocate again and again: in a loop, in a function that is called in one, in a function that calls itself)
     @test has_collector(raw_recursion)
@@ -386,7 +389,7 @@ args_loop(args::Vector{String}) = (s = 0; for i in 1:1000 + length(args); s += l
     @testset "gc = true, false and a number do not look at the program" begin
         @test has_collector(raw_nothing; gc = true)
         @test has_collector(raw_error_only; gc = true)
-        @test has_collector_args(args_nothing; gc = true)
+        @test has_collector_args(heap_args_nothing; gc = true)
         @test has_collector(raw_nothing; gc = 7)
         @test !has_collector(raw_allocates; gc = false)
         @test !has_collector(raw_finalizer; gc = false)

@@ -66,6 +66,8 @@ Base.@deprecate_binding OLD_BINDING NEW_BINDING
 @noinline unused_expr(x) = (Expr(:meta, :noinline); x + 1)
 @testset "What is dropped from a program" begin
     check_cases(["an Expr that is not used" => () -> unused_expr(opaque(1))])
-    # (Julia warns, once, when the binding is used: the program does not)
-    @test static_result(() -> OLD_BINDING + opaque(1)) == 42
+    # (Julia warns, once, when the binding is used: the program does not. The warning is written by the runtime of Julia, and is not one of the tests)
+    @test redirect_stderr(devnull) do
+        static_result(() -> OLD_BINDING + opaque(1))
+    end == 42
 end
