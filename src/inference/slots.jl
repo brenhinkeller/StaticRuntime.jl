@@ -11,7 +11,7 @@
 # that is not known was (so that what the slot holds is not known); `types`, the types that reads of each slot are given in this pass (see `update_slot_types!`); `open`, the slots that are given up (what is stored in them is
 # not known: a read of one is an `Any`, over the registered types); `seen_unknown`, the slots that something of a type that is not known was stored in, in this pass. `mode` is `:on` (the types are used), `:observe` (found and
 # kept in `seen`, and not used), or `:off`.
-const SLOT_PASS_LIMIT = 4
+const SLOT_PASS_LIMIT = 8
 # Every read of a slot that was given the types that were stored in it is checked (`check_slot_reads!`, dispatch.jl): the program stops if the value is of another type, as it would be if a store were missed. It is on when the compilation is `strict` (the default), and `STATIC_RUNTIME_CHECK_TYPES=0` turns it off (`1` turns it on for `strict = false`); it costs nothing that could be measured in the benchmarks of `bench/dispatch.jl` (see `Settings`)
 const SLOT_LIMIT = Ref(64) # the most types that a slot holds before it is given up
 # the number of the types of the universe that a compilation adds (the types of a program that is compiled: more are not added, so that what is found settles)
@@ -203,6 +203,22 @@ const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer
 function learn_statement!(c::Compilation, call::Expr, called, optype)
     s = c.slots
     store!(key, operand) = (s.store_operand = operand; note_slot_store!(c, key, optype(operand)))
+    # `x.name = v` that is a call of `setproperty!` (not inlined, or before the inliner): a store of `v` in the field `name`, where that is known. (The method itself, which sets the field that its argument names, is not looked at: see
+    # `learn_slots!`: this is how the stores that are made by it are known, with the name and the value of each call.)
+    if (call.head === :call && length(call.args) == 4 && called(call.args[1]) === Base.setproperty!) ||
+       (call.head === :invoke && length(call.args) == 5 && called(call.args[2]) === Base.setproperty!)
+        o = call.head === :call ? 2 : 3
+        name = const_field_name(call.args[o+1])
+        S = optype(call.args[o])
+        if name === nothing
+            S isa DataType && isconcretetype(S) && isstructtype(S) &&
+                for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
+        else
+            key = field_slot_key(S, name)
+            key === nothing || store!(key, call.args[o+2])
+        end
+        return
+    end
     if call.head === :call && length(call.args) >= 3
         f = called(call.args[1])
         if f === Core.memoryrefset!
@@ -262,7 +278,10 @@ function learn_statement!(c::Compilation, call::Expr, called, optype)
 end
 
 # the stores of a method (its optimized statements, with their types)
+generic_setproperty(mi::Core.MethodInstance) = mi.def isa Method && mi.def.sig === SETPROPERTY_SIG
+
 function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstance)
+    generic_setproperty(mi) && return
     s = c.slots
     code = src.code
     called = x -> called_function(code, x)
@@ -289,6 +308,7 @@ end
 const SLOT_FACTS = IdDict{Core.MethodInstance,Dict{Int,Vector{Tuple{SlotKey,Any}}}}()
 
 function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstance)
+    generic_setproperty(mi) && return
     s = c.slots
     facts = Tuple{SlotKey,Any}[]
     s.facts_sink = facts

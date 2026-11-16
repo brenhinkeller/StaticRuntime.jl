@@ -207,6 +207,10 @@ end
     return chain
 end
 
+# `values(nt)` is `Tuple(nt)`, a call that is made when the program runs for a `NamedTuple` whose field types are not all concrete (a value of the type `Any`, or a union, that was read from a `RefValue{Any}`: Makie's compute
+# graph calls its functions with `values(inputs)...`). The fields are the elements of the tuple, one by one, with their types.
+@device_override @inline Base.values(nt::NamedTuple{names}) where {names} = ntuple(i -> getfield(nt, i), Val(length(names)))
+
 # `get(nt, name, default)` is the same chain that ends in the default.
 @generated namedtuple_get(x::NamedTuple, name::Symbol, default) = field_chain(x, :default)
 @device_override @inline Base.get(nt::NamedTuple, name::Symbol, default) = namedtuple_get(nt, name, default)

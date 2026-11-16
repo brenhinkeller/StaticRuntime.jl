@@ -448,6 +448,7 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     (c.settings.check_types || !isempty(c.registered.fields) || !isempty(c.registered.embedded)) && (ir = check_slot_reads!(c, ir))
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
+    ir = expand_setproperty!(ir)
     ir = concretize_namedtuples!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
 end
@@ -532,6 +533,34 @@ function expand_dynamic_getfield!(ir::CC.IRCode)
         else
             mi = CC.specialize_method(only(methods(index_field)), Tuple{typeof(index_field),T,Int}, Core.svec())
             ir.stmts[pc][:stmt] = Expr(:invoke, mi, index_field, st.args[2], st.args[3])
+        end
+    end
+    return ir
+end
+
+# `x.name = v` that Julia did not inline (`setproperty!(x, :name, v)`: a combination of a receiver and a value that the program does not make, but that a union of both has, where the conversion of `v` to the type of the
+# field has no method, or is large) is a call of the one method of `setproperty!`, which has the name as a value, and finds the type of the field and sets it with calls of the runtime (`fieldtype`, `setfield!`): the name is a
+# constant at the call, and not in the method that is compiled for it. Where the value is of the type of the field the call is the `setfield!`, and where `convert` has no method for it the call is the error that it gives.
+const SETPROPERTY_SIG = Tuple{typeof(Base.setproperty!),Any,Symbol,Any}
+
+function expand_setproperty!(ir::CC.IRCode)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :invoke && length(st.args) == 5 || continue
+        mi = st.args[1]
+        mi isa Core.CodeInstance && (mi = mi.def)
+        mi isa Core.MethodInstance && mi.def isa Method && mi.def.sig === SETPROPERTY_SIG || continue
+        name = CC.argextype(st.args[4], ir)
+        name isa Core.Const && name.val isa Symbol || continue
+        T = CC.widenconst(CC.argextype(st.args[3], ir))
+        (T isa DataType && isconcretetype(T) && isstructtype(T) && !(T <: Type) && hasfield(T, name.val)) || continue
+        V = CC.widenconst(CC.argextype(st.args[5], ir))
+        isconcretetype(V) || continue
+        FT = fieldtype(T, name.val)
+        if V <: FT
+            ir.stmts[pc][:stmt] = Expr(:call, Core.setfield!, st.args[3], QuoteNode(name.val), st.args[5])
+        elseif FT isa DataType && isempty(methods(convert, Tuple{Type{FT},V}))
+            ir.stmts[pc][:stmt] = Expr(:call, Core.throw_methoderror, Base.convert, FT, st.args[5])
         end
     end
     return ir
