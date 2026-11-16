@@ -1,5 +1,5 @@
 # The tests. `GROUP` (an environment variable) says which: `Core` (the compiler, the runtime and the language: `core/`), `Packages` (the standard libraries and the packages that
-# programs use: `packages/`), or `All` (the default, so that `] test` runs both). `PACKAGES` (see `packages/runtests.jl`) selects some of the files of `Packages`.
+# programs use: `packages/`), or `All` (the default, so that `] test` runs both), and `Fuzz` (random programs and values, each in a process of its own with a time limit: `fuzz/`; not in `All`). `PACKAGES` (see `packages/runtests.jl`) selects some of the files of `Packages`.
 #
 # Most of the tests compile a program to an executable and compare what it prints with what Julia prints for the same code (`check_cases`, in `helpers.jl`).
 
@@ -20,7 +20,7 @@ else
 end
 
 const GROUP = get(ENV, "GROUP", "All")
-GROUP in ("Core", "Packages", "All") || throw(ArgumentError("GROUP is `Core`, `Packages` or `All`, not `$GROUP`"))
+GROUP in ("Core", "Packages", "Fuzz", "All") || throw(ArgumentError("GROUP is `Core`, `Packages`, `Fuzz` or `All`, not `$GROUP`"))
 
 include("helpers.jl")
 
@@ -28,8 +28,8 @@ include("helpers.jl")
 @info "Host CPU" cpu = LLVM.host_cpu_name() features = LLVM.host_cpu_features() threads = Threads.nthreads() julia = VERSION
 
 GROUP in ("Core", "All") && @time "Core tests:" include("core/runtests.jl")
-println("\n")
 GROUP in ("Packages", "All") && @time "Package tests:" include("packages/runtests.jl")
+GROUP == "Fuzz" && @time "Fuzz tests:" include("fuzz/runtests.jl") # (not in `All`: see `fuzz/runtests.jl`)
 
 if !isempty(get(ENV, "TEST_TIMING", ""))
     println("\nSeconds for each file of the tests:")

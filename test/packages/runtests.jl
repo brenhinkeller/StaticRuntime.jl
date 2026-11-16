@@ -17,3 +17,6 @@ for name in ALL
     any(s -> occursin(s, name) || occursin(name, s), selected) || continue
     include_timed("$name.jl")
 end
+
+# End of Package tests
+println("\n")

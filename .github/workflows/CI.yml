@@ -93,6 +93,33 @@ jobs:
           TEST_FOLDED: 1
           STATIC_RUNTIME_SLP: ${{ matrix.slp || '1' }}
           STATIC_RUNTIME_GC: ${{ matrix.gc || 'auto' }}
+  fuzz:
+    # random values and programs, each compiled and run in a process of its own with a time limit (`test/fuzz`, the group `Fuzz`): the seeds that failed once, and random ones. A seed that fails
+    # or does not finish is written with the command that runs it again by itself. It is a job of its own so that a case that takes long does not hold up the others (the core tests)
+    name: Fuzz - ${{ matrix.os }} - gc ${{ matrix.gc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        gc:
+          - 'true'
+          - '3'
+    steps:
+      - uses: actions/checkout@v2
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre'
+      - uses: julia-actions/cache@v1
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: false
+        env:
+          GROUP: Fuzz
+          STATIC_RUNTIME_GC: ${{ matrix.gc }}
+          FUZZ_COUNT: 30
   docs:
     name: Documentation
     runs-on: ubuntu-latest

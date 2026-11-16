@@ -5,10 +5,7 @@
 @testset verbose=true "Internals" include_timed("internals.jl")
 
 # what goes into the binary: constants, objects, types and their tags
-@testset verbose=true "Embedding" begin
-    include_timed("embedding.jl")
-    include_timed("embedfuzz.jl")
-end
+@testset verbose=true "Embedding" include_timed("embedding.jl")
 @testset verbose=true "Tags" include_timed("tags.jl")
 @testset verbose=true "Subtype" include_timed("subtype.jl")
 @testset verbose=true "ObjectID" include_timed("objectid.jl")
@@ -28,7 +25,6 @@ end
     @testset verbose=true "Slots" include_timed("slots.jl")
     @testset verbose=true "Types that are stated" include_timed("assume.jl")
     @testset verbose=true "Functions" include_timed("closures.jl")
-    @testset verbose=true "Fuzzing slots and dispatch" include_timed("dispatchfuzz.jl")
 end
 
 # the language and Base: values and globals, numbers (and random numbers), strings, collections, symbols, tasks
@@ -54,3 +50,6 @@ end
 
 # what the others left behind: the state of the process that compiles
 @testset verbose=true "State" include_timed("state.jl")
+
+# End of Core tests
+println("\n")

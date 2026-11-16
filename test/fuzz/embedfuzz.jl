@@ -1,6 +1,7 @@
 # Differential test of the objects that are copied into the binary: random nested values (strings, symbols, numbers of all sizes, vectors
 # and matrices, tuples, named tuples, dictionaries, sets, ranges, pairs, `Ref`s, structs with other structs and containers in them) are the
 # constants of a program that computes a number from all that is in them (a `digest`), and the binary has to print what Julia computes.
+# (Run by `fuzz/runtests.jl`, one process for each seed, with a time limit: see `harness.jl`.)
 
 module EmbedFuzz
     using Random
@@ -104,16 +105,18 @@ module EmbedFuzz
     end
 end
 
-@testset "Random values as constants (EmbedFuzz)" begin
-    for seed in rand(UInt, 10)
-        rng = Random.Xoshiro(seed)
-        v = EmbedFuzz.value(rng, 3)
-        f = () -> EmbedFuzz.digest(v)
-        status, detail = static_status(f)
-        # and a copy of it that the program changes (the constant is not: what is changed is what the program has made)
-        g = () -> (w = deepcopy(v); EmbedFuzz.grow!(w); EmbedFuzz.digest(w))
-        status2, detail2 = static_status(g)
-        @test (status2, detail2) == (:ok, "") || (@info "embedding fuzz case (a copy that is changed)" seed typeof(v) first(replace(string(detail2), '\n' => ' '), 400); false)
-        @test (status, detail) == (:ok, "") || (@info "embedding fuzz case" seed typeof(v) first(replace(string(detail), '\n' => ' '), 400); false)
-    end
+# One case: the value of a seed as a constant of a program, and a copy of it that the program changes. Gives whether both programs were right, and what is said of them if not.
+function fuzz_case(seed::UInt)
+    rng = Random.Xoshiro(seed)
+    v = EmbedFuzz.value(rng, 3)
+    f = () -> EmbedFuzz.digest(v)
+    status, detail = static_status(f)
+    # and a copy of it that the program changes (the constant is not: what is changed is what the program has made)
+    g = () -> (w = deepcopy(v); EmbedFuzz.grow!(w); EmbedFuzz.digest(w))
+    status2, detail2 = static_status(g)
+    ok = (status, detail) == (:ok, "") && (status2, detail2) == (:ok, "")
+    msg = ok ? "" : string("typeof(v) = ", typeof(v),
+                           (status, detail) == (:ok, "") ? "" : string("\nthe constant: ", status, " ", first(replace(string(detail), '\n' => ' '), 400)),
+                           (status2, detail2) == (:ok, "") ? "" : string("\nthe copy that is changed: ", status2, " ", first(replace(string(detail2), '\n' => ' '), 400)))
+    return ok, msg
 end

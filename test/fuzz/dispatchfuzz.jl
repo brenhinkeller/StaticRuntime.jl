@@ -3,7 +3,7 @@
 # types on what is read from them. The program has to print what Julia gives. (Each program is compiled by itself: with others in the same program the slots hold what all of them store, which hides the stores that the
 # analysis does not find.) A program that does not give the number of Julia is cut down to the steps that are enough for it, and written.
 #
-# A program that is refused when compiling, or that stops with a message (the type of a value was not found), is not a wrong answer: it is counted, and written when `FUZZ_VERBOSE` is set. `FUZZ_SEEDS=1:300` runs more.
+# A program that is refused when compiling, or that stops with a message (the type of a value was not found), is not a wrong answer: it is counted, and written when `FUZZ_VERBOSE` is set. (Run by `fuzz/runtests.jl`: `FUZZ_SEEDS=1:300` runs more.)
 
 module DispatchFuzz
     using Random
@@ -182,23 +182,14 @@ module DispatchFuzz
     end
 end
 
-@testset "Random programs that fill slots of abstract types (DispatchFuzz)" begin
-    seeds = rand(UInt, 10)
-    counts = Dict{Symbol,Int}()
-    allok = true
-    for seed in seeds
-        p = DispatchFuzz.program(seed)
-        status, detail = DispatchFuzz.compile_program(p)
-        counts[status] = get(counts, status, 0) + 1
-        if DispatchFuzz.wrong(status, detail)
-            steps = DispatchFuzz.cut_down(p, status)
-            allok = false
-            @info "dispatch fuzz: a wrong answer" seed status detail = first(replace(detail, '\n' => ' '), 300) program = DispatchFuzz.source(:program, p, steps)
-            @test false
-        else
-            @test true
-            status === :ok || isempty(get(ENV, "FUZZ_VERBOSE", "")) || @info "dispatch fuzz: not a wrong answer" seed status detail = first(replace(detail, '\n' => ' '), 200) program = DispatchFuzz.source(:program, p)
-        end
+# One case: the program of a seed. A program that is refused when compiling, or that stops with a message, is not a wrong answer. A wrong one is cut down to the steps that are enough for it, and written.
+function fuzz_case(seed::UInt)
+    p = DispatchFuzz.program(seed)
+    status, detail = DispatchFuzz.compile_program(p)
+    if DispatchFuzz.wrong(status, detail)
+        steps = DispatchFuzz.cut_down(p, status)
+        return false, string("a wrong answer: ", status, " ", first(replace(detail, '\n' => ' '), 300), "\n", DispatchFuzz.source(:program, p, steps))
     end
-    allok || @info "dispatch fuzz" counts
+    status === :ok || isempty(get(ENV, "FUZZ_VERBOSE", "")) || println(stderr, "dispatch fuzz: not a wrong answer, seed ", repr(seed), ": ", status, " ", first(replace(detail, '\n' => ' '), 200))
+    return true, ""
 end
