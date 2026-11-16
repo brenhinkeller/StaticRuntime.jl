@@ -103,6 +103,24 @@ end
 
 # StaticCompiler's entry points, with our method table as the default, and the runtime of this
 # package installed in the code that they generate (`llvm_postprocess`)
+# The check that an entry point infers to a concrete type is made before the code is: when a call over the types that the program makes was seen and what the slots of the program hold is not analyzed yet (the first pass),
+# an entry that is `Union{}` may be so because the types of what is read from the slots are not known (`attr.inputs[key]` is an `Input` that is not known to be an `Input{ComputeGraph}`, and what is called on its fields has no
+# method for the types that are tried). The analysis is made where the code that is compiled is inferred (`drive_inference!`, not the inference that the check is made of), so that is done for it, of the entry that is compiled
+# (`rooted`: the one that has the targets of the `@cfunction`s), without making its code: if the types of the slots are others then, the pass is made again with them (`SlotsChanged`, which is thrown from there), and if
+# they are what they were, the check is made again, and says what it found.
+function early_entry_check(c, args, rooted; method_table, params, target)
+    try
+        check_entry(args[1], args[2]; method_table, params, target)
+        return
+    catch e
+        (e isa InferenceError && c.slots.mode === :on && dispatch_was_used(c) && c.slots.passes == 0 && isempty(c.slots.types)) || rethrow()
+    end
+    job, _ = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
+    Base.invokelatest(precompile, job)
+    check_entry(args[1], args[2]; method_table, params, target)
+    return
+end
+
 for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_module)
     @eval begin
         function $f(args...; method_table = method_table, params = nothing, strict::Bool = true, stub_errors::Bool = true, allow = (), gc = default_gc(), target = default_target(),
@@ -117,9 +135,9 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries))) : llvm_postprocess
             result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
-                $(f in (:compile_executable, :compile_shlib) ?
-                    :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && check_entry(args[1], args[2]; method_table, params = job_params, target)) : :nothing)
                 entry_args = rooted_arguments(c, args)
+                $(f in (:compile_executable, :compile_shlib) ?
+                    :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && early_entry_check(c, args, entry_args; method_table, params = job_params, target)) : :nothing)
                 Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess = postprocess, strip = !ours && strip,
                                   $(f in (:compile_executable, :compile_shlib) ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs))...) : :(NamedTuple(kwargs)...)))
             end

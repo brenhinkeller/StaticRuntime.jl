@@ -143,6 +143,19 @@ const UNION_VEC_SHIFTED = (v = Union{Int8,Float32,Nothing}[Int8(1), 2.5f0, nothi
     ])
 end
 
+# Elements that have no size (the type of a function, a struct with no fields): the reference into the memory of a vector of them is the number of an element, not a pointer
+struct NoSize end
+const NOSIZE_EMPTY = NoSize[]
+const NOSIZE_TWO = [NoSize(), NoSize()]
+const FUNCTIONS_OF_A_TYPE = typeof(sin)[]
+@testset "Vectors of elements that have no size" begin
+    check_cases([
+        "an empty one, pushed to" => () -> (push!(NOSIZE_EMPTY, NoSize()); length(NOSIZE_EMPTY) + opaque(0)),
+        "one with elements"       => () -> (push!(NOSIZE_TWO, NoSize()); length(NOSIZE_TWO) * 10 + Int(NOSIZE_TWO[1] === NoSize()) + opaque(0)),
+        "of the type of a function" => () -> (push!(FUNCTIONS_OF_A_TYPE, sin); length(FUNCTIONS_OF_A_TYPE) + round(Int, FUNCTIONS_OF_A_TYPE[1](0.0)) + opaque(0)),
+    ])
+end
+
 # A number in the code can be the address of an object of the process that compiles (found on aarch64 Linux, where Julia has memory at low addresses:
 # the constant `115938146` was inside a symbol, and the program printed the address of a copy of it instead). A number is only an address if it is used as one.
 const NUMBER_STRING = "a string that is long enough to hold an address"
@@ -202,4 +215,14 @@ const NUMBER_STRING = "a string that is long enough to hold an address"
     @test !kept(string_data, call)
     @test kept(string_data, variadic_call)
     @test kept(string_data, add)
+end
+
+# The limbs of a `BigInt` constant are memory that GMP allocated: they are in the binary, and `d` points to them (and not null)
+const EMBED_BIG = big(2)^100 + 7
+@testset "A BigInt that is a constant" begin
+    check_cases([
+        "mod"        => () -> Int(EMBED_BIG % 1000) + opaque(0),
+        "plus a variable" => () -> Int((EMBED_BIG + opaque(5)) % 1000),
+        "a zero"     => () -> Int(big(0) + opaque(3)),
+    ]; batch = false)
 end

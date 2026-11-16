@@ -60,7 +60,7 @@ end
 # `small = true`: the file is smaller (on macOS the names of the functions and a segment of constants are left out), and the
 # program does what it does
 args_hello(args::Vector{String}) = (println("hello ", length(args)); 0)
-@testset "small = true makes a smaller file" begin
+@testset "`small = true` makes a smaller file" begin
     sizes = Int[]
     for small in (false, true)
         dir = mktempdir()

@@ -61,6 +61,15 @@ end
 # (`hash` of a struct that has a `Vector` is not that of what is in it)
 Base.hash(s::Settings, h::UInt) = foldl((h, name) -> hash(getfield(s, name), h), fieldnames(Settings); init = h)
 
+## Tracing
+#
+# `STATIC_RUNTIME_TRACE=1` says on the error output what each pass of a compilation found and spent its time on: nothing is written otherwise. `STATIC_RUNTIME_TRACE=methoderrors` says the same, and
+# lists the calls that have no method for the types that reach them too (most of them are on paths that are never taken: they are what union splitting leaves). (It is not in the `Settings`: it does not
+# change what is compiled.)
+trace_on() = (v = get(ENV, "STATIC_RUNTIME_TRACE", "0"); v != "0" && v != "")
+trace_method_errors_on() = get(ENV, "STATIC_RUNTIME_TRACE", "") == "methoderrors"
+trace(args...) = (println(stderr, "[static-runtime] ", args...); nothing)
+
 ## The state of each concern
 
 const BoxKey = Tuple{Any,Union{Int,Symbol}} # (the specialization of a method, the number of the box among those that its code makes), or (the type of a closure, the name of its field that is a box)
@@ -79,9 +88,12 @@ mutable struct ClosureState
     dispatch_requested::Bool                                               # a call of a function that is not known has been looked at
     union_used::Bool                                                       # a call has been made over the candidates
     callback_call_requested::Bool
+    optimized::Int                                                         # (for `STATIC_RUNTIME_TRACE`) the methods that were optimized in this pass, and which of them
+    optimized_unique::Set{Any}
+    box_function_seen::Bool                                                # a function is in a `Core.Box` that a constant has (the variable of a closure that is made by code that is not compiled): its type is not known by any read of the box
 end
 ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
-                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false)
+                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), false)
 
 "What the passes know of the boxes of the closures (boxes.jl): the type of what each holds, as the last pass found it."
 mutable struct BoxState
@@ -147,6 +159,7 @@ end
 
 function Compilation(settings::Settings = Settings(), registered::Registered = Registered())
     c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), Method[], Ref(Runtime.LibraryPlan()))
+    append!(c.closures.callbacks, registered.callbacks) # (those that exist before the program: see `add_callback!`)
     c.key = inference_key(c)
     return c
 end
@@ -242,7 +255,7 @@ function begin_pass!(c::Compilation)
     c.pass += 1
     cl = c.closures
     empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_callbacks); empty!(cl.seen_cfunctions)
-    cl.dispatch_requested = false; cl.union_used = false; cl.callback_call_requested = false
+    cl.dispatch_requested = false; cl.union_used = false; cl.callback_call_requested = false; cl.box_function_seen = false; cl.optimized = 0; empty!(cl.optimized_unique)
     empty!(c.boxes.seen)
     s = c.slots
     empty!(s.universe_seen); empty!(s.stored_by_slot); empty!(s.raw_store_types); s.scan_truncated = false

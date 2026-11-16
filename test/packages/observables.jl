@@ -18,5 +18,8 @@ using Observables, StaticArrays
         "no listener"  => () -> (o = Observable(SVector(opaque(1), 2)); o[] = SVector(3, 4); o[][1]),
         "two types"    => () -> (a = Observable(opaque(1)); b = Observable(2.5); n = Ref(0.0); on(x -> n[] += x, a); on(y -> n[] += 10y, b); a[] = 4; b[] = 1.5; round(Int, n[])),
         "a tuple"      => () -> (o = Observable((opaque(1), 2)); n = Ref(0); on(v -> n[] += v[1], o); o[] = (3, 4); n[]),
+        "consumed"     => () -> (o = Observable(opaque(1)); n = Ref(0); on(x -> (n[] += x; Consume(true)), o); on(x -> n[] += 100x, o); o[] = 4; n[]),
+        "not consumed" => () -> (o = Observable(opaque(1)); n = Ref(0); on(x -> (n[] += x; Consume(false)), o); on(x -> n[] += 100x, o); o[] = 4; n[]),
+        "listeners of other types" => () -> (a = Observable(opaque(1)); b = Observable((opaque(2), 3.5)); n = Ref(0); on(x -> n[] += x, a); on(t -> n[] += 10t[1], b); b[] = (5, 1.0); a[] = 2; n[]),
     ])
 end

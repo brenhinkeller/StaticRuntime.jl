@@ -43,6 +43,18 @@ function note_functions_in!(cl::ClosureState, @nospecialize(x), depth::Int = 0, 
     budget[] -= 1
     if x isa Function
         note_function!(cl, typeof(x))
+        # (a closure of the program that was made before it: what it took is a constant too, and a variable that it took that is assigned more than once is a `Core.Box`, whose reads are of the type `Any`)
+        if fieldcount(typeof(x)) > 0 && fieldcount(typeof(x)) <= 16 && depth < 3
+            for i in 1:fieldcount(typeof(x))
+                isdefined(x, i) && note_functions_in!(cl, getfield(x, i), depth + 1, budget)
+            end
+        end
+    elseif x isa Core.Box
+        if isdefined(x, :contents)
+            c = x.contents
+            c isa Function && (cl.box_function_seen = true)
+            note_functions_in!(cl, c, depth + 1, budget)
+        end
     elseif depth >= 3 || x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
         return
     elseif x isa Array || x isa Core.GenericMemory
@@ -163,6 +175,21 @@ of the same `T`, where the compiler does not know that `g` is `f`. Does nothing 
 that the program has.
 """
 call_callback(@nospecialize(T), @nospecialize(f), args...) = f(args...)
+
+"""
+    StaticRuntime.add_callback!(V::Type, F::Type)
+
+Say that there are functions of the type `F` that are called with a value of the type `V` by a `call_callback(V, f, args...)`, that were made before the program is compiled (a callback that is in a constant:
+what the code of the program makes says it with `note_callback(V, f)`). Call it before compiling.
+"""
+add_callback!(V::Type, F::Type) = (register_callback!(V, F); nothing)
+
+"""
+    StaticRuntime.add_listeners!(x)
+
+Say what the listeners of the observables that `x` refers to are (the ones of a `Scene` that is a constant, say), with `add_callback!`. This has a method when `Observables` is loaded.
+"""
+function add_listeners! end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
@@ -294,9 +321,13 @@ function run_passes(c::Compilation, compile)
     cl, bx, s = c.closures, c.boxes, c.slots
     strict = c.settings.strict
     local failure = nothing
-    for pass in 1:MAX_FUNCTION_PASSES
+    # (two budgets: the passes that were cut short because the types of the slots were different are counted by the slots, `SLOT_PASS_LIMIT` (the program is compiled without them when they do not settle), and the others, that
+    # look for functions, callbacks and boxes, by `MAX_FUNCTION_PASSES`)
+    function_passes = 0
+    for pass in 1:(MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + 2)
         begin_pass!(c) # (what the last pass found is what this one is made with: see `inference_key`)
         slots_retry = false
+        had_failure = false # (the pass failed, even if what follows is a pass without the slots that does not look at that)
         failure = nothing
         result = nothing
         started = time()
@@ -308,6 +339,8 @@ function run_passes(c::Compilation, compile)
             else
                 (e isa UnsupportedCodeError || e isa InferenceError) || rethrow()
                 failure = e
+                had_failure = true
+                trace_on() && trace("pass ", pass, " failed: ", first(replace(sprint(showerror, e), '\n' => ' '), 600))
                 if s.mode === :on && !isempty(s.types) && c.settings.slots_fallback && !s.fell_back
                     # (the types that the slots were given in this pass may be what failed: the first pass that has them uses what was stored that the analysis could type, and the passes that follow take back what it
                     # was wrong about; a pass that does not compile is not followed by one. The program is compiled once more without them, as it was before they were: with the failure that it has then, if it has one)
@@ -320,15 +353,25 @@ function run_passes(c::Compilation, compile)
             end
         end
         new = Type[T for T in cl.seen_functions if !(T in cl.functions)]
+        slots_retry || (function_passes += 1)
         @debug "compilation pass" pass seconds = round(time() - started; digits = 1) candidates = length(cl.functions) new = length(new) cfunctions = length(cl.cfunction_roots) failed = failure !== nothing requested = cl.dispatch_requested _id = :static_passes
         newc = [x for x in cl.seen_cfunctions if !any(r -> r.ftype === x[1] && r.args == x[2] && r.ret === x[3], cl.cfunction_roots)]
         # (a pass that was cut short, as the types of the slots are different, did not get as far as telling whether the functions that it found are needed)
-        more_functions = cl.dispatch_requested && !isempty(new) && (failure !== nothing || !strict || cl.union_used || slots_retry)
+        more_functions = cl.dispatch_requested && !isempty(new) && (failure !== nothing || had_failure || !strict || cl.union_used || cl.box_function_seen)
         newcb = Tuple{Type,Type}[x for x in cl.seen_callbacks if !(x in cl.callbacks)]
         more_callbacks = cl.callback_call_requested && !isempty(newcb)
         # (the types of the boxes that were found with the types that the last pass had are the ones for the next: until they are the same)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
-        retry = pass < MAX_FUNCTION_PASSES && (more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry)
+        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry
+        retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + 2 && wanted
+        if trace_on()
+            trace("pass ", pass, ": ", round(time() - started; digits = 1), " s, ",
+                  slots_retry ? "cut short by the slots (" * string(s.passes) * " of " * string(SLOT_PASS_LIMIT) * " slot passes)" : had_failure ? "failed" : "completed",
+                  "; candidates ", length(cl.functions), ", found ", length(new), (more_functions ? " (adopted: " * (failure !== nothing || had_failure ? "the pass failed" : !strict ? "not strict" : cl.union_used ? "a call was made over candidates" : "a box holds a function") * ")" : " (not adopted)"),
+                  "; callbacks ", length(newcb), ", boxes changed ", more_boxes, ", cfunctions ", length(newc),
+                  "; methods optimized ", cl.optimized, " (", length(cl.optimized_unique), " different)",
+                  wanted ? (retry ? "; another pass" : "; no pass is left (" * string(function_passes) * " function passes)") : "; done")
+        end
         if retry
             if more_boxes
                 for (k, T) in bx.seen
@@ -344,7 +387,7 @@ function run_passes(c::Compilation, compile)
             end
             continue
         end
-        slots_retry && error("the types of the slots did not settle")
+        slots_retry && error("the types of the slots did not settle (", s.passes, " slot passes of ", SLOT_PASS_LIMIT, ", ", function_passes, " other passes of ", MAX_FUNCTION_PASSES, "); `STATIC_RUNTIME_TRACE=1` says what each pass found, and `STATIC_RUNTIME_SLOTS_WHY=1` which slots changed")
         failure === nothing || throw(failure)
         return result
     end

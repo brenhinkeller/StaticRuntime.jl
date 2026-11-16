@@ -359,6 +359,19 @@ function egal_plan(dt::DataType)
     return take!(io), layout_offset
 end
 
+# `n` limbs of a `BigInt` that are at `addr` (memory of GMP's), as a global of the binary
+function limbs_global!(e::ObjectEmbedder, addr::UInt, n::Int)
+    name = "static_limbs_$(string(addr, base=16))"
+    haskey(LLVM.globals(e.mod), name) && return LLVM.globals(e.mod)[name]
+    contents = LLVM.ConstantDataArray(LLVM.Int8Type(), copy(unsafe_wrap(Array, Ptr{UInt8}(addr), 8n)))
+    g = LLVM.GlobalVariable(e.mod, LLVM.value_type(contents), name)
+    LLVM.linkage!(g, LLVM.API.LLVMLinkOnceODRLinkage)
+    LLVM.visibility!(g, LLVM.API.LLVMHiddenVisibility)
+    LLVM.alignment!(g, 8)
+    LLVM.initializer!(g, contents)
+    return g
+end
+
 # The `layout` of the type at `addr` for the binary: a global with its plan (see `egal_plan`) and the layout
 function egal_layout!(e::ObjectEmbedder, dt::DataType, addr::UInt)
     e.egal || return nullptr() # nothing compares objects: the type is not looked at
@@ -425,8 +438,10 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 memdata = unsafe_load(Ptr{UInt}(mem + 8))
                 p = unsafe_load(Ptr{UInt}(base + off))
                 ET = T.parameters[2]
-                if ET isa Union && Base.isbitsunion(ET)
-                    add!(LLVM.Int64Type(), g -> i64(p)) # (for these it is the number of the element, and not a pointer)
+                if (ET isa Union && Base.isbitsunion(ET)) || (ET isa DataType && Base.allocatedinline(ET) && sizeof(ET) == 0)
+                    # (for these it is the number of the element, and not a pointer: a union of types without references, and elements that have no size, `Vector{typeof(f)}`, whose data is nowhere. As a pointer the
+                    # number of an element with no size was an offset from the memory of about the whole address space, which the linker of macOS stops at with an assertion)
+                    add!(LLVM.Int64Type(), g -> i64(p))
                 else
                     add!(LLVM.PointerType(), g -> embed_ref!(e, mem, 16 + Int(p) - Int(memdata)))
                 end
@@ -435,11 +450,19 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 mem = unsafe_load(Ptr{UInt}(base + off))
                 add!(LLVM.PointerType(), g -> embed_ref!(e, mem))
                 pos = off + sizeof(Ptr)
+            elseif T === BigInt && fieldname(T, i) === :d && unsafe_load(Ptr{Cint}(base)) > 0 && is_process_address(unsafe_load(Ptr{UInt}(base + off)))
+                # The limbs of a `BigInt` are memory that GMP allocated: they are data of the binary here, and `d` points to them (a constant is not written to: what GMP would
+                # reallocate, in a write, is memory that it did not allocate)
+                limbs = unsafe_load(Ptr{UInt}(base + off))
+                n = Int(unsafe_load(Ptr{Cint}(base))) # (`alloc`: the number of limbs that there is room for)
+                add!(LLVM.PointerType(), g -> limbs_global!(e, limbs, n))
+                pos = off + sizeof(Ptr)
             elseif ft <: Ptr && is_process_address(unsafe_load(Ptr{UInt}(base + off)))
                 # An address in this process (of memory that a library allocated, of a function): it means nothing in the binary. Julia's own
                 # compiled code (a package image) writes these as null, which is what is done here: what has the pointer made again
                 # when it finds it null (a `Regex` compiles when its `regex` is null) goes on working, and what does not fails on the null.
-                warn_dangling_pointer(e, T, fieldname(T, i))
+                # (a `BigInt` that has no limbs allocated (`alloc` is 0: zero, as `BigInt()` is) has GMP's own placeholder in `d`, which nothing reads, and GMP allocates when it is written: nothing is lost)
+                (T === BigInt && fieldname(T, i) === :d && unsafe_load(Ptr{Cint}(base)) == 0) || warn_dangling_pointer(e, T, fieldname(T, i))
                 add!(LLVM.PointerType(), g -> nullptr())
                 pos = off + sizeof(Ptr)
             elseif Base.allocatedinline(ft) && ft isa Union # a Union of types without pointers, and a byte that says which

@@ -36,7 +36,7 @@ function run_fin_program(f)
     return read(`$exe`, String)
 end
 
-@testset "run for the objects that are unreachable, and only those" begin
+@testset "Run only for objects that are unreachable" begin
     function many(args::Vector{String})
         for i in 1:2000
             r = FinRes(i)
@@ -54,7 +54,7 @@ end
     @test kept == 7
 end
 
-@testset "a finalizer that allocates" begin
+@testset "A finalizer that allocates" begin
     function allocating(args::Vector{String})
         make_with_allocation(300)
         GC.gc()
@@ -79,7 +79,7 @@ end
     @test run_fin_program(throwing) == "done\n"
 end
 
-@testset "a finalizer that keeps the object (resurrection) is run once, and the object stays valid" begin
+@testset "A finalizer that retains the object (resurrection) is run once, and the object stays valid" begin
     function resurrecting(args::Vector{String})
         r = FinRes(42)
         finalizer(x -> (FIN_KEEP[] = x; FIN_FREED[] += 1), r)
@@ -94,7 +94,7 @@ end
     @test out == "1 42\n" || out == "0 -1\n" # (a stale value of the stack may keep the object: it is conservative)
 end
 
-@testset "different types of closure and object" begin
+@testset "Different types of closure and object" begin
     function types(args::Vector{String})
         make_of_types(100)
         GC.gc()
@@ -105,4 +105,26 @@ end
     @test 98 <= a <= 100
     @test 98 <= b <= 100
     @test sum(1:100) - 2 * 100 <= c <= sum(1:100)
+end
+
+# A closure that holds a reference (an array that it captured) is in memory that the collector looks through, and the address of the object that is kept next to it must not be taken for a reference to it
+const FIN_CAPTURED = Ref(0)
+@noinline function make_with_captured_array(n, log)
+    for i in 1:n
+        r = FinRes(i)
+        finalizer(x -> (push!(log, x.id); FIN_CAPTURED[] += 1), r)
+    end
+end
+@testset "A finalizer that holds a reference" begin
+    function captured(args::Vector{String})
+        log = Int[]
+        make_with_captured_array(200, log)
+        GC.gc()
+        GC.gc()
+        println(FIN_CAPTURED[], " ", length(log))
+        return 0
+    end
+    a, b = parse.(Int, split(run_fin_program(captured)))
+    @test 195 <= a <= 200
+    @test a == b
 end

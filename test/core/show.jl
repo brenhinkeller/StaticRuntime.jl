@@ -199,7 +199,7 @@ end
 end
 
 # the stream types write like the streams of libc, and `sprint` makes the same text as Julia's
-@testset "streams" begin
+@testset "Streams" begin
     S = StaticRuntime
     io = S.BufIO(IOBuffer())
     show(io, [1, 2, 3]); show(io, (1, "a")); show(io, Any[1, :a])

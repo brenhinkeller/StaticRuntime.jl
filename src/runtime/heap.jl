@@ -448,7 +448,7 @@ end
     left = sget(S_STRESS_LEFT)
     if left <= 1
         sset(S_STRESS_LEFT, sget(S_STRESS))
-        sget(S_COLLECTING) == 0 && collect(sget(S_SCAN_STACK) != 0)
+        sget(S_COLLECTING) == 0 && sget(S_DISABLED) == 0 && collect(sget(S_SCAN_STACK) != 0)
     else
         sset(S_STRESS_LEFT, left - 1)
     end

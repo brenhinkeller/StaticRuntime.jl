@@ -131,6 +131,9 @@ end
 # The union of the registered types that are subtypes of `T` (`Any`, or an abstract type that can't be listed), or `nothing`. For a call of `show`, which is also made
 # for a `Vector{Any}` in a `Vector{Any}`, they are the types that `show` is registered for (see `add_show_candidates!`): those of calls in general, and `Vector{Any}`.
 function registered_union(c::Compilation, @nospecialize(T), show::Bool = false; universe::Bool = true)
+    # (a `Union` is not looked up: `hash` of a union is the same for all unions, so a table with them for keys compares each with the ones that it has, which for the unions of many types is a subtype check of each pair, and they are
+    # not the types that there is a union of (the answer is quick))
+    T isa Union && return nothing
     key = (T, show, universe) # (the union of a type is the same for a whole pass: what it is made of is what the compilation was at its start, and the universe, which changes between passes)
     cached = get(c.dispatch.unions, key, missing)
     cached === missing || return cached
@@ -204,8 +207,12 @@ function method_signatures(c::Compilation, interp, @nospecialize(ft), n::Int)
     end
 end
 
+# (a call that has a splat of a length that is not known: the signatures of the methods are looked up for a number of arguments, which is not the number that it has: the methods that have another number are not the ones that
+# it can not be, and the types that only they fit would be left out)
+has_unknown_length(arginfo::CC.ArgInfo) = any(a -> a isa Core.TypeofVararg, arginfo.argtypes)
+
 function with_methods(c::Compilation, interp, arginfo::CC.ArgInfo, i::Int, u, max_methods::Int)
-    (c.settings.filter_by_methods && Base.unionlen(u) > 1) || return u
+    (c.settings.filter_by_methods && Base.unionlen(u) > 1 && !has_unknown_length(arginfo)) || return u
     ft = CC.widenconst(arginfo.argtypes[1])
     sigs = method_signatures(c, interp, ft, length(arginfo.argtypes) - 1)
     (sigs === nothing || isempty(sigs)) && return u
@@ -246,7 +253,7 @@ method_matches(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::I
 
 # whether some method fits a call with these argument types: by the signatures of the methods of the function (looked up once: see `method_signatures`) when it has few, and else as inference finds them
 function some_method_fits(c::Compilation, interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
-    sigs = c.settings.filter_by_methods ? method_signatures(c, interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
+    sigs = c.settings.filter_by_methods && !has_unknown_length(arginfo) ? method_signatures(c, interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
     sigs === nothing || return any(sig -> typeintersect(atype, sig) !== Union{}, sigs)
     matches = method_matches(interp, arginfo, atype, max_methods)
     return matches isa CC.FailedMethodMatch || !isempty(matches.applicable) # (too many to count: some fit)
@@ -300,7 +307,9 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
         for T in arginfo.argtypes[2:end]
             T isa Core.TypeofVararg && continue
             T = CC.widenconst(T)
-            if T isa DataType && isabstracttype(T) && !(T <: Function) && !(T <: Type)
+            # (a struct of the program with parameters that are not known, `Input` of `Input{T}`, is what is read from a slot that is declared so: what the slots hold is its instances. Not Julia's own, a `Vector` or a `Dict`
+            # of some type: most programs have those, and would be analyzed for them)
+            if ((T isa DataType && isabstracttype(T)) || unknown_parameters_of_program(T)) && !(T <: Function) && !(T <: Type)
                 note_dispatch_used!(c)
                 break
             end
@@ -312,6 +321,12 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
         return CC.CallMeta(result.rt, result.exct, result.effects, uncovered(result.info), result.refinements)
     end
+end
+
+function unknown_parameters_of_program(@nospecialize(T))
+    T isa UnionAll || return false
+    u = Base.unwrap_unionall(T)
+    return u isa DataType && !isabstracttype(u) && !julia_owned_module(u.name.module)
 end
 
 ## `@nospecializeinfer`
@@ -432,6 +447,10 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
         end
         assigned ? (st.args[2] = replacement) : (code[pc] = replacement)
     end
+    if trace_on()
+        c.closures.optimized += 1
+        push!(c.closures.optimized_unique, caller.linfo)
+    end
     return @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
 end
 
@@ -442,6 +461,18 @@ end
 # not `Nothing` is the only one that has the field, so the value is asserted to be that type first: if it is `nothing` the program stops, as it does in Julia (with a `FieldError`).
 const FIELD_BUILTINS = (Core.getfield, Core.setfield!)
 
+# (for `STATIC_RUNTIME_TRACE`: the calls that have no method for the types that reach them, which abort the program if they are reached: the function, the types of the arguments, and the method that has the call)
+function trace_method_errors(ir::CC.IRCode, linfo)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call || continue
+        f = st.args[1]
+        (f === Core.throw_methoderror || (f isa GlobalRef && f.name === :throw_methoderror)) || continue
+        trace("no method for ", join((CC.widenconst(CC.argextype(a, ir)) for a in st.args[2:end]), ", "), " in ", linfo)
+    end
+    return
+end
+
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
     c = compilation()
     ir = assert_assumed_returns!(c, ir, opt.linfo)
@@ -449,6 +480,7 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     ir = assert_field_receivers!(ir)
     expand_dynamic_getfield!(ir)
     ir = expand_setproperty!(ir)
+    trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
     ir = concretize_namedtuples!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
 end

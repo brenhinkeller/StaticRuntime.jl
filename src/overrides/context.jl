@@ -57,7 +57,8 @@ Base.get(::ShowStream, key::Symbol, default) = default # (no properties)
 @generated function Base.get(io::ContextIO{S,K,V}, key::Symbol, default) where {S<:IO,K,V}
     body = :default
     for i in length(K):-1:1
-        body = :(key === $(QuoteNode(K[i])) ? $(V.parameters[i].parameters[1]) : $body)
+        # (the value is quoted: one that is a `Symbol` would be the name of a variable in the code)
+        body = :(key === $(QuoteNode(K[i])) ? $(QuoteNode(V.parameters[i].parameters[1])) : $body)
     end
     return body
 end

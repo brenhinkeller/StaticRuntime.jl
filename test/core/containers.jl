@@ -104,6 +104,11 @@ dc_tree() = (t = DcTree(1, [DcTree(2, DcTree[]), DcTree(3, [DcTree(4, DcTree[])]
 dc_shared() = (i = DcInner([1.0]); a = [i, i]; b = deepcopy(a); b[1].v[1] = 5.0; round(Int, b[2].v[1]))
 dc_parametric() = (w = DcWrap([1, 2, 3]); v = deepcopy(w); v.x[1] = 8; w.x[1] + v.x[1])
 dc_ref() = (r = Ref([1, 2]); s = deepcopy(r); s[][1] = 5; r[][1] * 10 + s[][1])
+# (a field that is `const`: the object is made with it, as `setfield!` does not set one)
+mutable struct DcConst; const a::Vector{Int}; b::Int; end
+mutable struct DcConstNode; const name::String; next::Union{Nothing,DcConstNode}; end
+dc_const() = (x = DcConst([1, 2], 3); y = deepcopy(x); y.a[1] = 9; y.b = 7; x.a[1] * 10 + y.a[1] + y.b)
+dc_const_cycle() = (n = DcConstNode("a", nothing); n.next = n; m = deepcopy(n); Int(m.next === m) + 10 * Int(m !== n) + 100 * length(m.name))
 
 @testset "`deepcopy`" begin
     check_cases([
@@ -121,6 +126,8 @@ dc_ref() = (r = Ref([1, 2]); s = deepcopy(r); s[][1] = 5; r[][1] * 10 + s[][1])
         "shared struct" => @opaque(dc_shared),
         "parametric struct"                  => dc_parametric,
         "Ref"                                => dc_ref,
+        "mutable struct with a const field"  => dc_const,
+        "a cycle after a const field"        => dc_const_cycle,
     ])
 end
 

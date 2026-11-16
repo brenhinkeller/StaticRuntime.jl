@@ -27,6 +27,9 @@ custom_deepcopy_methods(T::DataType) =
     String[string(sig.parameters[2] isa Type ? sig.parameters[2] : "...") for sig in REGISTRY.deepcopy if Tuple{typeof(Base.deepcopy_internal), T, IdDict} <: sig]
 
 function static_deepcopy end
+
+# (what the table of the copies has for an object whose copy is not made yet: one with `const` fields, see `copy_struct`)
+struct DeepcopyInProgress end
 function copy_struct end
 @device_override Base.deepcopy_internal(x, stackdict::IdDict) = static_deepcopy(x, stackdict)
 @device_override function Base.deepcopy(x)
@@ -35,7 +38,11 @@ function copy_struct end
 end
 
 static_deepcopy(x::DEEPCOPY_ATOMS, stackdict::IdDict) = x
-static_deepcopy(x::Tuple, stackdict::IdDict) = ntuple(i -> static_deepcopy(x[i], stackdict), length(x))
+# (the copy of an element is of the type of the element: asserted, so that the type of the tuple is known where the copies recurse through each other, which inference widens to `Any`)
+@generated function static_deepcopy(x::T, stackdict::IdDict) where {T<:Tuple}
+    isconcretetype(T) || return :(ntuple(i -> static_deepcopy(x[i], stackdict), length(x)))
+    return Expr(:tuple, (:(static_deepcopy(x[$i], stackdict)::$(fieldtype(T, i))) for i in 1:fieldcount(T))...)
+end
 static_deepcopy(x::Module, stackdict::IdDict) = error("deepcopy of Modules not supported")
 
 function static_deepcopy(x::String, stackdict::IdDict)
@@ -115,6 +122,38 @@ end
     nf = fieldcount(T)
     nf == 0 && return :(x)
     if ismutabletype(T)
+        # (a field that is `const` is not one that `setfield!` sets: the object is made with the fields up to the last of them, `new(T, copies...)`, so they are copied before there is a copy to refer to. A reference from
+        # one of them back to the object, which Julia copies as the one copy, is not: the program stops and says so.)
+        lastconst = something(findlast(i -> isconst(T, i), 1:nf), 0)
+        if lastconst > 0
+            first_fields, later = Expr[], Expr[]
+            for i in 1:lastconst
+                ft = fieldtype(T, i)
+                push!(first_fields, isbitstype(ft) ? :(getfield(x, $i)) : :(static_deepcopy(getfield(x, $i), stackdict)::$ft))
+            end
+            for i in (lastconst + 1):nf
+                ft = fieldtype(T, i)
+                copyit = isbitstype(ft) ? :(xi) : :(static_deepcopy(xi, stackdict)::$ft)
+                push!(later, :(if isdefined(x, $i)
+                    xi = getfield(x, $i)
+                    setfield!(y, $i, $copyit)
+                end))
+            end
+            defined = Expr(:&&, true, (:(isdefined(x, $i)) for i in 1:lastconst)...)
+            return quote
+                if haskey(stackdict, x)
+                    found = stackdict[x]
+                    found isa DeepcopyInProgress && error(string("deepcopy of a ", $(string(T)), " that refers to itself through a field that is `const` (or one before it) is not supported in standalone binaries"))
+                    return found::T
+                end
+                $defined || error(string("deepcopy of a ", $(string(T)), " with a field that is not defined before its last `const` field is not supported in standalone binaries"))
+                stackdict[x] = DeepcopyInProgress()
+                y = $(Expr(:new, T, first_fields...))
+                stackdict[x] = y
+                $(later...)
+                return y
+            end
+        end
         steps = Expr[]
         for i in 1:nf
             ft = fieldtype(T, i)

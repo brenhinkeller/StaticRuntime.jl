@@ -27,7 +27,8 @@ const FINALIZER_NEVER = Ref(false)
     return :($id)
 end
 
-# the list of the finalizers of the site: (address of the object, function), as a constant of the program (a list that the program changes)
+# The list of the finalizers of the site: (address of the object, function), as a constant of the program (a list that the program changes). The address is kept complemented (`~addr`): the list is memory that has references (when
+# the function holds one, a closure that captured an array), which the collector looks through, taking any word that could be the address of an object to be one: the address, as it was, kept the object, and its finalizer never ran.
 @generated function finalizer_registry(::Type{F}, ::Type{T}) where {F,T}
     registry = get!(FINALIZER_REGISTRIES, (F, T)) do
         Tuple{UInt,F}[]
@@ -48,7 +49,7 @@ heap_command(command::Int, arg::Int) = UInt(@symbolcall static_alloc(command::In
     registry = finalizer_registry(F, T)
     i = 1
     while i <= length(registry)
-        if registry[i][1] == addr
+        if ~registry[i][1] == addr
             f = registry[i][2]
             registry[i] = registry[end]
             pop!(registry)
@@ -67,7 +68,10 @@ end
 @noinline function finalizer_site(f::F, o::T) where {F,T}
     id = finalizer_site_id(F, T)
     addr = UInt(pointer_from_objref(o))
-    push!(finalizer_registry(F, T), (addr, f))
+    # (a collection that runs while the registry grows would run the finalizers that are ready, which take theirs out of it: with the collections off, the registry is not changed by anything else while it is)
+    was_on = heap_command(Runtime.Heap.DISABLE, 0) != 0
+    push!(finalizer_registry(F, T), (~addr, f))
+    was_on && heap_command(Runtime.Heap.ENABLE, 0)
     heap_command(Runtime.Heap.FINALIZER_SITE, id)
     heap_command(Runtime.Heap.FINALIZER_OBJECT, Int(addr))
     FINALIZER_NEVER[] && run_finalizer(Val(id), F, T, UInt(0)) # (not taken: it keeps `run_finalizer` for this site in the program)

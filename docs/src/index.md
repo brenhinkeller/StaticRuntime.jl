@@ -316,6 +316,20 @@ the program stores there) is also checked when the program runs: a value of anot
 were found. The compiler finds the stores in the code that it compiles and in the constants that this refers to, and this is for any that it does not find. It costs nothing that the benchmarks
 (`bench/dispatch.jl`) could measure. The environment variable `STATIC_RUNTIME_CHECK_TYPES` is `0` to leave the check out, or `1` to have it with `strict = false`.
 
+## Finding out why a compilation is slow, or does not finish
+
+A compilation is made in passes (the types of functions, callbacks, boxes and the slots of containers that one pass finds are what the next is made with). Nothing is written about them by default. Two variables, for
+looking at a compilation that takes long, or ends in "did not settle":
+
+- `STATIC_RUNTIME_TRACE=1` writes a line for each pass on the error output: how long it took, whether it was cut short by a change of the types of the slots or completed or failed, the candidates of the calls of
+  unknown functions that it has and found (and why they were taken, or not), the number of methods that were optimized (and how many of them were different: a pass that optimizes the same methods again and again is
+  where the time goes), and whether there is another pass. `STATIC_RUNTIME_TRACE=methoderrors` also lists the calls that have no method for the types that reach them (most are on paths that are never taken: they are what
+  union splitting leaves; one that is reached is the `MethodError` that the program stops with).
+- `STATIC_RUNTIME_SLOTS_WHY=1` says why slots are given up, and what each pass found in them.
+
+The passes have two budgets: the passes that are cut short because the types of the slots changed (`SLOT_PASS_LIMIT`: the program is compiled without the types when they do not settle), and the others
+(`MAX_FUNCTION_PASSES`). The message of a compilation that runs out of either says which.
+
 ## Dynamic dispatch on abstract types and on `Any`
 
 *How this is done without changing other compilations.* The changes to inference (resolving the dispatch, `invokelatest`) are methods of functions of Julia's compiler
