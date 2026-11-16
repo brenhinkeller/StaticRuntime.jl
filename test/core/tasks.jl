@@ -42,7 +42,7 @@ end
 @eval at_exit_error(argc::Int, argv::Ptr{Ptr{UInt8}}) = (atexit(() -> println("after the one that fails")); atexit(() -> error("a hook that fails")); println("main"); 0)
 @eval at_exit_task(argc::Int, argv::Ptr{Ptr{UInt8}}) = (atexit(() -> println("task: ", fetch(@async 42))); println("main"); 0)
 
-@testset "atexit" begin
+@testset "`atexit`" begin
     @test run_main(at_exit_order) == "main\nsecond\nfirst"
     @test run_main(at_exit_state) == "end\nx = 7"
     @test run_main(at_exit_exit) == "hook"

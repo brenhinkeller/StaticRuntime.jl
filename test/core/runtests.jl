@@ -41,7 +41,7 @@ end
 @testset verbose=true "Tasks" include_timed("tasks.jl")
 
 # printing
-@testset verbose=true "Printing" begin
+@testset verbose=true "Printing, show, and display" begin
     include_timed("printing.jl")
     include_timed("show.jl")
 end

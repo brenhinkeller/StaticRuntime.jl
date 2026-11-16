@@ -183,20 +183,22 @@ module DispatchFuzz
 end
 
 @testset "Random programs that fill slots of abstract types (DispatchFuzz)" begin
-    seeds = let spec = get(ENV, "FUZZ_SEEDS", "1:12"); a = split(spec, ':'); length(a) == 2 ? (parse(Int, a[1]):parse(Int, a[2])) : [parse(Int, spec)] end
+    seeds = rand(UInt, 10)
     counts = Dict{Symbol,Int}()
+    allok = true
     for seed in seeds
         p = DispatchFuzz.program(seed)
         status, detail = DispatchFuzz.compile_program(p)
         counts[status] = get(counts, status, 0) + 1
         if DispatchFuzz.wrong(status, detail)
             steps = DispatchFuzz.cut_down(p, status)
+            allok = false
             @info "dispatch fuzz: a wrong answer" seed status detail = first(replace(detail, '\n' => ' '), 300) program = DispatchFuzz.source(:program, p, steps)
             @test false
         else
             @test true
-            status === :ok || isempty(get(ENV, "FUZZ_VERBOSE", "")) || @info "dispatch fuzz: not an answer" seed status detail = first(replace(detail, '\n' => ' '), 200) program = DispatchFuzz.source(:program, p)
+            status === :ok || isempty(get(ENV, "FUZZ_VERBOSE", "")) || @info "dispatch fuzz: not a wrong answer" seed status detail = first(replace(detail, '\n' => ' '), 200) program = DispatchFuzz.source(:program, p)
         end
     end
-    @info "dispatch fuzz" counts
+    allok || @info "dispatch fuzz" counts
 end

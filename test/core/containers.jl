@@ -70,7 +70,7 @@ end
 const UNION_SYMBOLS = Union{Nothing,Symbol}[:a, nothing, :bc]
 const UNION_REFS = Union{Nothing,String,Int}[nothing, "xy", 7]
 
-@testset "constants that are vectors of unions of types with references" begin
+@testset "Vectors of unions of types with references" begin
     check_cases([
         "Union{Nothing,Symbol}" => () -> (s = UNION_SYMBOLS; length(string(s[1])) + length(string(s[3])) + (s[2] === nothing ? 100 : 0) + opaque(0)),
         "Union{Nothing,String,Int}" => () -> (s = UNION_REFS; length(s[2]::String) + (s[3]::Int) + (s[1] === nothing ? 100 : 0) + opaque(0)),
@@ -105,7 +105,7 @@ dc_shared() = (i = DcInner([1.0]); a = [i, i]; b = deepcopy(a); b[1].v[1] = 5.0;
 dc_parametric() = (w = DcWrap([1, 2, 3]); v = deepcopy(w); v.x[1] = 8; w.x[1] + v.x[1])
 dc_ref() = (r = Ref([1, 2]); s = deepcopy(r); s[][1] = 5; r[][1] * 10 + s[][1])
 
-@testset "deepcopy" begin
+@testset "`deepcopy`" begin
     check_cases([
         "nested vectors" => @opaque(() -> (a = [[1, 2], [3]]; b = deepcopy(a); b[1][1] = 9; a[1][1] * 10 + b[1][1] + length(b[2]))),
         "a shared vector stays shared"       => () -> (x = [1, 2]; b = deepcopy([x, x]); b[1][1] = 7; b[2][1]),
@@ -132,7 +132,7 @@ custom_deepcopy() = length(deepcopy(CustomCopy([1, 2, 3])).v)
 plain_deepcopy() = length(deepcopy(PlainCopy([1, 2, 3])).v)
 nested_custom_deepcopy() = length(deepcopy([CustomCopy([1, 2, 3])])[1].v)
 
-@testset "deepcopy of a type that has a method of `deepcopy_internal`" begin
+@testset "`deepcopy` of a type that has a `deepcopy_internal` method" begin
     for f in (custom_deepcopy, nested_custom_deepcopy)
         # (compiling says so, once for each type)
         status, detail = f === custom_deepcopy ? (@test_logs (:warn, r"deepcopy_internal") match_mode = :any static_status(f)) : static_status(f)

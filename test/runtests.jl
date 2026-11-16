@@ -28,6 +28,7 @@ include("helpers.jl")
 @info "Host CPU" cpu = LLVM.host_cpu_name() features = LLVM.host_cpu_features() threads = Threads.nthreads() julia = VERSION
 
 GROUP in ("Core", "All") && @time "Core tests:" include("core/runtests.jl")
+println("\n")
 GROUP in ("Packages", "All") && @time "Package tests:" include("packages/runtests.jl")
 
 if !isempty(get(ENV, "TEST_TIMING", ""))

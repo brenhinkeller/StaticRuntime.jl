@@ -2,7 +2,7 @@
 # (`show` of containers, types, structs and arrays, and `text/plain`, are in `show.jl`; `Printf` is in `packages/printf.jl`.)
 
 # the global `stderr` has the abstract type `IO`: a program says `STDERR`
-@testset "print and show" begin
+@testset "`print`, `println` and `sprint`" begin
     check_cases([
     # printing
     "println Vector Float64" => () -> (println([1.5, 2.0]); 1),
@@ -32,7 +32,7 @@ end
 
 # `printstyled`: the escape sequences when the context of the stream has color, and plain text when it has not (`STDOUT` is as the output of `julia script.jl > file`)
 sty_color(name) = Symbol(Base.inferencebarrier(name))
-@testset "printstyled and color" begin
+@testset "Color and `printstyled`" begin
     check_cases([
         "no color on STDOUT"       => () -> (printstyled("plain\n"; color = :red, bold = true); printstyled(STDOUT, "plain\n"; color = :blue); 0),
         "a color"                  => () -> (printstyled(IOContext(STDOUT, :color => true), "red\n"; color = :red); 0),

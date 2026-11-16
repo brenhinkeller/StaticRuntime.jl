@@ -67,7 +67,7 @@ end
 
 # `fma` (and what asks for it: `log`, `^`, `muladd`) is made with the instruction of the processor, as Julia does: it is not made by software, which is several times slower
 fma_of(x::Float64, y::Float64, z::Float64) = fma(x, y, z)
-@testset "fma is an instruction" begin
+@testset "`fma` is an instruction" begin
     llvm = sprint(io -> static_code_llvm(fma_of, Tuple{Float64,Float64,Float64}; io, llvm_postprocess = m -> nothing))
     @test occursin("llvm.fma", llvm)
     @test !occursin("fma_emulated", llvm)

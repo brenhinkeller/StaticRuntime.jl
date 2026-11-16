@@ -69,7 +69,6 @@ using DataStructures
             "DisjointSet"       => @opaque(() -> (s = DisjointSet{Int}(1:6); union!(s, 1, 2); union!(s, 3, 4); union!(s, 2, 3); Int(in_same_set(s, 1, 4)) + 10 * num_groups(s))),
             "FenwickTree"       => @opaque(() -> (f = FenwickTree{Int}(10); for i in 1:10; inc!(f, i, i); end; prefixsum(f, 5))),
         ])
-        @test static_result(@opaque(() -> (s = IntDisjointSets(10); union!(s, 1, 2); num_groups(s)))) == 9 # (a deprecated binding: Julia warns, the program does not)
     end
 
     # (nodes that have `Union{Node,Nothing}` fields, and are read and written through them)

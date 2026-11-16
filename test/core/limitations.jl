@@ -111,5 +111,5 @@ end
 end
 
 @testset "The time that this file takes" begin
-    @test time() - LIMITATIONS_START < 600
+    @test time() - LIMITATIONS_START < 550
 end

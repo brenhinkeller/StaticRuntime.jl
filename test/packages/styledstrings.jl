@@ -51,6 +51,6 @@ const COLOR_OUT = IOContext(STDOUT, :color => true)
     end
     # `show` of an `AnnotatedString` (what `repr` writes: `AnnotatedString{String}("a", [(1:1, :face, :red)])`) shows annotations that are of the type `Any`, which needs the types when the program runs
     @testset "show of an annotated string" begin
-        check_cases(["show" => () -> (show(STDOUT, styled"{red:hi}"); 0)]; broken = ("show",))
+        check_cases(["show" => () -> (show(STDOUT, styled"{red:hi}"); 0)])
     end
 end

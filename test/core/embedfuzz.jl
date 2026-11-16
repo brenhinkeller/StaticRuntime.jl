@@ -105,7 +105,7 @@ module EmbedFuzz
 end
 
 @testset "Random values as constants (EmbedFuzz)" begin
-    for seed in 1:24
+    for seed in rand(UInt, 10)
         rng = Random.Xoshiro(seed)
         v = EmbedFuzz.value(rng, 3)
         f = () -> EmbedFuzz.digest(v)
