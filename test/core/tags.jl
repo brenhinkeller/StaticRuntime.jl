@@ -130,7 +130,7 @@ end
 
 # `===` of objects that are not the same one (for the keys of a `Dict`, for instance): `jl_egal__unboxed` of the runtime
 # compares them by the plan that `egal_plan` makes for their type, which is in front of the layout of the type in the binary
-@testset "egal" begin
+@testset "`egal`" begin
     Runtime = StaticRuntime.Runtime
     # (equal, but not the same objects: the strings are made when the program runs, and the values are boxed)
     mk(s) = s * string(1)

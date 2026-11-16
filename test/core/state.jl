@@ -134,3 +134,18 @@ end
     @test !S.LOG_SILENT[] && S.MATCH_CONTEXT[] == C_NULL && S.DYNAMIC_SYMBOLS[] == 0
     @test all(iszero, S.TASKLOCAL_RNG_STATE[])
 end
+
+# The facts that the analysis of the slots keeps for a method and a key: the ones that are found again are not added, the ones that are new are, and the order that they are found in does not matter
+@testset "Merging the facts of a method" begin
+    S = StaticRuntime
+    k1 = (:field, Pair{Int,Any}, :second)
+    k2 = (:elem, Vector{Any}, nothing)
+    a = Tuple{S.SlotKey,Any}[(k1, Int), (k2, String)]
+    @test !S.merge_slot_facts!(a, copy(a)) && length(a) == 2
+    @test !S.merge_slot_facts!(a, [(k2, String)]) && length(a) == 2
+    @test S.merge_slot_facts!(a, [(k1, Float64), (k2, String)]) && length(a) == 3
+    b = Tuple{S.SlotKey,Any}[(k1, Float64)]
+    S.merge_slot_facts!(b, [(k2, String), (k1, Int)])
+    c = copy(a)
+    @test Set(b) == Set(c) # (the same facts from either side)
+end

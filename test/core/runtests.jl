@@ -1,4 +1,5 @@
 # The tests of the compiler, the runtime and the language, in the order that things depend on each other.
+println("\n")
 @info "Core tests:"
 
 # strict mode, method tables, and the entry points that are not accepted; the functions that test a program
@@ -52,4 +53,3 @@ end
 @testset verbose=true "State" include_timed("state.jl")
 
 # End of Core tests
-println("\n")

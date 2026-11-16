@@ -2,6 +2,7 @@
 # executables and have to print what Julia gives for the same code. It takes a few minutes (`GROUP=Packages`, or `GROUP=Core` for the tests of the package alone).
 #
 # `PACKAGES=Dates,StatsBase` (the names of the files, or parts of them) runs only some of them.
+println("\n")
 @info "Package tests, including stdlibs:"
 
 @isdefined(check_cases) || include(joinpath(@__DIR__, "..", "helpers.jl"))
@@ -19,4 +20,3 @@ for name in ALL
 end
 
 # End of Package tests
-println("\n")

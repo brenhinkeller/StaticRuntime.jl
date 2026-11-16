@@ -328,8 +328,29 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     finally
         s.facts_sink = nothing
     end
-    get!(Dict{Int,Vector{Tuple{SlotKey,Any}}}, SLOT_FACTS, mi)[c.key] = facts
+    bykey = get!(Dict{Int,Vector{Tuple{SlotKey,Any}}}, SLOT_FACTS, mi)
+    old = get(bykey, c.key, nothing)
+    if old === nothing
+        bykey[c.key] = facts
+    elseif merge_slot_facts!(old, facts)
+        # (a method is also inferred with the constants that a call gives it (`getproperty(x, :a)`: the same method and key, and the code of the name), and what it stores is not the same for each: the facts of all of them are kept,
+        # so that they do not depend on which was first. A fact that differs for another reason is a constant whose contents changed, or a state that the key does not have: `STATIC_RUNTIME_TRACE` says which methods)
+        trace_on() && trace("the slot facts of ", mi, " now have ", length(old), " facts (more than before for the same key: the method was inferred with constant arguments, or a constant changed)")
+    end
     return
+end
+
+# Add to `old` the facts of `new` that it does not have: whether there were any. (A vector, and not a `Dict`: the keys have types in them, whose hashes are those of the process, and a table made of them would have to
+# be made again when the package is loaded. An entry has a few facts.)
+function merge_slot_facts!(old::Vector{Tuple{SlotKey,Any}}, new::AbstractVector)
+    old == new && return false
+    changed = false
+    for f in new
+        any(g -> g == f, old) && continue
+        push!(old, f)
+        changed = true
+    end
+    return changed
 end
 
 # the table of the facts made again, as it has to be when it was loaded from the image of the package (the entries are all there, by iterating, and not all of them are found by their keys)

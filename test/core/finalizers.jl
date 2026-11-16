@@ -66,7 +66,7 @@ end
     @test total == 50n
 end
 
-@testset "a finalizer that throws is ignored" begin
+@testset "A finalizer that throws is ignored" begin
     function throwing(args::Vector{String})
         for i in 1:10
             r = FinRes(i)
