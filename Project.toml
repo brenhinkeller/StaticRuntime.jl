@@ -17,6 +17,7 @@ StaticTools = "86c06d3c-3f03-46de-9781-57580aa96d0a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [weakdeps]
+FunctionWrappers = "069b7b12-0de2-55c6-9aab-29f3d0a68a2e"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
@@ -27,6 +28,7 @@ StyledStrings = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
 UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
 
 [extensions]
+StaticRuntimeFunctionWrappersExt = "FunctionWrappers"
 StaticRuntimeLinearAlgebraExt = "LinearAlgebra"
 StaticRuntimeMakieExt = "Makie"
 StaticRuntimeMPIExt = "MPI"
@@ -37,6 +39,7 @@ StaticRuntimeStyledStringsExt = "StyledStrings"
 StaticRuntimeUnicodePlotsExt = "UnicodePlots"
 
 [compat]
+FunctionWrappers = "1"
 GPUCompiler = "2.19"
 InteractiveUtils = "1"
 LLVM = "10"

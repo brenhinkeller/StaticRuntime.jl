@@ -386,6 +386,39 @@ function report_registered_dispatch(c::Compilation)
     @debug "Dispatch on `Any` or on an abstract type with unlisted subtypes was resolved over registered types: a value of another type that reaches such a call aborts the program with a MethodError. Add types with `add_dispatch_candidates!`." calls = shown candidates = join(string.(c.registered.dispatch), ", ") _id = :static_dispatch_candidates
 end
 
+## The standard streams of Julia
+#
+# `stdout`, `stderr` and `stdin` of Base are globals of the abstract type `IO`, which a program has no use of (they are libuv streams), and which are the default of what packages write to (`print(stdout, ...)`, `show(stdout, x)`, `io = stdout`
+# in the options of a package that prints a trace): what is done with them is a call over all the types of `IO`. A program has the streams of libc, `STDOUT`, `STDERR` and `STDIN` (see io.jl): they are what a read of the globals of Base is,
+# for inference (the type), and for the code that is made (the value).
+const STANDARD_STREAMS = (; stdin = STDIN, stdout = STDOUT, stderr = STDERR)
+
+# the stream that a global is, or `nothing`
+function standard_stream(@nospecialize(g))
+    g isa GlobalRef && g.name in keys(STANDARD_STREAMS) || return nothing
+    return Base.binding_module(g.mod, g.name) === Base ? getfield(STANDARD_STREAMS, g.name) : nothing
+end
+
+function CC.abstract_eval_globalref(interp::OverridesInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
+    stream = standard_stream(g)
+    stream === nothing || return CC.RTEffects(CC.Const(stream), Union{}, CC.EFFECTS_TOTAL)
+    return @invoke CC.abstract_eval_globalref(interp::CC.AbstractInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
+end
+
+# (before it is optimized, the reads of them are the streams: the type that inference gave them is not the type of what the code loads)
+function replace_standard_streams!(code::Vector{Any})
+    for pc in eachindex(code)
+        st = code[pc]
+        stream = standard_stream(st)
+        if stream !== nothing
+            code[pc] = stream
+        elseif st isa Expr
+            replace_standard_streams!(st.args)
+        end
+    end
+    return
+end
+
 ## `invokelatest`
 #
 # `invokelatest(f, args...)` calls `f` in the newest world, and so the compiler can't know what it calls: the call is an `Any`, made
@@ -429,6 +462,7 @@ end
 # (before optimizing: the statements of `invokelatest` are the calls that inference took them for)
 function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
     code = opt.src.code
+    replace_standard_streams!(code)
     c = compilation()
     note_functions_of!(c.closures, code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
     caller.linfo isa Core.MethodInstance && learn_boxes!(c.boxes, opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
@@ -525,6 +559,40 @@ function trace_noreturn(ir::CC.IRCode, linfo)
     return
 end
 
+# A type that is built and not used. `x isa CallbackSet{<:AbstractVector,<:AbstractVector}` that inference found the answer of leaves the statements that make the type (`Core._typevar` for each `<:`, and `Core.apply_type` of them), which Julia does not
+# remove as they are not known to be without effect (a `TypeVar` is mutable), and which are a call of the runtime. The statements of these kinds whose values are not used are removed (and so are the ones that only they used).
+const TYPE_BUILDERS = (Core._typevar, Core.apply_type, Core.UnionAll)
+function remove_unused_type_construction!(ir::CC.IRCode)
+    n = length(ir.stmts)
+    candidates = Int[]
+    for pc in 1:n
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call && !isempty(st.args) || continue
+        CC.singleton_type(CC.argextype(st.args[1], ir)) in TYPE_BUILDERS && push!(candidates, pc)
+    end
+    isempty(candidates) && return ir
+    uses = zeros(Int, n)
+    for pc in 1:n
+        for ur in CC.userefs(ir.stmts[pc][:stmt])
+            v = ur[]
+            v isa Core.SSAValue && v.id <= n && (uses[v.id] += 1)
+        end
+    end
+    changed = false
+    for pc in reverse(candidates)
+        uses[pc] == 0 || continue
+        st = ir.stmts[pc][:stmt]
+        for ur in CC.userefs(st)
+            v = ur[]
+            v isa Core.SSAValue && v.id <= n && (uses[v.id] -= 1)
+        end
+        ir.stmts[pc][:stmt] = nothing
+        ir.stmts[pc][:type] = Nothing
+        changed = true
+    end
+    return changed ? CC.compact!(ir) : ir
+end
+
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
     c = compilation()
     ir = assert_assumed_returns!(c, ir, opt.linfo)
@@ -535,6 +603,7 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
     trace_on() && trace_noreturn(ir, opt.linfo)
     ir = concretize_namedtuples!(ir)
+    ir = remove_unused_type_construction!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
 end
 

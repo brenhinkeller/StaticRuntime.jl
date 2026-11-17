@@ -332,3 +332,23 @@ if isdefined(Base, :_compute_eltype)
         return QuoteNode(Base._compute_eltype(T))
     end
 end
+
+## `LazyString`
+#
+# `lazy"..."` (what the messages of `SciMLLogging`, and of some other packages, are) keeps its parts as a `Tuple` in a field of the type `Tuple`, and `String(l)` prints them with `foreach(Fix1(print, io), l.parts)`, a loop over a tuple of
+# different types, which is a dynamic call for each. The parts are printed by recursing over them, as `print_to_string` does; the string is kept in the object, as Julia does (without an atomic: a program has one thread of this).
+@device_override function Base.String(l::Base.LazyString)
+    old = getfield(l, :str)
+    old === nothing || return old::String
+    s = IOBuffer()
+    io = BufIO(s)
+    parts = getfield(l, :parts)
+    if getfield(l, :compact)
+        print_each(IOContext(io, :compact => true, :limit => true), parts...)
+    else
+        print_each(io, parts...)
+    end
+    str = Base.takestring!(s)
+    setfield!(l, :str, str)
+    return str
+end

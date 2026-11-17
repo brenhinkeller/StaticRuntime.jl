@@ -178,6 +178,15 @@ of an axis (`:identity`) is supported, and any other is an error when the progra
 `heatmap` and `surfaceplot` are for vectors and matrices of numbers; the canvas can be chosen (`canvas = AsciiCanvas`, `BlockCanvas`, `DotCanvas`); the points of a 3D plot (`surfaceplot`) are
 projected with floating point numbers, and a point on the border of a pixel may be in another one than in Julia. Not supported: `isosurface`, `imageplot`, `geoplot`, `gridplot` and `savefig`.
 
+### SciML (differential equations)
+
+`SciMLBase` and `OrdinaryDiffEq` work for ordinary differential equations (tests in `test/packages/sciml.jl`): a problem made with `ODEProblem{iip, FullSpecialize}(f, u0, tspan, p)` (`iip` is `false` for `f(u, p, t)` that gives the derivative and `true` for
+`f!(du, u, p, t)` that changes `du`) and solved with `solve(prob, alg; kwargs...)`: for the explicit methods (`Tsit5`, `Vern7`, `BS3`, `DP5`, `Euler` and `RK4` with a fixed step), the stiff ones (`Rodas5P`, `ImplicitEuler`), with `reltol`, `abstol`, `saveat`, `tstops`,
+`save_everystep`, `DiscreteCallback` and `ContinuousCallback`, for scalars, `Vector`s and `SVector`s, and the solution (`sol.u`, `sol.t`, `sol(t)`). Compiling takes about 10 to 20 seconds for each program. `ODEProblem(f, u0, tspan, p)`, which finds out whether `f` changes its
+first argument when it runs, is `Any` to the compiler (to Julia as well), so the problem has to be made with `{iip, FullSpecialize}`; `solve(prob)` without a method (the default one, that picks among many) and the packages that make equations from symbols (`ModelingToolkit`) are not
+supported. Two things that these packages do are done by extensions: `FunctionWrappers` keeps its function in a pointer to a function of the runtime, which a program does not have (`ext/StaticRuntimeFunctionWrappersExt.jl`: the call is made through the function that the wrapper holds), and a message of
+`SciMLLogging` (`lazy"..."`) is made with a loop over its parts, which is made static for `LazyString` in general.
+
 ## Code from packages
 
 (The survey that this section reports is kept as tests, `test/packages` — Distributions.jl, NaNStatistics.jl and StatsBase.jl, each program compared with Julia — and
