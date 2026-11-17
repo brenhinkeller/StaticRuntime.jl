@@ -304,9 +304,49 @@ function CC.abstract_call_unknown(interp::OverridesInterpreter, @nospecialize(ft
                                             vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
+# The keywords of a call that has a type as the value of one (`f(x; canvas = AsciiCanvas)`) are a constant `NamedTuple` of the type `@NamedTuple{canvas::DataType}`: a type that is a value is a `DataType` to the type of the tuple, and the method
+# that has the keywords is then compiled for any type, and what it does with it (a call that is chosen by the type) is a dispatch on a type that is not known. The keywords are given the type that has the type as its one value
+# (`@NamedTuple{canvas::Type{AsciiCanvas}}`), as the types of the arguments of a call that are types are: for inference (here), and as the constant that the code has (`typed_constant`, used by `optimize`).
+function typed_namedtuple_type(nt::NamedTuple)
+    types = Any[v isa Type ? Core.Typeof(v) : typeof(v) for v in values(nt)]
+    return NamedTuple{keys(nt), Tuple{types...}}
+end
+has_type_values(@nospecialize(nt)) = nt isa NamedTuple && any(v -> v isa Type, values(nt))
+typed_constant(nt::NamedTuple) = typed_namedtuple_type(nt)(values(nt))
+
+function typed_keywords(interp, @nospecialize(kw))
+    kw isa CC.Const && has_type_values(kw.val) || return nothing
+    nt = kw.val
+    return CC.PartialStruct(CC.typeinf_lattice(interp), typed_namedtuple_type(nt), Any[CC.Const(v) for v in values(nt)])
+end
+
+# `NamedTuple{names}(args)`: Base gives it the type `typeof(args)`, that of the *value* of the tuple, which for a tuple that has a value of a union of types (`Tuple{Union{UInt32,Missing}}`: the keywords of a call, the fields of `merge`) is one of the types
+# that the union has, so what comes out is a `NamedTuple` of a type that is not one (`NamedTuple{(:bgcol,)}`), and what is done with it is a call of the runtime. The type of the argument is a type that it can be a value of, and the `NamedTuple` is
+# given it (`NamedTuple{names,T}(args)` of Base: its fields hold what the argument holds, as a union). A call that has a constant for an argument is left to Julia, which finds the value, and so is one that has a value of the type `Any`, or of a union of many types (the candidates of one): those are split, as Julia splits them, which a `NamedTuple` that is converted to another one needs.
+function CC.abstract_call_known(interp::OverridesInterpreter, f::Type{<:NamedTuple}, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    if length(arginfo.argtypes) == 2 && f isa UnionAll && f.body isa DataType && f.body.name === Base.typename(NamedTuple) && f.body.parameters[1] isa Tuple
+        arg = arginfo.argtypes[2]
+        t = CC.widenconst(arg)
+        if !(arg isa CC.Const) && t isa DataType && t <: Tuple && !Base.isvatuple(t) && !isconcretetype(t) && length(t.parameters) == length(f.body.parameters[1]) &&
+           all(P -> isconcretetype(P) || P isa Core.TypeEq || (P isa Union && length(Base.uniontypes(P)) <= 4 && all(isconcretetype, Base.uniontypes(P))), t.parameters)
+            full = NamedTuple{f.body.parameters[1], t}
+            argtypes = Any[CC.Const(full), arg]
+            return CC.abstract_call_known(interp, full, CC.ArgInfo(arginfo.fargs, argtypes), si, vtypes, sv, max_methods)
+        end
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+end
+
 # A call with keyword arguments of a function that is not known, `Core.kwcall(keywords, f, args...)`: the function is the third of the arguments
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.kwcall), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    if length(arginfo.argtypes) >= 2 && (typed = typed_keywords(interp, arginfo.argtypes[2])) !== nothing
+        argtypes = copy(arginfo.argtypes)
+        argtypes[2] = typed
+        return CC.abstract_call_known(interp, f, CC.ArgInfo(arginfo.fargs, argtypes), si, vtypes, sv, max_methods)
+    end
     if length(arginfo.argtypes) >= 3
         T = CC.widenconst(arginfo.argtypes[3])
         if unknown_function_type(T)

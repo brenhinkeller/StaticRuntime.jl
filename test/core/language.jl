@@ -133,3 +133,34 @@ gl_vec_untyped() = (push!(gl_untyped_vec, 9); sum(gl_untyped_vec))
         @test occursin("not `const`", detail)
     end
 end
+
+# Keywords that are types
+abstract type KwShape end
+struct KwSquare <: KwShape; n::Int; end
+struct KwCircle <: KwShape; n::Int; end
+kw_make(::Type{T}, n) where {T <: KwShape} = T(n)
+@noinline kw_build(n; shape::Type = KwSquare, other...) = kw_make(shape, n)
+@noinline kw_forward(n; kw...) = kw_build(n; kw...)
+@noinline kw_untyped(n; shape = KwSquare) = (kw_make(shape, n),)
+kw_type_given() = kw_build(@opaque(3); shape = KwCircle).n
+kw_type_default() = kw_build(@opaque(3)).n
+kw_type_forwarded() = kw_forward(@opaque(3); shape = KwCircle).n
+kw_type_untyped() = kw_untyped(@opaque(3); shape = KwCircle)[1].n
+kw_type_with_other() = kw_build(@opaque(3); shape = KwCircle, extra = 1).n
+
+@testset "Keywords that are types" begin
+    check_cases([kw_type_given, kw_type_default, kw_type_forwarded, kw_type_untyped, kw_type_with_other])
+end
+
+# Values of a union of types in keywords and `NamedTuple`s
+@noinline kwu_color(color; bgcol = missing) = bgcol === missing ? 1 : Int(bgcol) + color
+@noinline kwu_two(; a = 0, b = 0.0) = a + b
+kwu_one() = kwu_color(5; bgcol = @opaque(1) > 100 ? UInt32(7) : missing)
+kwu_two_values() = Int(kwu_two(; a = @opaque(1) > 100 ? 1 : 2.0, b = @opaque(1) > 100 ? 1.0f0 : 2.0))
+kwu_merge() = (a = (x = @opaque(1) > 100 ? 1 : 2.0,); m = merge(a, (y = 1,)); Int(m.x) + m.y)
+kwu_merge_keywords() = (a = (x = 1, z = @opaque(1) > 100 ? 1 : 2.0); m = merge(a, (; w = 2)); Int(m.z) + m.w)
+kwu_splat() = (nt = (a = @opaque(1) > 100 ? 1 : 2.0,); Int(kwu_two(; nt...)))
+
+@testset "Keywords and NamedTuples of unions of types" begin
+    check_cases([kwu_one, kwu_two_values, kwu_merge, kwu_merge_keywords, kwu_splat])
+end

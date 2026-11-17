@@ -175,7 +175,7 @@ there are no threads. `Random.seed!(seed)` on the default generator does not wor
 of this package, `StaticRuntimeUnicodePlotsExt`; tests in `test/packages/unicodeplots.jl`): `println(lineplot(x, y; width = 40, height = 10, xlabel = "x"))` in a program writes what Julia writes. The package decides the type of the canvas, and of the plot, by values that are only known
 when it runs (the scale of an axis, the keywords that are left after the plot's own are taken out, the limits of an axis and of the colors, a keyword that is of one of two types), which a program has to have as types: those are written again in the extension. Limits: only the default scale
 of an axis (`:identity`) is supported, and any other is an error when the program runs; the same for the `zscale` of a `surfaceplot` and its mesh lines (`lines = true`); a color map other than the default is an error when it is not of the type of the default; `histogram`, `polarplot`,
-`heatmap` and `surfaceplot` are for vectors and matrices of numbers; the choice of the canvas (`canvas = AsciiCanvas`) is not supported (the type that is given is a value that the compiler does not carry to where the plot is made); the points of a 3D plot (`surfaceplot`) are
+`heatmap` and `surfaceplot` are for vectors and matrices of numbers; the canvas can be chosen (`canvas = AsciiCanvas`, `BlockCanvas`, `DotCanvas`); the points of a 3D plot (`surfaceplot`) are
 projected with floating point numbers, and a point on the border of a pixel may be in another one than in Julia. Not supported: `isosurface`, `imageplot`, `geoplot`, `gridplot` and `savefig`.
 
 ## Code from packages

@@ -149,3 +149,11 @@ end
     c = copy(a)
     @test Set(b) == Set(c) # (the same facts from either side)
 end
+
+# Types that no value has (`STATIC_RUNTIME_TRACE` says which calls give no value and have an argument of one)
+@testset "Types with Union{} as a parameter" begin
+    @test StaticRuntime.has_bottom_parameter(Base.Pairs{Symbol, Union{}, Nothing, @NamedTuple{}})
+    @test StaticRuntime.has_bottom_parameter(Type{Union{}})
+    @test !StaticRuntime.has_bottom_parameter(Vector{Int})
+    @test !StaticRuntime.has_bottom_parameter(Tuple{Int, Union{Nothing, String}})
+end

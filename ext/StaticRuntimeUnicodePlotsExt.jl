@@ -213,27 +213,6 @@ end
     return plot
 end
 
-# A heatmap is written a row at a time, with the color of the cell above as the keyword `bgcol` of `print_color`: a color, or `missing` for the first row (`bgcol = row > 1 ? colors[row - 1, col] : missing`). A keyword that has a value of one of two types is a
-# `NamedTuple` whose type has a union in it, which a method cannot be made for (it is of the type `NamedTuple` when it is compiled, and the keyword is read from it by a call of the runtime). Each of the two calls is made with the type of its own.
-@device_override function UnicodePlots.print_row(io::IO, _, print_color, c::UnicodePlots.HeatmapCanvas, row::Integer)
-    1 ≤ row ≤ UnicodePlots.nrows(c) || throw(ArgumentError("`row` out of bounds: $row"))
-    row *= UnicodePlots.y_pixel_per_char(UnicodePlots.HeatmapCanvas)
-
-    # extend the plot upwards by half a row
-    isodd(size(c.grid, 1)) && (row -= 1)
-
-    for col in 1:UnicodePlots.ncols(c)
-        # for odd numbers of rows, only print the foreground for the top row
-        if row > 1
-            print_color(io, c.colors[row, col], UnicodePlots.HALF_BLOCK; bgcol = c.colors[row - 1, col])
-        else
-            print_color(io, c.colors[row, col], UnicodePlots.HALF_BLOCK)
-        end
-    end
-
-    return nothing
-end
-
 # `polarplot`: the limit of the radius is `(0, 0)` (two integers) when it is not given, and the largest radius is then the maximum of the data or the integer that was given: one of two types, which makes the limits of the axes, the keywords of the plot and
 # the grid that is drawn have types that are unions. The limits are `Float64`s here, and the rest is as the package has it (for a vector of radii: a function is not).
 @device_override function UnicodePlots.polarplot(θ::AbstractVector, r::AbstractVector; rlim = (0, 0), kw...)

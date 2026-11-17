@@ -285,6 +285,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
                                      max_methods::Int)
     c = compilation()
     registered = false
+    slot_argtypes = arginfo.argtypes # (what the arguments were before they were closed: see below)
     closed = close_abstract_arguments(c, interp, arginfo, max_methods)
     # (a call that none of the types that the arguments are closed to has a method for is left as it is: it is not known what the
     # arguments are, and the result of the call is not that it is an error, which would make what calls it one too)
@@ -302,9 +303,10 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             note_dispatch_used!(c)
         end
     end
-    # (an argument of an abstract type that is not split: what the slots of the program hold may make it a type that is, see slots.jl)
+    # (an argument of an abstract type: what the slots of the program hold may make it a narrower type, see slots.jl. The types are those before it was closed to the subtypes that are listed: `LinkedList{Int}` closed to the one that has a method is
+    # a `Cons{Int}`, and a call that is made with it reads its fields from what may be a `Nil`, which the types of the slots are what keeps from being so)
     if !registered && !c.dispatch.registered_used && c.slots.mode !== :off
-        for T in arginfo.argtypes[2:end]
+        for T in slot_argtypes[2:end]
             T isa Core.TypeofVararg && continue
             T = CC.widenconst(T)
             # (a struct of the program with parameters that are not known, `Input` of `Input{T}`, is what is read from a slot that is declared so: what the slots hold is its instances. Not Julia's own, a `Vector` or a `Dict`
@@ -431,12 +433,23 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
     note_functions_of!(c.closures, code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
     caller.linfo isa Core.MethodInstance && learn_boxes!(c.boxes, opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
     for pc in eachindex(code)
+        # (the keywords of a call that has a type as a value are a constant of the type that has the type as the type of the field: see `typed_keywords`)
+        t = opt.src.ssavaluetypes[pc]
+        t isa CC.Const && has_type_values(t.val) && (opt.src.ssavaluetypes[pc] = CC.Const(typed_constant(t.val)))
         st = code[pc]
         # (a call that is assigned to a variable is the second of the arguments of `=`)
         assigned = st isa Expr && st.head === :(=) && length(st.args) == 2 && st.args[2] isa Expr
         call = assigned ? st.args[2] : st
         call isa Expr && call.head === :call && length(call.args) >= 2 || continue
         called = called_function(code, call.args[1])
+        # (`NamedTuple{names}(args)` that was given the type of its argument, see `abstract_call_known` for `NamedTuple` in closures.jl: the call is of the type that it gives, as the code that is made of it makes a value of the type that it is called)
+        let t = opt.src.ssavaluetypes[pc], called = (a = call.args[1]; a isa Core.SSAValue && (ft = opt.src.ssavaluetypes[a.id]) isa CC.Const ? ft.val : called)
+            if called isa UnionAll && called.body isa DataType && called.body.name === Base.typename(NamedTuple) && length(call.args) == 2 &&
+               t isa DataType && t.name === Base.typename(NamedTuple) && t !== called && t <: called
+                call.args[1] = t
+                continue
+            end
+        end
         replacement = if called === Core.invokelatest
             Expr(:call, call.args[2:end]...)
         elseif called === call_callback && length(call.args) >= 3
@@ -477,6 +490,41 @@ function trace_method_errors(ir::CC.IRCode, linfo)
     return
 end
 
+# A type that has `Union{}` as one of its parameters (`Pairs{Symbol,Union{},...}`, `Type{Union{}}`): no value has it, so a call that has an argument of it gives no value, and the code after it is unreachable. Where inference is wrong
+# about a type (it was, for `eltype` of some tuple types: see `_compute_eltype` in overrides/base.jl) the program has a trap where it should have a value, and says nothing about it.
+function has_bottom_parameter(@nospecialize(T), depth::Int = 0)
+    depth > 6 && return false
+    T = CC.widenconst(T)
+    if T isa Union
+        return any(U -> has_bottom_parameter(U, depth + 1), Base.uniontypes(T))
+    elseif T isa DataType || T isa Core.TypeEq # (`Type{X}` is a `TypeEq`, not a `DataType`, in Julia 1.14)
+        for P in (T isa Core.TypeEq ? (Base.type_parameter(T),) : T.parameters)
+            P === Union{} && return true
+            P isa Type && has_bottom_parameter(P, depth + 1) && return true
+        end
+    end
+    return false
+end
+
+# (for `STATIC_RUNTIME_TRACE`: the calls that give no value, and have an argument that has a type that no value has, or a `NamedTuple` that is not a concrete type, which is what a call is inferred for when what made its argument was
+# given the wrong type. A call that always throws has no such argument: those are not shown)
+function trace_noreturn(ir::CC.IRCode, linfo)
+    for pc in 1:length(ir.stmts)
+        ir.stmts[pc][:type] === Union{} || continue
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && (st.head === :call || st.head === :invoke) || continue
+        args = st.head === :invoke ? st.args[2:end] : st.args
+        length(args) >= 1 || continue
+        types = Any[CC.widenconst(CC.argextype(a, ir)) for a in args]
+        f = CC.singleton_type(types[1])
+        (f === Core.throw || f === Core.Intrinsics.llvmcall) && continue
+        suspicious = [T for T in types[2:end] if has_bottom_parameter(T) || (T isa DataType && T.name === Base.typename(NamedTuple) && !isconcretetype(T))]
+        isempty(suspicious) && continue
+        trace("the call ", f === nothing ? types[1] : f, "(", join(types[2:end], ", "), ") gives no value, and an argument of it has a type that no value has or is not concrete: ", join(suspicious, ", "), " in ", linfo)
+    end
+    return
+end
+
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
     c = compilation()
     ir = assert_assumed_returns!(c, ir, opt.linfo)
@@ -485,6 +533,7 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     expand_dynamic_getfield!(ir)
     ir = expand_setproperty!(ir)
     trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
+    trace_on() && trace_noreturn(ir, opt.linfo)
     ir = concretize_namedtuples!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
 end
