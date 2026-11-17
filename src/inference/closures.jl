@@ -357,7 +357,7 @@ function run_passes(c::Compilation, compile)
                 (e isa UnsupportedCodeError || e isa InferenceError) || rethrow()
                 failure = e
                 had_failure = true
-                trace_on() && trace("pass ", pass, " failed: ", first(replace(sprint(showerror, e), '\n' => ' '), 600))
+                trace_on() && trace("pass ", pass, " failed: ", first(replace(sprint(showerror, e), '\n' => ' '), 3500))
                 if s.mode === :on && !isempty(s.types) && c.settings.slots_fallback && !s.fell_back
                     # (the types that the slots were given in this pass may be what failed: the first pass that has them uses what was stored that the analysis could type, and the passes that follow take back what it
                     # was wrong about; a pass that does not compile is not followed by one. The program is compiled once more without them, as it was before they were: with the failure that it has then, if it has one)

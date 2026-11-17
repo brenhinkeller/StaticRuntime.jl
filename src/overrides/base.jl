@@ -318,3 +318,17 @@ end
 # Base calls a `ComposedFunction` through `call_composed(unwrap_composed(c), x...)`, which makes a tuple of the functions of a chain and reads them by an index that the compiler
 # does not know (`getfield(fs, i)`, a runtime call). The call of the outer function on the result of the inner one is the same, and is what each `ComposedFunction` of a chain is.
 @device_override (c::ComposedFunction)(x...; kw...) = c.outer(c.inner(x...; kw...))
+
+## `eltype` of a tuple type
+#
+# `eltype(Tuple{String,String,Int,Int})` (what `eltype` of a `NamedTuple`, and so of the `pairs` of one, is) is `Base._compute_eltype`: the join of the types that the tuple has, which Julia finds by running the loop when it is inferred
+# (the function is marked as one that is always the same). With the number of types that we split a union in (see `SPLIT_LIMIT`) inference does not run it, but follows it, and what it finds is not what the loop gives: `Union{Type{String},Type{Union{}}}`
+# for `Tuple{String,String,Int,Int}`, where Julia has `Any`, so that a `Pairs` that was made with it had a type that no value has, and the code after it was taken to be unreachable. The answer is a fact about the type, so it is given
+# as it is found when compiling, for the type that the tuple is of.
+if isdefined(Base, :_compute_eltype)
+    @device_override @generated function Base._compute_eltype(t)
+        T = t isa DataType && t <: Type && length(t.parameters) == 1 && t.parameters[1] isa Type ? t.parameters[1] : nothing
+        T === nothing && return :(Any) # (the type is not known when compiling: `Any` is every eltype's bound)
+        return QuoteNode(Base._compute_eltype(T))
+    end
+end

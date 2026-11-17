@@ -134,9 +134,15 @@ end
     f(sprint_context(BufIO(s), context), args...)
     return Base.takestring!(s)
 end
+# `repr(x; context = :compact => true)` is Base's own method, which calls `sprint`: the pair is a constant where `repr` is called, and is not one in a method that is not inlined (the type of the stream is made from it)
+@device_override Base.@constprop :aggressive @inline Base.repr(x; context=nothing) = sprint(show, x; context=context)
 # (`@constprop :aggressive`: the properties are constants where `sprint` is called, and have to be known here to make the type of the stream)
 sprint_context(io::BufIO, ::Nothing) = io
 sprint_context(io::BufIO, ::Union{LibcStream,BufIO}) = io
+sprint_context(io::BufIO, ::IOBuffer) = io # (a buffer as the context, as `alignment` gives it: it has no properties)
+# (a context that Base made of a buffer, `IOContext(io, :color => false)`: what `alignment` of a number gives `sprint`. Its properties are in a dictionary that has them when the program runs, and are not in its type, so they are not
+# used: `:color` is false for a stream that is written to a string, as it is here)
+sprint_context(io::BufIO, ::Base.IOContext{IOBuffer}) = io
 sprint_context(io::BufIO, context::ContextIO) = IOContext(io, context)
 Base.@constprop :aggressive @inline sprint_context(io::BufIO, context::Pair) = IOContext(io, context)
 Base.@constprop :aggressive @inline sprint_context(io::BufIO, context::Tuple) = IOContext(io, context...)

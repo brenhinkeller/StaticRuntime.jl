@@ -88,3 +88,13 @@ end
     
     check_cases(dict_cases)
 end
+
+# `eltype` of a tuple type that has types that are not all one: it is the join of them (`Any` for `String` and `Int`), and so is that of the `pairs` of a `NamedTuple` (inference did not find that with the limit that we split a union in)
+@testset "eltype of the types of a tuple" begin
+    check_cases([
+        "eltype of a mixed NamedTuple" => () -> length(string(eltype(typeof((; a = "x", b = "y", c = 1 + opaque(0), d = 2))))),
+        "eltype of pairs, mixed"       => () -> length(string(eltype(pairs((; a = "x", b = "y", c = 1 + opaque(0)))))),
+        "eltype of pairs, one type"    => () -> length(string(eltype(pairs((; a = 1 + opaque(0), b = 2))))),
+        "pairs of mixed, iterated"     => () -> (s = 0; for (k, v) in pairs((; a = "xx", b = "y", c = 5 + opaque(0))); s += v isa String ? length(v) : v; end; s),
+    ]; batch = false)
+end

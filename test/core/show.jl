@@ -208,3 +208,13 @@ end
     @test get(S.typeinfo_io(io, Int), :typeinfo, Any) === Int
     @test get(io, :typeinfo, Any) === Any
 end
+
+# `repr` with a context that is a pair written in the call: the stream that it shows to has the property in its type (a `Float64` is shown with fewer digits when `:compact` is true)
+@testset "`repr` with a context" begin
+    check_cases([
+        "repr compact"        => () -> (println(repr(1 / 3 + opaque(0.0); context = :compact => true)); println(repr(1 / 3 + opaque(0.0))); 0),
+        "repr compact, Int"   => () -> (println(repr(12345 + opaque(0); context = :compact => true)); 0),
+        "alignment of a number" => () -> (a = Base.alignment(PipeBuffer(), 12.5 + opaque(0.0)); a[1] * 10 + a[2]),
+        "repr compact, array" => () -> (println(repr([1.0 / 3, 2.5 + opaque(0.0)]; context = :compact => true)); 0),
+    ]; batch = false)
+end

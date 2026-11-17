@@ -92,6 +92,23 @@ function explain_inference!(path::Vector{String}, notes::Vector{String}, f, tt::
     catch
         return false
     end
+    return explain_codeinfo!(path, notes, ci, seen; depth, kwargs...)
+end
+
+# The code that a call was inferred as, from what is kept (the `CodeInstance` of a call is in the code that has it), for any types of the arguments: `static_code_typed` takes only those that a method instance can be
+# made of (a tuple of concrete types, and not `Type{Plot}` of a type that has parameters)
+function inferred_codeinfo(x)
+    x isa Core.CodeInstance || return nothing
+    mi = x.def
+    mi isa Core.MethodInstance && mi.def isa Method || return nothing
+    src = x.inferred
+    src isa Core.CodeInfo && return src
+    src isa String || return nothing
+    return try ccall(:jl_uncompress_ir, Any, (Any, Any, Any), mi.def, x, src)::Core.CodeInfo catch; nothing end
+end
+
+function explain_codeinfo!(path::Vector{String}, notes::Vector{String}, ci::Core.CodeInfo, seen::Set; depth::Int = 0, kwargs...)
+    depth > 14 && return false
     for allow_throwers in (false, true), (i, st) in enumerate(ci.code)
         T = ci.ssavaluetypes isa Vector ? ci.ssavaluetypes[i] : Any
         T === Union{} || continue
@@ -109,6 +126,10 @@ function explain_inference!(path::Vector{String}, notes::Vector{String}, f, tt::
                 line = string(mi.def isa Method ? mi.def.name : callee_name(ci, st.args[2]), "(", join(("::" * string(p) for p in spec.parameters[2:end]), ", "), ")")
                 push!(path, line)
                 found = g !== nothing && isconcretetype(args) && explain_inference!(path, notes, g, args, seen; depth = depth + 1, kwargs...)
+                if !found
+                    callee = inferred_codeinfo(st.args[1])
+                    found = callee !== nothing && explain_codeinfo!(path, notes, callee, seen; depth = depth + 1, kwargs...)
+                end
                 found || push!(notes, string("The call `", line, "` always throws, as far as the compiler can tell (it ends in `throw`, or in a call that has no method)."))
                 return true
             end

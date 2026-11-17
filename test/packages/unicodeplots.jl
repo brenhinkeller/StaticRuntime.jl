@@ -1,0 +1,44 @@
+# UnicodePlots.jl: plots written to the terminal (`ext/StaticRuntimeUnicodePlotsExt.jl`). Each program prints a plot and the output is compared with what Julia prints for the same code. The package decides the types of
+# a plot (of its canvas, its keywords, the limits of its axes) by values that are only known when it runs: the extension writes again what needs it.
+using UnicodePlots
+
+@testset "UnicodePlots.jl" begin
+    check_cases([
+        "lineplot"                    => () -> (println(lineplot(1:10, (1:10) .^ 2 .+ opaque(0); width = 40, height = 10)); 0),
+        "lineplot of another size"    => () -> (println(lineplot(1:8, [3, 1, 4, 1, 5, 9, 2, opaque(6)]; width = 30, height = 6)); 0),
+        "lineplot, default size"      => () -> (println(lineplot(1:5, [2, 4, 3, 5, opaque(1)])); 0),
+        "barplot"                     => () -> (println(barplot(["a", "b", "c"], [1, 2, 3 + opaque(0)])); 0),
+        "barplot of longer names"     => () -> (println(barplot(["apples", "pears", "figs", "kiwi"], [5, 3, 8, 1 + opaque(0)])); 0),
+        "histogram"                   => () -> (println(histogram([1, 2, 2, 3, 3, 3, 4, 4, opaque(5)]; nbins = 5)); 0),
+        "histogram of more values"    => () -> (println(histogram([1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 6, 6, 7, 8, 9 + opaque(0)]; nbins = 4)); 0),
+        "lineplot with a title and labels" => () -> (println(lineplot(1:10, (1:10) .^ 2 .+ opaque(0); title = "Squares", xlabel = "x", ylabel = "y", width = 40, height = 8)); 0),
+        "lineplot with labels"        => () -> (println(lineplot(1:10, (1:10) .^ 2 .+ opaque(0); xlabel = "x", ylabel = "y", width = 40, height = 8)); 0),
+        "scatterplot with labels"     => () -> (println(scatterplot([1.0, 2.0, 3.5, 4.0 + opaque(0.0)], [2.0, 1.0, 3.0, 5.0]; title = "Points", xlabel = "x", ylabel = "y", width = 30, height = 8)); 0),
+        "barplot with labels"         => () -> (println(barplot(["a", "bb", "ccc"], [1, 2, 3 + opaque(0)]; title = "Bars", xlabel = "count", ylabel = "name")); 0),
+        "histogram with labels"       => () -> (println(histogram([1, 2, 2, 3, 3, 3, 4, 4, opaque(5)]; nbins = 5, title = "Values", xlabel = "count", ylabel = "bin")); 0),
+        "stairs with labels"          => () -> (println(stairs(1:5, (1:5) .^ 2 .+ opaque(0); xlabel = "x", ylabel = "y", width = 30, height = 6)); 0),
+        "vertical histogram with labels" => () -> (println(histogram([1, 2, 2, 3, 3, 3, 4, 4, opaque(5)]; nbins = 5, vertical = true, xlabel = "bin", ylabel = "count")); 0),
+        "boxplot with a label"        => () -> (println(boxplot([1.0, 2.0, 3.0, 4.0, 5.0, 6.0 + opaque(0.0), 9.0]; xlabel = "value")); 0),
+        "densityplot with labels"     => () -> (println(densityplot([1.0, 2.0, 2.5, 3.0 + opaque(0.0), 3.5, 4.0], [1.0, 2.0, 1.5, 3.0, 2.0, 1.0]; xlabel = "x", ylabel = "y", width = 30, height = 8)); 0),
+        "lineplot!"                   => () -> (p = lineplot(1:5, (1:5) .^ 2 .+ opaque(0); xlabel = "x", ylabel = "y", width = 30, height = 6); lineplot!(p, 1:5, 2 .* (1:5) .^ 2); println(p); 0),
+        "scatterplot of integers"     => () -> (println(scatterplot(1:6, (1:6) .^ 2 .+ opaque(0); xlabel = "x", ylabel = "y", width = 30, height = 6)); 0),
+        "heatmap"                     => () -> (println(heatmap([1.0 2.0 3.0; 4.0 5.0 6.0 + opaque(0.0); 7.0 8.0 9.0])); 0),
+        "heatmap with labels"         => () -> (println(heatmap([1.0 2.0 3.0; 4.0 5.0 6.0 + opaque(0.0); 7.0 8.0 9.0]; xlabel = "x", ylabel = "y")); 0),
+        "polarplot"                   => () -> (println(polarplot(collect(0.0:0.5:3.0), collect(1.0:7.0) .+ opaque(0.0); width = 30, height = 8)); 0),
+        "contourplot"                 => () -> (println(contourplot(-2.0:1.0:2.0, -2.0:1.0:2.0, (x, y) -> x * y + opaque(0.0); width = 30, height = 8)); 0),
+        "spy"                         => () -> (println(spy([1.0 0.0 2.0; 0.0 0.0 3.0 + opaque(0.0); 4.0 0.0 0.0])); 0),
+        "surfaceplot"                 => () -> (println(surfaceplot(-1.0:1.0:1.0, -1.0:1.0:1.0, (x, y) -> x * y + opaque(0.0); width = 30, height = 10)); 0),
+        "hline! and vline!"           => () -> (p = lineplot(1:5, (1:5) .^ 2 .+ opaque(0); width = 30, height = 6); hline!(p, 4.0); vline!(p, 3.0); println(p); 0),
+        "title!, labels, annotate!"   => () -> (p = lineplot(1:5, (1:5) .^ 2 .+ opaque(0); width = 30, height = 6); title!(p, "T"); xlabel!(p, "x"); ylabel!(p, "y"); annotate!(p, 2.0, 5.0, "pt"); println(p); 0),
+        "barplot!"                    => () -> (p = barplot(["a", "b"], [1, 2 + opaque(0)]); barplot!(p, "c", 3); println(p); 0),
+        "scatterplot!"                => () -> (p = scatterplot(1:5, (1:5) .^ 2 .+ opaque(0); width = 30, height = 6); scatterplot!(p, 1:5, 2 .* (1:5) .^ 2); println(p); 0),
+        "color, name and border"      => () -> (println(lineplot(1:5, (1:5) .^ 2 .+ opaque(0); color = :red, name = "series", border = :ascii, width = 30, height = 6)); 0),
+        "boxplot of two"              => () -> (println(boxplot(["a", "b"], [[1.0, 2.0, 3.0 + opaque(0.0), 4.0], [2.0, 3.0, 5.0, 8.0]])); 0),
+        "vertical_histogram"          => () -> (println(vertical_histogram(UnicodePlots.fit(UnicodePlots.Histogram, [1, 2, 2, 3, 3, 3, 4, 4, opaque(5)]; nbins = 5))); 0),
+        "histogram with statistics"   => () -> (println(histogram([1, 2, 2, 3, 3, 3, 4, 4, opaque(5)]; nbins = 5, vertical = true, stats = true)); 0),
+        "lineplot of floats"          => () -> (println(lineplot([0.0, 0.5, 1.0 + opaque(0.0), 1.5], [0.0, 0.25, 1.0, 2.25]; width = 30, height = 6)); 0),
+        "scatterplot"                 => () -> (println(scatterplot([1.0, 2.0, 3.5, 4.0 + opaque(0.0)], [2.0, 1.0, 3.0, 5.0]; width = 30, height = 8)); 0),
+        "barplot of floats"           => () -> (println(barplot(["a", "bb", "ccc"], [1.5, 2.25 + opaque(0.0), 3.0]; title = "Bars")); 0),
+        "histogram of floats"         => () -> (println(histogram([1.0, 2.5, 2.7, 3.1, 3.3, 3.9 + opaque(0.0), 4.4, 4.6, 5.0]; nbins = 4)); 0),
+    ])
+end
