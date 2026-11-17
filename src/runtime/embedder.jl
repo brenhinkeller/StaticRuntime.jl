@@ -488,7 +488,7 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
         check_readable(addr + k * sizeof(T), sizeof(T))
         add_fields!(T, addr + k * sizeof(T))
     end
-    isempty(types) && n > 0 && throw(EmbedFailure("no fields"))
+    isempty(types) && n > 0 && sizeof(T) != 0 && throw(EmbedFailure("no fields")) # (an object that has no data, as the one of a mutable type with no fields is, is the tag only)
     # values are created after the global, but the references they hold must exist before
     # it is (to compute the global's type), so they are created here and handed out later
     return types, g -> LLVM.Constant[thunk(g) for thunk in thunks]

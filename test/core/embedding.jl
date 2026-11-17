@@ -226,3 +226,17 @@ const EMBED_BIG = big(2)^100 + 7
         "a zero"     => () -> Int(big(0) + opaque(3)),
     ]; batch = false)
 end
+
+# An object of a mutable type that has no data (`Ref(nothing)`, or a `mutable struct` with no fields) is an object of its own, and not the one instance of its type: there are many of them
+mutable struct EmbedEmptyMut end
+const EMBED_EMPTY_A = EmbedEmptyMut()
+const EMBED_EMPTY_B = EmbedEmptyMut()
+const EMBED_REF_NOTHING = Ref(nothing)
+const EMBED_REFS = [Ref(nothing), Ref(nothing)]
+@testset "Objects of a mutable type that has no data" begin
+    check_cases([
+        "an empty mutable struct"   => () -> Int(EMBED_EMPTY_A === EMBED_EMPTY_A) + 10 * Int(EMBED_EMPTY_A === EMBED_EMPTY_B) + opaque(0),
+        "Ref(nothing)"              => () -> Int(EMBED_REF_NOTHING[] === nothing) + opaque(0),
+        "two of them in a vector"   => () -> Int(EMBED_REFS[1] === EMBED_REFS[2]) + 2 * Int(EMBED_REFS[1] === EMBED_REFS[1]) + opaque(0),
+    ]; batch = false)
+end

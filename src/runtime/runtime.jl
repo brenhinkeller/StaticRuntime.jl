@@ -73,7 +73,20 @@ function forget_process_state!()
 end
 
 # Define the runtime functions that `mod` calls but does not define.
-function link_runtime!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()), strip::Bool = false)
+# The module has the addresses of objects of this process in it, and `link_runtime!` copies the objects that they are the addresses of into the binary, reading them as memory (`embed_constants!`). An object that nothing in Julia refers to any
+# more is not one that can be copied: its memory is free, and may be that of another object. The objects of a program are the constants that its code refers to, which Julia keeps, and what the code made when it was compiled: that
+# is kept by the compilation that is going on, but what is on the way (not yet a reference of what is kept) is not seen by the collector. There are no collections while the addresses are being resolved, so an address that is read is of
+# the object that it was.
+function link_runtime!(mod::LLVM.Module; kwargs...)
+    was_enabled = GC.enable(false)
+    try
+        return link_runtime_resolving!(mod; kwargs...)
+    finally
+        was_enabled && GC.enable(true)
+    end
+end
+
+function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()), strip::Bool = false)
     link_cfunctions!(mod, cfunctions) && run!(GlobalDCEPass(), mod)
     blas = resolve_blas_lookups!(mod) # (before what they are given is embedded)
     library_plan = resolve_library_lookups!(mod; libraries)

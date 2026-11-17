@@ -429,8 +429,12 @@ function embed_constants!(e::ObjectEmbedder)
             catch err
                 if err isa EmbedFailure
                     isempty(err.reason) || @debug "Cannot embed an object" reason = err.reason
+                    # (`STATIC_RUNTIME_TRACE=embed`: the whole path, from what can not be copied to the object that was asked for, as a debug message cuts it)
+                    get(ENV, "STATIC_RUNTIME_TRACE", "") == "embed" && !isempty(err.reason) && println(stderr, "[static-runtime] cannot embed: ", err.reason)
                 else
-                    @debug "Could not embed object" address=base type=object_type(base) exception=(err, catch_backtrace())
+                    # (what the exception says, and not the exception: it may have the pieces of the object in it, which are too large to write, and may be objects that are not valid any more)
+                    summary = err isa ErrorException ? err.msg : err isa MethodError ? string("MethodError: ", err.f, " with ", join(string.(typeof.(err.args)), ", ")) : string(typeof(err))
+                    @debug "Could not embed object" address=base type=object_type(base) error = first(summary, 500) where_ = first(string(stacktrace(catch_backtrace())[1:min(4, end)]), 600)
                 end
                 nothing
             end

@@ -44,6 +44,19 @@ value_type(::AbstractObservable) = Any
     return false
 end
 
+# whether a function (a closure) has a `Module` among what it took, in what it took (the closures, tuples and references that it has: three deep)
+function holds_module(@nospecialize(f), depth::Int = 3)
+    f isa Module && return true
+    depth == 0 && return false
+    T = typeof(f)
+    (f isa Function || f isa Tuple || f isa Base.RefValue) || return false
+    for i in 1:fieldcount(T)
+        isdefined(f, i) || continue
+        holds_module(getfield(f, i), depth - 1) && return true
+    end
+    return false
+end
+
 # The listeners of the observables that were made before the program is compiled (in a scene that is a constant) are not said by the code of the program: the observables that `x` refers to are looked at, and the
 # listeners of `map` that they have are replaced with the `MapCall`s that `map!` makes.
 function StaticRuntime.add_listeners!(@nospecialize(root); budget::Int = 2_000_000)
@@ -57,6 +70,9 @@ function StaticRuntime.add_listeners!(@nospecialize(root); budget::Int = 2_000_0
         budget -= 1
         if x isa Observable
             ls = x.listeners
+            # (a listener that has a `Module` is not one that a program can have: a module is a structure of the runtime, and has no copy in the binary, so the listeners that have one, and the observable, would not be in it. They
+            # are the ones of the interactions with the mouse and the keyboard (`addmouseevents!`), which a program that has no events does not call: they are taken out)
+            filter!(p -> !holds_module(p.second), ls)
             for i in eachindex(ls)
                 p = ls[i]
                 f = p.second
@@ -64,10 +80,16 @@ function StaticRuntime.add_listeners!(@nospecialize(root); budget::Int = 2_000_0
                     # (what `map` made: the function, the result and the arguments of the type `Any`, as `map!` makes them in a program, with their types)
                     f = MapCall(f.f, f.result, f.args)
                     ls[i] = Pair{Int,Any}(p.first, f)
+                elseif f isa Observables.OnAny
+                    # (what `onany` made, likewise)
+                    f = AnyCall(f.f, f.args)
+                    ls[i] = Pair{Int,Any}(p.first, f)
                 end
                 add_callback!(value_type(x), typeof(f))
             end
         end
+        # (the handles that a block keeps to take its listeners out again are of the same kind: they have the functions)
+        x isa Vector{ObserverFunction} && filter!(o -> !holds_module(o.f), x)
         if x isa Array || x isa Core.GenericMemory
             isbitstype(eltype(x)) && continue
             for i in eachindex(x)

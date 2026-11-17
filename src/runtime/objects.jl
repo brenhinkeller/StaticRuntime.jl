@@ -106,6 +106,8 @@ function object_type(addr::UInt)
     # a cell that is 16 aligned: it is the `instance` of its type)
     Base.issingletontype(T) && isdefined(T, :instance) &&
         UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), T.instance)) == addr && return T
+    # (an object of a mutable type that has no data, as `Ref(nothing)` of a type that has no size is, is allocated in the same way, and there are many of them: it is not the `instance` of its type)
+    Base.ismutabletype(T) && (try Core.sizeof(T) catch; -1 end) == 0 && return T
     return T === Symbol && is_symbol(addr) ? T : nothing
 end
 

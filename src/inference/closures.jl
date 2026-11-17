@@ -27,6 +27,15 @@ function interesting_function_type(@nospecialize(T))
     return true
 end
 
+function note_slow_optimization!(cl::ClosureState, mi, seconds::Float64, statements::Int)
+    seconds < 0.05 && return
+    # (one that takes this long is written when it is done, as the pass may not end: `STATIC_RUNTIME_TRACE=1`)
+    seconds >= 5 && trace("optimizing ", mi, " took ", round(seconds; digits = 1), " s (", statements, " statements before)")
+    push!(cl.slowest, (seconds, mi, statements))
+    sort!(cl.slowest; by = first, rev = true)
+    length(cl.slowest) > 5 && resize!(cl.slowest, 5)
+    return
+end
 function note_function!(cl::ClosureState, @nospecialize(T))
     interesting_function_type(T) || return
     if !(T in cl.seen_functions_set)
@@ -190,6 +199,14 @@ add_callback!(V::Type, F::Type) = (register_callback!(V, F); nothing)
 Say what the listeners of the observables that `x` refers to are (the ones of a `Scene` that is a constant, say), with `add_callback!`. This has a method when `Observables` is loaded.
 """
 function add_listeners! end
+
+"""
+    StaticRuntime.prepare!(x)
+
+Make `x`, an object that is made before the program is compiled and is a constant of it (a `Makie.Scene`, a `ComputeGraph`), ready for the program: what its package keeps where the types are lost is made again with the types
+that it has now. The methods are in the extensions of the packages. Call it after the object is made and before compiling, and once: the object is changed.
+"""
+function prepare! end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
@@ -370,6 +387,7 @@ function run_passes(c::Compilation, compile)
                   "; candidates ", length(cl.functions), ", found ", length(new), (more_functions ? " (adopted: " * (failure !== nothing || had_failure ? "the pass failed" : !strict ? "not strict" : cl.union_used ? "a call was made over candidates" : "a box holds a function") * ")" : " (not adopted)"),
                   "; callbacks ", length(newcb), ", boxes changed ", more_boxes, ", cfunctions ", length(newc),
                   "; methods optimized ", cl.optimized, " (", length(cl.optimized_unique), " different)",
+                  isempty(cl.slowest) ? "" : string("; slowest to optimize: ", join((string(round(t; digits = 1), " s (", n, " statements) ", mi) for (t, mi, n) in cl.slowest), " | ")),
                   wanted ? (retry ? "; another pass" : "; no pass is left (" * string(function_passes) * " function passes)") : "; done")
         end
         if retry

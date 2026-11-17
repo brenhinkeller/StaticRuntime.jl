@@ -15,6 +15,11 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Input, output and writing overrides" => "usage.md",
+        "Strict mode and dynamic dispatch" => "compiling.md",
+        "The runtime" => "runtime.md",
+        "Libraries and packages" => "packages.md",
+        "Limitations, testing and reference" => "limits.md",
     ],
 )
 

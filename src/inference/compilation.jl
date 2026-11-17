@@ -90,10 +90,11 @@ mutable struct ClosureState
     callback_call_requested::Bool
     optimized::Int                                                         # (for `STATIC_RUNTIME_TRACE`) the methods that were optimized in this pass, and which of them
     optimized_unique::Set{Any}
+    slowest::Vector{Tuple{Float64,Any,Int}}                                # (for `STATIC_RUNTIME_TRACE`) the methods that took longest to optimize in this pass: (seconds, the method, statements before optimizing)
     box_function_seen::Bool                                                # a function is in a `Core.Box` that a constant has (the variable of a closure that is made by code that is not compiled): its type is not known by any read of the box
 end
 ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
-                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), false)
+                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), Tuple{Float64,Any,Int}[], false)
 
 "What the passes know of the boxes of the closures (boxes.jl): the type of what each holds, as the last pass found it."
 mutable struct BoxState
@@ -255,7 +256,7 @@ function begin_pass!(c::Compilation)
     c.pass += 1
     cl = c.closures
     empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_callbacks); empty!(cl.seen_cfunctions)
-    cl.dispatch_requested = false; cl.union_used = false; cl.callback_call_requested = false; cl.box_function_seen = false; cl.optimized = 0; empty!(cl.optimized_unique)
+    cl.dispatch_requested = false; cl.union_used = false; cl.callback_call_requested = false; cl.box_function_seen = false; cl.optimized = 0; empty!(cl.optimized_unique); empty!(cl.slowest)
     empty!(c.boxes.seen)
     s = c.slots
     empty!(s.universe_seen); empty!(s.stored_by_slot); empty!(s.raw_store_types); s.scan_truncated = false

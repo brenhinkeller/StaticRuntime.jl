@@ -450,6 +450,10 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
     if trace_on()
         c.closures.optimized += 1
         push!(c.closures.optimized_unique, caller.linfo)
+        started = time_ns()
+        result = @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
+        note_slow_optimization!(c.closures, caller.linfo, (time_ns() - started) / 1e9, length(code))
+        return result
     end
     return @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
 end

@@ -49,9 +49,9 @@ The 10 primes up to 30: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
 Their mean is 12.9
 ```
 
-The entry point used in the example above is `main(args)`, though `main()` is also an option for a program with no arguments, as is a C-style `main(argc, argv)` (`(Int, Ptr{Ptr{UInt8}})`, which must return an integer); see [Entry points](docs/src/index.md).
+The entry point used in the example above is `main(args)`, though `main()` is also an option for a program with no arguments, as is a C-style `main(argc, argv)` (`(Int, Ptr{Ptr{UInt8}})`, which must return an integer); see [Entry points](docs/src/usage.md).
 
-If not otherwise specified, the garbage collector will be included only if it is thought to be needed (`gc = :auto`, the default). This includes the GC for anything that allocates repeatedly in a loop or other cycle (not counting error paths), and excludes it otherwise. Alternatively, a program compiled with `gc = true` always has one, and with `gc = false` never does. Meanwhile, the `small = true` option attempts to make the file smaller where possible (no names of functions or segment of constants in the file). A small program is then a few tens of kilobytes, depending on architecture (see [Binary size](docs/src/index.md)).
+If not otherwise specified, the garbage collector will be included only if it is thought to be needed (`gc = :auto`, the default). This includes the GC for anything that allocates repeatedly in a loop or other cycle (not counting error paths), and excludes it otherwise. Alternatively, a program compiled with `gc = true` always has one, and with `gc = false` never does. Meanwhile, the `small = true` option attempts to make the file smaller where possible (no names of functions or segment of constants in the file). A small program is then a few tens of kilobytes, depending on architecture (see [Binary size](docs/src/runtime.md)).
 
 ### More advanced examples
 
@@ -134,7 +134,7 @@ Code that we know can't work in a standalone binary is rejected when compiling, 
 
 * **An overlay method table** (`@device_override`) replaces the methods of Base that can't be compiled (they use tasks, locks, libuv, `inferencebarrier`, ...) with ones that can.
 * **A runtime written for compiled programs** is linked into the code: allocation, exceptions, boxing, type tags and the like. Julia objects that the code uses as constants (strings, arrays, `Ref`s, types, symbols, non-`const` globals) are copied into the binary, with their type information, so no libjulia is needed.
-* **A garbage collector** (conservative, non-moving, mark and sweep, written in Julia and compiled into the program) frees memory as Julia does, and runs the C finalizers of libraries (e.g., GMP's). It is only in the programs that need it (`gc = :auto`); `gc = true` and `gc = false` always and never include it. See the [manual](docs/src/index.md) for how it works and what it can't see.
+* **A garbage collector** (conservative, non-moving, mark and sweep, written in Julia and compiled into the program) frees memory as Julia does, and runs the C finalizers of libraries (e.g., GMP's). It is only in the programs that need it (`gc = :auto`); `gc = true` and `gc = false` always and never include it. See the [manual](docs/src/runtime.md) for how it works and what it can't see.
 * **A loader for libraries** looks functions up the first time that they are called (`dlopen`, `dlsym`), after the libraries that they need, and can find them in a `lib` folder next to the program.
 * **Inference is helped along in some cases**: calls on abstract values are made over registered types, calls of functions that are not known (a closure taken out of a collection) over the closures that the program has, `@cfunction` callbacks are given a target that is compiled, tuples that have a `Union` as an element are favored for inlining, and keyword and context arguments propagate as constants so that code like `IOContext(io, :compact => true)` compiles.
 * **Checks for silent wrong results**: what would differ from Julia is refused when compiling (for instance constant tables hashed by address), and numbers are never mistaken for addresses.
