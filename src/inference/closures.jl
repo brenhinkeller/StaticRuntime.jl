@@ -276,6 +276,23 @@ that it has now. The methods are in the extensions of the packages. Call it afte
 """
 function prepare! end
 
+"""
+    StaticRuntime.typed_node(graph, key)
+
+A node of `graph` (a `ComputePipeline.ComputeGraph`, which `prepare!` was called on, and the graphs that it is connected with) that the program reads as `node[]`, with the types of what it depends on: what the package reads to
+resolve it (the edges and inputs that it comes from, and the references of their values) is of types that are not known where it is read, those of all the nodes of all the graphs. Call it before compiling, and keep it as a
+constant (`const POSITIONS = StaticRuntime.typed_node(plot.attributes, :positions)`). The method is in the extension for Makie.
+"""
+function typed_node end
+
+"""
+    StaticRuntime.typed_input(graph, key)
+
+An input of `graph` (see `typed_node`) that the program sets as `input[] = value`, which is what `ComputePipeline.update!(graph; key = value)` does, with what the change reaches (the graphs that depend on the input, and the listeners of
+their changes) found before compiling. The value is of the type that the input has then. The method is in the extension for Makie.
+"""
+function typed_input end
+
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     if length(arginfo.argtypes) == 3

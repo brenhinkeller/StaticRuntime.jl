@@ -186,6 +186,18 @@ first argument when it runs, is `Any` to the compiler (to Julia as well), so the
 supported. Two things that these packages do are done by extensions: `FunctionWrappers` keeps its function in a pointer to a function of the runtime, which a program does not have (`ext/StaticRuntimeFunctionWrappersExt.jl`: the call is made through the function that the wrapper holds), and a message of
 `SciMLLogging` (`lazy"..."`) is not made into text: its parts are a tuple whose types are not known when compiling, so a program that shows one stops with an error that says so (the messages are not shown by default).
 
+### JuMP
+
+`JuMP` with `HiGHS` works for a model made with `direct_model(HiGHS.Optimizer())`, and `MathOptInterface`'s functions called on a `HiGHS.Optimizer` itself (tests in `test/packages/jump.jl`): variables, constraints,
+the objective, `optimize!`, `termination_status`, `objective_value` and `value`. HiGHS is a library that the program opens at the path that it has when compiling. Not yet supported: `Model(HiGHS.Optimizer)`, whose backend is a
+`CachingOptimizer` of MOI's bridges (they find the types of the bridges when the program runs), and a program that has a model of each kind.
+
+### Makie plots
+
+A scene, and the plots of a figure, made before compiling and prepared for the program (`StaticRuntime.prepare!`, `StaticRuntime.typed_node`, `StaticRuntime.typed_input`: see [Makie](@ref)) are read and changed by it (tests in
+`test/packages/makie.jl`): the size and viewport of a scene, the inputs and nodes of its graph, its camera, and the data and attributes of a plot. Changing the axis or the layout when the program runs is not yet supported, and
+there is no backend (nothing is drawn).
+
 ## Code from packages
 
 (The survey that this section reports is kept as tests, `test/packages` — Distributions.jl, NaNStatistics.jl and StatsBase.jl, each program compared with Julia — and

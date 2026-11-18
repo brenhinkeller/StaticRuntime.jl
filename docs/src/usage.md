@@ -164,7 +164,26 @@ A `Makie.Scene` that is made before the program is compiled, and is a constant o
 and before compiling: the typed edges get the names of their outputs, what the graph does when its outputs change is made again with the types of its observables, the functions of the inputs get the references of their nodes, a node
 that Makie keeps in a `RefValue{Any}` of a few types of value (`shading`) gets one of the union of them, and the listeners are said (see [Observables](@ref)). The nodes of a graph are resolved when it is prepared: a node that
 a program resolves for the first time is an error. The observables that the program uses have to be asked for before (`get_observable!(graph, name)`, or `on(f, graph[name])`). Only the latest release of Makie is supported (0.24).
-This is at the stage of scenes without plots: `Figure`s and plots are not yet tried.
+
+The nodes of a plot in a `Figure` (`plot.attributes`, a graph of its own, which is connected with those of its scene and of the other plots) are read and set through `StaticRuntime.typed_node(graph, key)` and
+`StaticRuntime.typed_input(graph, key)`, made before compiling and kept as constants, after `prepare!` was called on every scene and on the graph of every plot (`prepare!(plot.attributes)`):
+
+```julia
+const fig = Figure(size = (300, 200)); const ax = Axis(fig[1, 1]); const plt = lines!(ax, 1:10, Float64.(1:10) .^ 2)
+# (prepare! of each scene of fig, and of each of their plots' attributes)
+const POSITIONS = StaticRuntime.typed_node(plt.attributes, :positions)
+const YS = StaticRuntime.typed_input(plt.attributes, :arg2)
+function main(argv)
+    YS[] = [i * 10.0 for i in 1:10] # (what `update!(plt.attributes, arg2 = ...)` does)
+    println(POSITIONS[][3])         # (what `plt.attributes[:positions][]` gives)
+    return 0
+end
+```
+
+A read of `graph[key][]` resolves what the node comes from with the types of all the nodes of all the graphs of the figure (the functions of the inputs, the edges, the references of the values: a few hundred types of each), which is
+too large a program; a typed node has what it comes from as a list of steps of their own types (each edge and input that it depends on, in order). A typed input has the graphs that its changes reach, and their listeners.
+The values have the types that they had when they were made: a value of another type (an input that was a `Vector{Float64}` set to a `Vector{Int}`) stops the program with a message. Changing the axis or the layout
+when the program runs (a resize, the limits of an axis) is not yet supported.
 
 Limits: containers that contain themselves are not detected (they recurse until the program crashes); the keyword `context` of `sprint` with a pair that is written in the call
 (`sprint(show, v; context = :compact => true)`) works for what is not an array, and is not yet supported for the show of an array (give `IOContext` the stream instead, or a context that is

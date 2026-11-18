@@ -602,7 +602,7 @@ end
 
 # What the constants that the code refers to hold in these slots: the elements of an array of `Any`, the fields of a struct that are of an abstract type, and the types of what is in them (for the universe). A constant is
 # looked at with a list of what is to be looked at (not by calls of itself: what a program embeds can be a long chain, or deep, as a graph of objects is), each mutable object once (it can refer to itself), and as many objects
-# as `SCAN_BUDGET`. One that is larger, or a struct that has more than `SCAN_FIELDS` fields, is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls
+# as `SCAN_BUDGET` (a struct counts as one for each `SCAN_FIELDS` fields that it has). One that is larger is noted as such (`note_truncated!`): what it holds is not known, so the slots are not trusted (`analyze_slots!`), and the calls
 # on what is read from them are made over the registered types. What is found in a constant is kept for the compilation (`SlotState.scan_cache`): the same constant is the operand of many statements.
 const SCAN_BUDGET = 200_000
 const SCAN_FIELDS = 64
@@ -643,10 +643,8 @@ function scan_facts(@nospecialize(x0))
         elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName) &&
                !(x isa Task) # (a task is the state of the process that compiles: its scope, its storage, the tasks that wait for it. The tasks of a program are made by the program (see tasks.jl). `Base.roottask` is a constant of code that waits)
             S = typeof(x)
-            if fieldcount(S) > SCAN_FIELDS
-                push!(facts, ((:truncated, nothing, nothing), Any))
-                continue
-            end
+            fieldcount(S) > SCAN_FIELDS && get(ENV, "SR_WIDE", "") == "1" && println(stderr, "SRWIDE ", S) # TEMPORARY
+            budget -= fieldcount(S) ÷ SCAN_FIELDS # (a struct of many fields, Makie's `Axis` of 152, is looked at as an array of as many elements would be: its fields count as objects)
             for i in 1:fieldcount(S)
                 isdefined(x, i) || continue
                 v = getfield(x, i)
@@ -728,8 +726,9 @@ function analyze_slots!(c::Compilation, interp, root)
     end
     resolve_argument_stores!(c)
     if s.scan_truncated
-        # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
-        @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
+        # If a constant is too large, the program is compiled as if there were no slots
+        @debug "A constant exceeded the scan budget; slots disabled" _id = :static_slots_truncated
+        trace_on() && trace("A constant exceeded the scan budget (more than ", SCAN_BUDGET, " objects); slots disabled")
         had_types = !isempty(s.types)
         empty!(s.types); s.type_slots = false
         s.mode = :off
@@ -745,7 +744,7 @@ function analyze_slots!(c::Compilation, interp, root)
     s.mode === :observe && return
     c.settings.why && report_why(c)
     changed = update_slot_types!(c)
-    # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
+    # Program types, that a call over an `Any` splits over; any new finds that were not used in this pass are used in the next
     if c.settings.universe && used
         add_stored_types!(c)
         new = Any[t for t in s.universe_seen if !(t in s.universe)]

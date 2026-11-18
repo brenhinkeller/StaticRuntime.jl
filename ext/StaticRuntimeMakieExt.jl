@@ -194,6 +194,189 @@ function StaticRuntime.prepare!(graph::CP.ComputeGraph)
 end
 StaticRuntime.prepare!(scene::Scene) = (StaticRuntime.prepare!(scene.compute); StaticRuntime.add_listeners!(scene); scene)
 
+# A node that is read (`graph[key][]`) is resolved by the package by reading what it comes from: `resolve!(computed.parent)`, the parent being an `AbstractEdge` (an edge or an input), `edge.typed_edge[]` (a `RefValue{TypedEdge}`),
+# `input.f` (a `Function`) and `computed.value[]` (a `RefValue`). The nodes of a figure are connected (a plot's graph with its scene's), so what these hold is what all the nodes of all the graphs hold (an input function of each of
+# about 200 types): a read of any node would be compiled for all of them. `typed_node` finds what the node comes from when the program is compiled, and makes it a list of steps, in the order that the package resolves them
+# (what an edge depends on before it), each with the types of its own edge or input; reading the node is doing the steps and reading its reference. A step does nothing when what it resolves is not dirty, as in the package (an
+# input that changed makes everything that depends on it dirty: `mark_dirty!`).
+struct InputStep{F,V}
+    input::CP.Input{CP.ComputeGraph}
+    f::F # (the function of the input, a `StagedInputFunction` that sets the reference of the node: see `prepare!`)
+end
+
+struct EdgeStep{TE<:CP.TypedEdge,IT<:Tuple}
+    edge::CP.ComputeEdge{CP.ComputeGraph}
+    typed::TE # (`IT`: the types of the values of its inputs when the program was compiled, see `typed_inputs`)
+end
+
+struct TypedNode{R<:Base.RefValue,S<:Tuple}
+    node::CP.Computed
+    ref::R
+    steps::S
+end
+
+@noinline function run_step!(s::InputStep{F,V}) where {F,V}
+    input = s.input
+    input.dirty || return nothing
+    value = input.value
+    # (the type of the value of the input when the program was compiled: one of another type, set by the program, is one that the steps were not made for)
+    value isa V || error("the input `", input.name, "` of a compute graph was given a value of another type than it had when the program was compiled (", V, "): call `typed_node` with the value of that type")
+    s.f(value::V)
+    input.dirty = false
+    input.output.dirty = true
+    for edge in input.dependents
+        CP.mark_input_dirty!(input, edge)
+    end
+    input.output.dirty = false
+    return nothing
+end
+
+@noinline function run_step!(s::EdgeStep)
+    edge = s.edge
+    CP.isdirty(edge) || return nothing
+    lock(edge.graph.lock)
+    try
+        resolve_step!(s.typed, s)
+        edge.got_resolved[] = true
+        fill!(edge.inputs_dirty, false)
+        for dep in edge.dependents
+            CP.mark_input_dirty!(edge, dep)
+        end
+        for node in edge.outputs
+            node.dirty = false
+        end
+    finally
+        unlock(edge.graph.lock)
+    end
+    return nothing
+end
+
+# The references of some nodes are `RefValue{Any}` (Makie's `args` and `dim_converted` of a plot: their type can change), and what a callback is given of them is an `Any`, which it splats (`convert_arguments(P, args...)`): the
+# inputs of an edge are read here as the types that they had when the program was compiled. One of another type stops the program, as one of the outputs does (`narrow_result`).
+@noinline input_type_error(name::Symbol, @nospecialize(T)) = error("the node `", name, "` of a compute graph has a value of another type than it had when the program was compiled (", T, ")")
+
+@generated function typed_inputs(inputs::NamedTuple{N}, ::Type{IT}) where {N,IT<:Tuple}
+    reads = map(1:length(N)) do i
+        T = fieldtype(IT, i)
+        :(let v = inputs[$i][]; v isa $T || input_type_error($(QuoteNode(N[i])), $T); v::$T end)
+    end
+    return :(NamedTuple{N}(($(reads...),)))
+end
+
+# (the same as `resolve!` of a typed edge above, with the inputs read as their types)
+function resolve_step!(edge::CP.TypedEdge{<:Any,<:NamedTuple}, ::EdgeStep{TE,IT}) where {TE,IT}
+    if any(edge.inputs_dirty)
+        dirty = CP._get_named_change(edge.inputs, edge.inputs_dirty)
+        result = edge.callback(typed_inputs(edge.inputs, IT), dirty, typed_outputs(edge.outputs))
+        if result isa Tuple
+            length(result) == length(edge.outputs) || CP.throw_length_mismatch(edge, result)
+            CP.set_result!(edge, result)
+        elseif isnothing(result)
+            foreach(x -> x.dirty = false, edge.output_nodes)
+        else
+            CP.throw_invalid_result(result)
+        end
+    end
+    return
+end
+resolve_step!(edge::CP.TypedEdge{<:Any,<:NamedTuple,typeof(CP.compute_identity)}, ::EdgeStep) = CP.resolve!(edge)
+
+@generated function run_steps!(steps::S) where {S<:Tuple}
+    return Expr(:block, (:(run_step!(steps[$i])) for i in 1:fieldcount(S))..., :(return nothing))
+end
+
+Base.getindex(t::TypedNode) = (run_steps!(t.steps); t.ref[])
+
+function collect_steps!(steps::Vector{Any}, seen::Base.IdSet{Any}, node::CP.Computed)
+    CP.hasparent(node) || return
+    p = node.parent
+    p in seen && return
+    push!(seen, p)
+    if p isa CP.Input
+        p.f isa StagedInputFunction || error("a node depends on the input `", p.name, "` of a graph that `StaticRuntime.prepare!` was not called on")
+        push!(steps, InputStep{typeof(p.f),typeof(p.value)}(p, p.f))
+    else
+        for n in p.inputs
+            collect_steps!(steps, seen, n)
+        end
+        isassigned(p.typed_edge) && p.typed_edge[].outputs isa NamedTuple || error("a node depends on an edge of a graph that `StaticRuntime.prepare!` was not called on")
+        te = p.typed_edge[]
+        IT = Tuple{(isconcretetype(eltype(r)) ? eltype(r) : typeof(r[]) for r in values(te.inputs))...}
+        push!(steps, EdgeStep{typeof(te),IT}(p, te))
+    end
+    return
+end
+
+function StaticRuntime.typed_node(graph::CP.ComputeGraph, key::Symbol)
+    node = graph.outputs[key]
+    node[]
+    steps = Any[]
+    collect_steps!(steps, Base.IdSet{Any}(), node)
+    return TypedNode(node, node.value, Tuple(steps))
+end
+
+# An input that the program sets (`input[] = value`, as `update!(graph; key = value)` does). The package then notifies the observables in `graph.obs_to_update` (a `Vector{Observable}`, of the `onchange` of each graph that the change
+# reaches), which is a call over all the observables of the program and all their listeners: the graphs that the input reaches are found when it is made, and their `onchange` and its listeners are kept with their types.
+struct TypedInput{V,L<:Tuple}
+    input::CP.Input{CP.ComputeGraph}
+    graphs::L # (for each graph that a change of the input reaches: its `onchange`, and a tuple of the listeners of it)
+end
+
+function notify_listeners(fs::Tuple, val)
+    for f in fs # (a tuple: one call for each, with its type)
+        result = f(val)
+        result isa Makie.Observables.Consume && result.x && return true
+    end
+    return false
+end
+
+function has_identical(v::Vector, x)
+    for y in v
+        y === x && return true
+    end
+    return false
+end
+
+@noinline notify_graph(obs, fs::Tuple, pending::Vector) = (has_identical(pending, obs) && notify_listeners(fs, obs.val); nothing)
+
+# (a generated function, which can not make a closure: the work is in the functions that it calls)
+@generated function notify_graphs!(graphs::L, pending::Vector) where {L<:Tuple}
+    return Expr(:block, (:(notify_graph(graphs[$i][1], graphs[$i][2], pending)) for i in 1:fieldcount(L))..., :(return nothing))
+end
+
+function Base.setindex!(t::TypedInput{V}, value) where {V}
+    value isa V || error("the input `", t.input.name, "` of a compute graph is set to a value of another type than it had when the program was compiled (", V, ")")
+    input = t.input
+    graph = input.graph
+    lock(graph.lock)
+    try
+        old = input.value
+        old isa V && CP.is_same(old, value) && return value
+        setfield!(input, :value, value)
+        CP.mark_dirty!(input, graph.obs_to_update)
+        notify_graphs!(t.graphs, graph.obs_to_update)
+        empty!(graph.obs_to_update)
+    finally
+        unlock(graph.lock)
+    end
+    return value
+end
+
+function reached_graphs!(found::Vector{Any}, edges)
+    for edge in edges
+        any(g -> g === edge.graph, found) || push!(found, edge.graph)
+        reached_graphs!(found, edge.dependents)
+    end
+    return found
+end
+
+function StaticRuntime.typed_input(graph::CP.ComputeGraph, key::Symbol)
+    input = graph.inputs[key]::CP.Input{CP.ComputeGraph}
+    graphs = reached_graphs!(Any[graph], input.dependents)
+    entries = Tuple((g.onchange, Tuple(l[2] for l in g.onchange.listeners)) for g in graphs)
+    return TypedInput{typeof(input.value),typeof(entries)}(input, entries)
+end
+
 # (an edge that gives its inputs as its outputs, which a node of another graph is connected with: the method of the package for it, which the one below would be used in place of)
 @device_override function CP.resolve!(edge::CP.TypedEdge{IT,OT,typeof(CP.compute_identity)}) where {IT,OT<:NamedTuple}
     for i in eachindex(edge.inputs_dirty)
@@ -202,10 +385,16 @@ StaticRuntime.prepare!(scene::Scene) = (StaticRuntime.prepare!(scene.compute); S
     return
 end
 
+# What a callback is given as what the outputs have now (`last`), with the types of their references: of one that is a `RefValue{Any}`, `Any` (`map(getindex, outputs)` makes a named tuple of the types of the values, which for
+# such a reference is not known, and the type of the output that the result is converted to, `narrow_result`, is then not known either)
+@generated function typed_outputs(outputs::NamedTuple{N,RT}) where {N,RT<:Tuple}
+    return :(NamedTuple{N,Tuple{$((eltype(fieldtype(RT, i)) for i in 1:length(N))...)}}(($((:(outputs[$i][]) for i in 1:length(N))...),)))
+end
+
 @device_override @noinline function CP.resolve!(edge::CP.TypedEdge{<:Any,<:NamedTuple})
     if any(edge.inputs_dirty)
         dirty = CP._get_named_change(edge.inputs, edge.inputs_dirty)
-        result = edge.callback(map(getindex, edge.inputs), dirty, map(getindex, edge.outputs))
+        result = edge.callback(map(getindex, edge.inputs), dirty, typed_outputs(edge.outputs))
         if result isa Tuple
             length(result) == length(edge.outputs) || CP.throw_length_mismatch(edge, result)
             CP.set_result!(edge, result)
@@ -312,9 +501,11 @@ struct StagedInputFunction{F,R<:CP.RefValue} <: Function
     f::F
     ref::R
 end
+# (it gives what the function gave as well: in Julia, where the package resolves the input, the package sets the reference of the node to it, which is the same)
 function (s::StagedInputFunction)(x)
-    s.ref[] = CP.deref(s.f(x))
-    return nothing
+    result = s.f(x)
+    s.ref[] = CP.deref(result)
+    return result
 end
 
 @device_override function CP.resolve!(input::CP.Input{CP.ComputeGraph})
