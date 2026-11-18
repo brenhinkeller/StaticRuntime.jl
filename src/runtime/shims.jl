@@ -382,6 +382,16 @@ define linkonce_odr void @jl_gc_run_pending_finalizers(ptr %ptls) {
   ret void
 }
 
+; A region in which the thread lets the collector run while C code runs (HiGHS calls its solver in one): a program has one thread, and its collector runs only
+; when it allocates, so there is nothing to do; the state that is given back is that of a thread that was not in such a region.
+define linkonce_odr i8 @jl_gc_safe_enter() {
+  ret i8 0
+}
+
+define linkonce_odr void @jl_gc_safe_leave(i8 %state) {
+  ret void
+}
+
 define linkonce_odr ptr @jl_cstr_to_string(ptr %p) {
   %s = call ptr @ijl_cstr_to_string(ptr %p)
   ret ptr %s
@@ -635,7 +645,7 @@ const RUNTIME_SHIM_FUNCTIONS = (
     "ijl_box_int8", "ijl_box_uint8", "ijl_box_int16", "ijl_box_uint16", "ijl_box_float32", "ijl_box_float64",
     "ijl_alloc_string", "ijl_pchar_to_string", "jl_pchar_to_string", "ijl_cstr_to_string", "jl_cstr_to_string", "jl_string_to_genericmemory", "jl_genericmemory_to_string",
     "jl_genericmemory_copyto",
-    "ijl_gc_add_ptr_finalizer", "jl_gc_have_pending_finalizers", "jl_gc_run_pending_finalizers",
+    "ijl_gc_add_ptr_finalizer", "jl_gc_have_pending_finalizers", "jl_gc_run_pending_finalizers", "jl_gc_safe_enter", "jl_gc_safe_leave",
     "ijl_ptr_to_genericmemory", "jl_ptr_to_genericmemory", "static_new_task",
 )
 

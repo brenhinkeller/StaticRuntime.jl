@@ -170,12 +170,11 @@ there are no threads. `Random.seed!(seed)` on the default generator does not wor
 
 ### UnicodePlots
 
-`UnicodePlots` (plots written to the terminal) is supported for `lineplot`, `scatterplot`, `stairs`, `barplot`, `histogram` (horizontal and `vertical = true`), `boxplot`, `densityplot`, `heatmap` (of a matrix of numbers), `polarplot`, `contourplot`,
+`UnicodePlots` (plots written to the terminal) is supported for `lineplot`, `scatterplot`, `stairs`, `barplot`, `histogram` (horizontal and `vertical = true`), `boxplot`, `densityplot`, `heatmap` (of a matrix of `Float64`s), `polarplot`, `contourplot`,
 `surfaceplot`, `spy`, and the functions that change a plot (`lineplot!`, `scatterplot!`, `barplot!`, `hline!`, `vline!`, `annotate!`, `title!`, `xlabel!`, `ylabel!`), with a `title` and labels for the axes (`xlabel`, `ylabel`), `color`, `name` and `border` (an extension
 of this package, `StaticRuntimeUnicodePlotsExt`; tests in `test/packages/unicodeplots.jl`): `println(lineplot(x, y; width = 40, height = 10, xlabel = "x"))` in a program writes what Julia writes. The package decides the type of the canvas, and of the plot, by values that are only known
 when it runs (the scale of an axis, the keywords that are left after the plot's own are taken out, the limits of an axis and of the colors, a keyword that is of one of two types), which a program has to have as types: those are written again in the extension. Limits: only the default scale
-of an axis (`:identity`) is supported, and any other is an error when the program runs; the same for the `zscale` of a `surfaceplot` and its mesh lines (`lines = true`); a color map other than the default is an error when it is not of the type of the default; `histogram`, `polarplot`,
-`heatmap` and `surfaceplot` are for vectors and matrices of numbers; the canvas can be chosen (`canvas = AsciiCanvas`, `BlockCanvas`, `DotCanvas`); the points of a 3D plot (`surfaceplot`) are
+of an axis (`:identity`) is supported, and any other is an error when the program runs; the same for the `zscale` of a `surfaceplot` and its mesh lines (`lines = true`); a color map other than the default is an error when it is not of the type of the default; `histogram` is for vectors of numbers, and `polarplot`, `heatmap` and `surfaceplot` for vectors and matrices of `Float64`s (the limits of the colors and of the axes of the others are printed as their own types, which the overlays of the extension do not have: those are refused when compiling); the canvas can be chosen (`canvas = AsciiCanvas`, `BlockCanvas`, `DotCanvas`); the points of a 3D plot (`surfaceplot`) are
 projected with floating point numbers, and a point on the border of a pixel may be in another one than in Julia. Not supported: `isosurface`, `imageplot`, `geoplot`, `gridplot` and `savefig`.
 
 ### SciML (differential equations)
@@ -185,7 +184,7 @@ projected with floating point numbers, and a point on the border of a pixel may 
 `save_everystep`, `DiscreteCallback` and `ContinuousCallback`, for scalars, `Vector`s and `SVector`s, and the solution (`sol.u`, `sol.t`, `sol(t)`). Compiling takes about 10 to 20 seconds for each program. `ODEProblem(f, u0, tspan, p)`, which finds out whether `f` changes its
 first argument when it runs, is `Any` to the compiler (to Julia as well), so the problem has to be made with `{iip, FullSpecialize}`; `solve(prob)` without a method (the default one, that picks among many) and the packages that make equations from symbols (`ModelingToolkit`) are not
 supported. Two things that these packages do are done by extensions: `FunctionWrappers` keeps its function in a pointer to a function of the runtime, which a program does not have (`ext/StaticRuntimeFunctionWrappersExt.jl`: the call is made through the function that the wrapper holds), and a message of
-`SciMLLogging` (`lazy"..."`) is made with a loop over its parts, which is made static for `LazyString` in general.
+`SciMLLogging` (`lazy"..."`) is not made into text: its parts are a tuple whose types are not known when compiling, so a program that shows one stops with an error that says so (the messages are not shown by default).
 
 ## Code from packages
 

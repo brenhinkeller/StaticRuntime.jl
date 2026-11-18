@@ -12,9 +12,13 @@ using FunctionWrappers: FunctionWrappers, FunctionWrapper
 # (no pointer to a function of the runtime: it is not used)
 @device_override FunctionWrappers.gen_fptr(::Type, ::Type, ::Type) = Ptr{Cvoid}(0)
 
+# (the arguments are converted to the types of the signature, and the result to its type, as the wrapper does before and after its call)
 @device_override @inline function (f::FunctionWrapper{Ret,Args})(args...) where {Ret,Args}
     obj = getfield(f, :obj)
-    return FunctionWrappers.convert_ret(Ret, obj[](args...))
+    return FunctionWrappers.convert_ret(Ret, obj[](convert_arguments(Args, args)...))
+end
+@generated function convert_arguments(::Type{Args}, args::Tuple) where {Args<:Tuple}
+    return Expr(:tuple, (:(convert($(fieldtype(Args, i)), args[$i])) for i in 1:fieldcount(Args))...)
 end
 
 end # module

@@ -141,8 +141,8 @@ nested_custom_deepcopy() = length(deepcopy([CustomCopy([1, 2, 3])])[1].v)
 
 @testset "`deepcopy` of a type that has a `deepcopy_internal` method" begin
     for f in (custom_deepcopy, nested_custom_deepcopy)
-        # (compiling says so, once for each type)
-        status, detail = f === custom_deepcopy ? (@test_logs (:warn, r"deepcopy_internal") match_mode = :any static_status(f)) : static_status(f)
+        # (compiling says so, once for each type, in each compilation)
+        status, detail = @test_logs (:warn, r"deepcopy_internal") match_mode = :any static_status(f)
         @testset "$(nameof(f))" begin
             @test status in (:compile_error, :runtime_error) # (not the wrong answer)
         end

@@ -18,7 +18,7 @@
     "println nothing"       => () -> (println(); println(nothing); println(missing); 1),
     "println Symbol/Float32" => () -> (println(:sym, ' ', 1.5f0, ' ', 0x1f, ' ', -3); 1),
     "big output"            => () -> (for i in 1:2000; print(i, ' '); end; println(); 1),
-    ]; broken = ("stdout", "stderr",))
+    ])
 end
 
 @testset "Functions, `Colon()`, summaries and types written to a buffer" begin
@@ -44,5 +44,15 @@ sty_color(name) = Symbol(Base.inferencebarrier(name))
         "the style is the color"   => () -> (printstyled(IOContext(STDOUT, :color => true), "b\n"; color = :bold, bold = true); 0),
         "STDERR"                   => () -> (printstyled(IOContext(STDERR, :color => true), "e\n"; color = :yellow); 0),
         "to a string"              => () -> (s = sprint(io -> printstyled(IOContext(io, :color => true), "s"; color = :red)); println(ncodeunits(s)); 0),
+    ])
+end
+
+# The streams of Julia (`stdout`, `stderr`, `stdin`) are the streams of libc in a program: packages write to them as the default of an `io`
+@testset "stdout and stderr of Base" begin
+    check_cases([
+        "print, show, @printf"  => () -> (print(stderr, "e", opaque(4)); show(stdout, opaque(5)); println(); @printf(stdout, "%d %s\n", opaque(6), "a"); 0),
+        "io = stdout default"   => () -> (f(io = stdout) = println(io, opaque(7)); f(); 0),
+        "flush"                 => () -> (println("a"); flush(stdout); flush(stderr); 0),
+        "IOContext of stdout"   => () -> (println(IOContext(stdout, :compact => true), opaque(8)); 0),
     ])
 end

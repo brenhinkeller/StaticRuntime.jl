@@ -15,7 +15,6 @@ const DEEPCOPY_ATOMS = Union{Symbol, Core.MethodInstance, Method, GlobalRef, Dat
 # The methods of `deepcopy_internal` that are not Base's (a package's own, for its types). A generated function can't look at the methods (reflection is not
 # allowed in it), so they are looked up when compiling (`register_custom_deepcopy!`, which the functions that compile call) and kept in this list, which
 # the generator reads (the list is in the registry, see registry.jl); as with the registered types of dispatch, what is inferred is kept apart for each state of the registry (its version).
-const WARNED_DEEPCOPY = Set{Any}()
 function register_custom_deepcopy!()
     for m in methods(Base.deepcopy_internal)
         m.module === Base && continue
@@ -113,8 +112,8 @@ end
     # program says so, and doesn't copy the fields instead, which would be a different result
     custom = custom_deepcopy_methods(T)
     if !isempty(custom)
-        T in WARNED_DEEPCOPY || (push!(WARNED_DEEPCOPY, T); @warn string("`deepcopy` of a `", T, "` is not supported in standalone binaries: a method of `deepcopy_internal` defined by a package (",
-                                                                         join(custom, ", "), ") applies to it, and is not used there (the fields would be copied one by one, which is not what it does). The program stops if it reaches it."))
+        compile_warning!((:deepcopy, T), string("`deepcopy` of a `", T, "` is not supported in standalone binaries: a method of `deepcopy_internal` defined by a package (",
+                                                join(custom, ", "), ") applies to it, and is not used there (the fields would be copied one by one, which is not what it does). The program stops if it reaches it."))
     end
     isempty(custom) || return :(error(string("deepcopy of a ", $(string(T)), ": a method of `deepcopy_internal` defined by a package (",
                                              $(join(custom, ", ")), ") is not used in standalone binaries")))

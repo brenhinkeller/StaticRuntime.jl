@@ -3,7 +3,7 @@
 
 module StaticRuntimeMakieExt
 
-using StaticRuntime: StaticRuntime, @device_override, add_dispatch_candidates!, add_callback!, call_callback
+using StaticRuntime: StaticRuntime, @device_override, add_callback!, call_callback
 using Makie: Makie, Scene, SSAO, Attributes
 
 # The finalizer of a `Scene` frees what the screens of a backend hold: there are no screens that the program has not closed
@@ -332,11 +332,5 @@ end
 # The observable of a node of the graph is made when it is first asked for, of the type of the value that the node has then (`Observable{eltype(val.value)}`): a type that is made when the program runs.
 # The observables of a program are the ones that were asked for when it was compiled (`get_observable!(graph, name)`, or `on(f, graph[name])`), and what is asked for later is one of these.
 @device_override CP.get_observable!(attr::CP.ComputeGraph, key::Symbol; use_deepcopy = true) = attr.observables[key]
-
-# The values of the attributes are of any type: these are the ones that they have in the theme (the colors and vectors of the lights, the nested `Attributes`, the size)
-function __init__()
-    add_dispatch_candidates!(Attributes, Makie.RGBf, Makie.Vec3f, Tuple{Int,Int})
-    return nothing
-end
 
 end # module

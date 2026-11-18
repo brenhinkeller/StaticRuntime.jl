@@ -41,6 +41,7 @@ struct Settings
     split_limit::Int
     dispatch_limit::Int
     slot_limit::Int
+    share_cache::Bool               # `STATIC_RUNTIME_CACHE=1`: what is inferred is kept for the compilations that follow (faster; not what compiling is for: see `Compilation.id`)
 end
 
 function Settings(; strict::Bool = true)
@@ -55,7 +56,8 @@ function Settings(; strict::Bool = true)
                     get(ENV, "STATIC_RUNTIME_NOSPECIALIZEINFER", "1") != "0",
                     haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY"),
                     String[s for s in split(get(ENV, "STATIC_RUNTIME_SLOTS_BLIND", ""), ',') if !isempty(s)],
-                    SPLIT_LIMIT[], DISPATCH_LIMIT[], SLOT_LIMIT[])
+                    SPLIT_LIMIT[], DISPATCH_LIMIT[], SLOT_LIMIT[],
+                    get(ENV, "STATIC_RUNTIME_CACHE", "0") == "1")
 end
 
 # (`hash` of a struct that has a `Vector` is not that of what is in it)
@@ -91,10 +93,11 @@ mutable struct ClosureState
     optimized::Int                                                         # (for `STATIC_RUNTIME_TRACE`) the methods that were optimized in this pass, and which of them
     optimized_unique::Set{Any}
     slowest::Vector{Tuple{Float64,Any,Int}}                                # (for `STATIC_RUNTIME_TRACE`) the methods that took longest to optimize in this pass: (seconds, the method, statements before optimizing)
+    sink::Any                                                              # where what is found of the code that is being optimized is also kept (`InferenceFindings`), while it is
     box_function_seen::Bool                                                # a function is in a `Core.Box` that a constant has (the variable of a closure that is made by code that is not compiled): its type is not known by any read of the box
 end
 ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
-                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), Tuple{Float64,Any,Int}[], false)
+                              Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), Tuple{Float64,Any,Int}[], nothing, false)
 
 "What the passes know of the boxes of the closures (boxes.jl): the type of what each holds, as the last pass found it."
 mutable struct BoxState
@@ -128,20 +131,22 @@ mutable struct SlotState
     unknown_census::Vector{Tuple{SlotKey,Bool,String}}
     store_context::Any
     store_operand::Any
+    current_result::Any                      # the `InferenceResult` that is being optimized: what is found of its code is kept with it (see `record_slot_facts!`)
 end
 SlotState(mode::Symbol) = SlotState(mode, false, 0, Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{Any,Vector{Any}}(),
                                     Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{SlotKey,Set{Any}}(), Set{Any}(), false,
                                     IdDict{Any,Vector{Tuple{SlotKey,Any}}}(), nothing,
-                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing)
+                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing)
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
     registered_used::Bool
+    used_in::Set{Any}                        # the methods (inferred for all that they are called with) whose code made a call over the registered types, in this compilation
     registered_calls::Dict{String,Int}
     unions::Dict{Any,Any}                    # `registered_union` of a type: the same for a whole pass
     signatures::Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}} # the signatures of the methods of a function (it depends on the method table that this compilation looks them up in)
 end
-DispatchState() = DispatchState(false, Dict{String,Int}(), Dict{Any,Any}(), Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}())
+DispatchState() = DispatchState(false, Set{Any}(), Dict{String,Int}(), Dict{Any,Any}(), Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}())
 
 ## The compilation
 
@@ -156,13 +161,40 @@ mutable struct Compilation
     dispatch::DispatchState
     nospecializeinfer::Vector{Method}        # the methods whose `@nospecializeinfer` was cleared for as long as the compilation runs (see `restore_nospecializeinfer!`)
     libraries::Base.RefValue{Runtime.LibraryPlan} # the libraries that the program calls, when it has been linked (`libraries = :bundle` copies them)
+    id::Int                                  # what the cache of inference of this compilation is called (`OverridesParams`): its own, that nothing that another compilation inferred is in, and that is emptied when it ends (see `purge_inferred!`)
+    inferred::Vector{Tuple{Core.MethodInstance,Any}} # the methods that this compilation inferred, and the owners of the code instances that were made
+    closed_subtypes::Dict{Tuple{Any,UInt,Int},Any} # the subtypes of an abstract type that are listed, by the type, the world and the limit (see `listed_union`)
+    user_modules::Dict{Module,Bool}          # whether a module is the program's (see `user_module`)
+    julia_owned::Dict{Module,Bool}           # whether a module is one of Julia's own (see `julia_owned_module`)
+    warnings::Vector{Pair{Any,String}}       # what inference has to say to the user (each once, by its key): said when the compilation ends, and not where it is found (see `compile_warning!`)
 end
 
 function Compilation(settings::Settings = Settings(), registered::Registered = Registered())
-    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), Method[], Ref(Runtime.LibraryPlan()))
+    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[])
     append!(c.closures.callbacks, registered.callbacks) # (those that exist before the program: see `add_callback!`)
     c.key = inference_key(c)
     return c
+end
+
+# The name of the cache of inference of a compilation: one that is not the name of any other (made of the time, the process and a count: a process that loads this package from its compiled image has the code instances that the
+# workload of `precompile.jl` made, which are those of names that were made then, and which no compilation finds), or `0`, the one that all compilations share, if `STATIC_RUNTIME_CACHE=1`
+const COMPILATION_COUNT = Threads.Atomic{Int}(0)
+new_compilation_id(settings::Settings) = settings.share_cache ? 0 : Int(hash((time_ns(), getpid(), Threads.atomic_add!(COMPILATION_COUNT, 1))) >> 1)
+
+# Something to say to the user that is found while a method is inferred (the code of a `@generated` function is run then, which can't write to a terminal: that is a switch of tasks, which is not allowed in it, and the log is lost with
+# an error): it is kept, each once, and said when the compilation ends.
+function compile_warning!(key, message::AbstractString)
+    c = CURRENT_COMPILATION[]
+    c === nothing && return nothing
+    any(w -> isequal(first(w), key), c.warnings) || push!(c.warnings, Pair{Any,String}(key, String(message)))
+    return nothing
+end
+function say_warnings!(c::Compilation)
+    for (_, message) in c.warnings
+        @warn message
+    end
+    empty!(c.warnings)
+    return nothing
 end
 
 const CURRENT_COMPILATION = Ref{Union{Nothing,Compilation}}(nothing)
@@ -182,8 +214,9 @@ end
 
 "Run `f(c)` with the compilation `c` that is made for it, and put back what was changed in the methods of Julia (`@nospecializeinfer`) and the compilation that was made before (if there was one), when it ends, however it does."
 function with_compilation(f; strict::Bool = true)
-    c = Compilation(Settings(; strict))
     lock(COMPILATION_LOCK) do
+        # (a compilation is made of what it is given and of what was registered, and of nothing that another compilation left: what it finds is in the compilation, and what inference made is not found by another)
+        c = Compilation(Settings(; strict))
         previous = CURRENT_COMPILATION[]
         CURRENT_COMPILATION[] = c
         LAST_COMPILATION[] = c
@@ -192,6 +225,8 @@ function with_compilation(f; strict::Bool = true)
         finally
             CURRENT_COMPILATION[] = previous
             restore_nospecializeinfer!(c)
+            purge_inferred!(c)
+            say_warnings!(c)
         end
     end
 end

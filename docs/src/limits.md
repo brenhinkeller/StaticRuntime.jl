@@ -40,6 +40,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 
 * **Tasks run to their end** (see [Tasks](@ref) below): `@async`, `Threads.@spawn`, `Task`, `schedule`, `wait`, `fetch`, `yield`, `@sync`, `Condition` and `Channel` work, on the one thread, and a task runs when something waits.
 
+* **A `NamedTuple` (or the keywords of a call) that holds a value of a small union of types** (`f(x; bgcol = c)` with `c` a `UInt32` or `missing`, `merge` of such) has the union as the type of its field: `@NamedTuple{bgcol::Union{Missing,UInt32}}`, where Julia's is that of the value, `@NamedTuple{bgcol::UInt32}`. `typeof` says so, and a method for the one is not a method for the other. (The type of the value is only known when the program runs, and Julia's way would be a call of the runtime.) A keyword whose value is a type (`canvas = AsciiCanvas`) is of the type of Julia.
 * There is **no `eval`**, and no keyword form of `invokelatest`; **`@cfunction`** of a function with captured state (a closure over a variable) does not work (see [Callbacks: `@cfunction`](@ref)). (`Regex`, `BigInt` and `BigFloat` work: see
   [Libraries: `BigInt`, `BigFloat`, `Regex`, JLLs and libraries of your own](@ref).)
 * **The heap is not thread-safe.** A program, or a library from `compile_shlib`, allocates from one thread at a time. A library that

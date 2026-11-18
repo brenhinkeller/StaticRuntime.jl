@@ -111,7 +111,7 @@ struct RegShown; v::Int; end
     @test static_status(holder(RegShown(7)))[1] == :ok
 end
 
-# What the workload inferred when the package was compiled is found by the programs that are the same, and the slots of such a program are analyzed all the same (what is true of its inference, `DISPATCH_USED_KEYS` and `SLOT_FACTS`,
+# What the workload inferred when the package was compiled is found by the programs that are the same, and the slots of such a program are analyzed all the same (what is true of its inference, `SlotFactsResult`,
 # is kept with it): a program of the workload that is compiled in another process has more than one pass, as it did when the workload compiled it
 @testset "What is found of the programs of the workload is found whole" begin
     code = """
@@ -135,20 +135,6 @@ end
     @test all(iszero, S.TASKLOCAL_RNG_STATE[])
 end
 
-# The facts that the analysis of the slots keeps for a method and a key: the ones that are found again are not added, the ones that are new are, and the order that they are found in does not matter
-@testset "Merging the facts of a method" begin
-    S = StaticRuntime
-    k1 = (:field, Pair{Int,Any}, :second)
-    k2 = (:elem, Vector{Any}, nothing)
-    a = Tuple{S.SlotKey,Any}[(k1, Int), (k2, String)]
-    @test !S.merge_slot_facts!(a, copy(a)) && length(a) == 2
-    @test !S.merge_slot_facts!(a, [(k2, String)]) && length(a) == 2
-    @test S.merge_slot_facts!(a, [(k1, Float64), (k2, String)]) && length(a) == 3
-    b = Tuple{S.SlotKey,Any}[(k1, Float64)]
-    S.merge_slot_facts!(b, [(k2, String), (k1, Int)])
-    c = copy(a)
-    @test Set(b) == Set(c) # (the same facts from either side)
-end
 
 # Types that no value has (`STATIC_RUNTIME_TRACE` says which calls give no value and have an argument of one)
 @testset "Types with Union{} as a parameter" begin

@@ -18,15 +18,47 @@ const SLOT_LIMIT = Ref(64) # the most types that a slot holds before it is given
 const UNIVERSE_LIMIT = 512
 
 # Whether this compilation has called anything over the registered types (a value of the type `Any` that it dispatched on): when it has not, there is nothing that the types of the slots would change.
-# What was inferred before is taken from the cache, where this is not seen again: so the keys of the inference cache that it was true for are kept (they are made of all that inference depends on, so what is true of one is true of
-# every compilation that has it)
-const DISPATCH_USED_KEYS = Set{Int}()
-function note_dispatch_used!(c::Compilation)
+# What was inferred before is taken from the cache, where this is not seen again: so it is kept with what is inferred (`SlotFactsResult`, of the `CodeInstance` of the method that made the call), and the methods that the
+# program reaches are asked (`dispatch_was_used`). Nothing is kept in a table that a compilation changes: what a compilation finds is its own, and what is in the cache is what inference of a method made of it.
+function note_dispatch_used!(c::Compilation, sv = nothing)
     c.dispatch.registered_used = true
-    push!(DISPATCH_USED_KEYS, c.key)
+    # (the method whose code made the call: for the inference that is of the method as it is called with any arguments, and not of the one that is made for the constants that a call has, which is not kept: see `record_slot_facts!`)
+    if sv isa CC.InferenceState && sv.result.overridden_by_const === nothing
+        push!(c.dispatch.used_in, sv.linfo)
+    end
     return
 end
-dispatch_was_used(c::Compilation) = c.dispatch.registered_used || c.key in DISPATCH_USED_KEYS
+
+# whether the program that is reached from `root` has a call over the registered types: this compilation made one, or a method that it reaches (inferred now or taken from the cache) did
+function dispatch_was_used(c::Compilation, interp, root)
+    c.dispatch.registered_used && return true
+    used = false
+    for ci in reachable_code_instances(interp, root)
+        r = slot_facts_of(ci)
+        r === nothing || r.dispatch_used && (used = true; break)
+    end
+    return used
+end
+
+# the code instances that `root` depends on, which the ones of the methods that were inlined into them are among (the edges of a method are the methods that it calls and those that were inlined into it)
+function reachable_code_instances(interp, root::Core.CodeInstance)
+    found = Core.CodeInstance[]
+    seen = Base.IdSet{Any}()
+    stack = Any[root]
+    cache = CC.code_cache(interp)
+    while !isempty(stack)
+        x = pop!(stack)
+        x in seen && continue
+        push!(seen, x)
+        ci = x isa Core.CodeInstance ? x : x isa Core.MethodInstance ? get(cache, x, nothing) : nothing
+        ci isa Core.CodeInstance || continue
+        push!(found, ci)
+        for e in ci.edges
+            (e isa Core.CodeInstance || e isa Core.MethodInstance) && push!(stack, e)
+        end
+    end
+    return found
+end
 
 ## The universe: the types that the program makes
 #
@@ -38,15 +70,16 @@ dispatch_was_used(c::Compilation) = c.dispatch.registered_used || c.key in DISPA
 # left out, and the extra pass costs half of the time of compiling. A program that gets an object of a type that it does not make has a `MethodError` that says so.)
 
 # whether a module is one of Julia's own (the standard library, Base and Core, and this package), whose types are the ones that are registered when a program is likely to have them
-# (what a module is does not change: it is kept)
-const JULIA_OWNED_MODULES = Dict{Module,Bool}()
+# (what a module is does not change: it is kept for the compilation. Outside of one, it is found each time)
 function julia_owned_module(m::Module)
-    get!(JULIA_OWNED_MODULES, m) do
-        root = Base.moduleroot(m)
-        (root === Core || root === Base || root === StaticRuntime || root === StaticTools) && return true # (the package, and what its programs are made with)
-        path = pathof(root)
-        return path !== nothing && startswith(path, Sys.STDLIB)
-    end
+    c = CURRENT_COMPILATION[]
+    return c === nothing ? find_julia_owned_module(m) : get!(() -> find_julia_owned_module(m), c.julia_owned, m)
+end
+function find_julia_owned_module(m::Module)
+    root = Base.moduleroot(m)
+    (root === Core || root === Base || root === StaticRuntime || root === StaticTools) && return true # (the package, and what its programs are made with)
+    path = pathof(root)
+    return path !== nothing && startswith(path, Sys.STDLIB)
 end
 
 # whether the objects of the concrete type `T` are not all of Julia's own types: the module that defines it is not one of Julia's, or a parameter of it is a type of that kind
@@ -300,12 +333,22 @@ function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstanc
 end
 
 # The stores of a method as they are before the inliner and the scalar replacement have been at it (a `Pair` that only holds the value that is read from a `Dict` for a moment is not there afterwards, and the type of its field is
-# read all the same), as facts about the method that are kept, so that the method is not looked at again when it is taken from the cache: (the method, the key of the cache) => the stores as (slot, type)
-# (it is a cache of what is true of a method for a key of the inference cache, which is made of all that inference depends on: it is kept for as long as what is inferred is, which is longer than a compilation)
-# (An `IdDict` by the method, and the key inside it: the key of a table that is looked in is a number made of the address of the method, which is not the same when the image of a package that has the table is loaded. Julia makes
-# an `IdDict` again when it loads one, but not every entry of it is found by what is looked for afterwards, so `rehash_slot_facts!` makes it again when this package is loaded. The workload of `precompile.jl` has filled it in, and
-# what is found of the programs of it is found with it.)
-const SLOT_FACTS = IdDict{Core.MethodInstance,Dict{Int,Vector{Tuple{SlotKey,Any}}}}()
+# read all the same), as facts about the method that are kept, so that the method is not looked at again when it is taken from the cache. They are kept *with the result of inference of the method* (`SlotFactsResult`, in the
+# `analysis_results` of the `InferenceResult`, which is those of the `CodeInstance` that is cached), and so they are what inference of that method found, for the key of the cache that it was made for, and for nothing else: no table
+# that compilations change, and no facts that another program found. (A method is also inferred for the constants that a call gives it, `getproperty(x, :a)`; that is not what is cached for the method, and what it stores is
+# a part of what the method stores for any arguments.)
+struct SlotFactsResult
+    key::Int                                  # the key of the cache that this was found for (`inference_key`)
+    facts::Vector{Tuple{SlotKey,Any}}         # the stores as (slot, type), the types that the code makes, and what it refers to that is not known
+    dispatch_used::Bool                       # whether the code of the method made a call over the registered types
+end
+
+# the facts that were kept with a code instance, or `nothing`
+function slot_facts_of(ci::Core.CodeInstance)
+    return CC.traverse_analysis_results(ci) do @nospecialize result
+        result isa SlotFactsResult ? result : nothing
+    end
+end
 
 function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstance)
     generic_setproperty(mi) && return
@@ -328,66 +371,19 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     finally
         s.facts_sink = nothing
     end
-    bykey = get!(Dict{Int,Vector{Tuple{SlotKey,Any}}}, SLOT_FACTS, mi)
-    old = get(bykey, c.key, nothing)
-    if old === nothing
-        bykey[c.key] = facts
-    elseif merge_slot_facts!(old, facts)
-        # (a method is also inferred with the constants that a call gives it (`getproperty(x, :a)`: the same method and key, and the code of the name), and what it stores is not the same for each: the facts of all of them are kept,
-        # so that they do not depend on which was first. A fact that differs for another reason is a constant whose contents changed, or a state that the key does not have: `STATIC_RUNTIME_TRACE` says which methods)
-        trace_on() && trace("the slot facts of ", mi, " now have ", length(old), " facts (more than before for the same key: the method was inferred with constant arguments, or a constant changed)")
+    result = s.current_result
+    if result isa CC.InferenceResult && result.overridden_by_const === nothing
+        CC.stack_analysis_result!(result, SlotFactsResult(c.key, facts, mi in c.dispatch.used_in))
     end
     return
 end
 
-# Add to `old` the facts of `new` that it does not have: whether there were any. (A vector, and not a `Dict`: the keys have types in them, whose hashes are those of the process, and a table made of them would have to
-# be made again when the package is loaded. An entry has a few facts.)
-function merge_slot_facts!(old::Vector{Tuple{SlotKey,Any}}, new::AbstractVector)
-    old == new && return false
-    changed = false
-    for f in new
-        any(g -> g == f, old) && continue
-        push!(old, f)
-        changed = true
-    end
-    return changed
-end
-
-# the table of the facts made again, as it has to be when it was loaded from the image of the package (the entries are all there, by iterating, and not all of them are found by their keys)
-function rehash_slot_facts!()
-    entries = collect(SLOT_FACTS)
-    empty!(SLOT_FACTS)
-    for (mi, bykey) in entries
-        SLOT_FACTS[mi] = bykey
-    end
-    return nothing
-end
-
-# The facts of every method that the code that was compiled depends on, which the inlined ones are among (the edges of a method are the methods that it calls and those that were inlined into it)
-function replay_reachable_facts!(c::Compilation, root::Core.CodeInstance)
-    seen = Base.IdSet{Any}()
-    stack = Any[root]
-    while !isempty(stack)
-        ci = pop!(stack)
-        ci in seen && continue
-        push!(seen, ci)
-        ci isa Core.CodeInstance || continue
-        ci.def isa Core.MethodInstance && replay_slot_facts!(c, ci.def)
-        for e in ci.edges
-            e isa Core.CodeInstance && push!(stack, e)
-            e isa Core.MethodInstance && replay_slot_facts!(c, e)
-        end
-    end
-    return
-end
-
-function replay_slot_facts!(c::Compilation, mi::Core.MethodInstance)
+# What a code instance that was reached has kept (see `SlotFactsResult`): its facts are those of the program that reaches it
+function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
     s = c.slots
-    bykey = get(SLOT_FACTS, mi, nothing)
-    bykey === nothing && return
-    facts = get(bykey, c.key, nothing)
-    facts === nothing && return
-    for (key, T) in facts
+    r = slot_facts_of(ci)
+    (r === nothing || r.key != c.key) && return
+    for (key, T) in r.facts
         key[1] === :raw ? push!(s.raw_store_types, key[2]) : key[1] === :universe ? push!(s.universe_seen, key[2]) : key[1] === :truncated ? (s.scan_truncated = true) : note_slot_store!(c, key, T)
     end
     return
@@ -516,7 +512,8 @@ end
 function analyze_slots!(c::Compilation, interp, root)
     s = c.slots
     s.mode === :off && return
-    (isempty(s.types) && !dispatch_was_used(c) && s.mode !== :observe) && return
+    used = dispatch_was_used(c, interp, root)
+    (isempty(s.types) && !used && s.mode !== :observe) && return
     # (what the roots that were made before in this pass stored is kept: a `@cfunction` is a root of its own, and the slots are those of the whole program)
     for (ci, src) in GPUCompiler.CompilerCaching.get_codeinfos(interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
@@ -524,7 +521,9 @@ function analyze_slots!(c::Compilation, interp, root)
         note_universe_statements!(c, src.ssavaluetypes isa Vector ? src.ssavaluetypes : Any[], src.code, ci.def)
         note_slots_in_constants!(c, src.code)
     end
-    replay_reachable_facts!(c, root)
+    for ci in reachable_code_instances(interp, root)
+        replay_slot_facts!(c, ci)
+    end
     if s.scan_truncated
         # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
         @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
@@ -544,10 +543,11 @@ function analyze_slots!(c::Compilation, interp, root)
     c.settings.why && report_why(c)
     changed = update_slot_types!(c)
     # (the types that the program makes, that a call over an `Any` is made over: the ones found that were not used in this pass are used in the next)
-    if c.settings.universe && dispatch_was_used(c)
+    if c.settings.universe && used
         add_stored_types!(c)
         new = Any[t for t in s.universe_seen if !(t in s.universe)]
-        length(s.universe) + length(new) > UNIVERSE_LIMIT && (new = new[1:max(0, UNIVERSE_LIMIT - length(s.universe))])
+        # (the ones that are kept when there are too many are the first by name: which they are does not depend on the order that they were found in)
+        length(s.universe) + length(new) > UNIVERSE_LIMIT && (new = sort!(new; by = string)[1:max(0, UNIVERSE_LIMIT - length(s.universe))])
         if !isempty(new)
             union!(s.universe, new)
             empty!(s.universe_extras)
@@ -599,7 +599,10 @@ end
 
 function GPUCompiler.drive_inference!(interp::OverridesInterpreter, mi::Core.MethodInstance)
     root = @invoke GPUCompiler.drive_inference!(interp::CC.AbstractInterpreter, mi::Core.MethodInstance)
-    root isa Core.CodeInstance && analyze_slots!(compilation(), interp, root)
+    if root isa Core.CodeInstance
+        replay_findings!(compilation(), interp, root) # (what inference found of the methods that were taken from the cache: see `InferenceFindings`)
+        analyze_slots!(compilation(), interp, root)
+    end
     return root
 end
 

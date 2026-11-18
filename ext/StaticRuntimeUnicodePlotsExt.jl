@@ -76,7 +76,7 @@ end
 
 # `heatmap` of a matrix of numbers. The original gives the limits of the colors as `(0, 0)` and then the extrema of the matrix (integers, then of the type of the elements), and keeps the function that makes the colors in a variable that is
 # one of two functions (that of the colors of an image, or that of the color map), so that the keywords of the plot are a `NamedTuple` of a type that has unions of types in it, and merging it with the keywords of the call (`filter(...)...`) gives a
-# `NamedTuple` that the compiler does not know the type of. Here the limits are `Float64`s and the function is the color map's (the rest is as the package has it: for matrices of numbers only; an image is not).
+# `NamedTuple` that the compiler does not know the type of. Here the limits are `Float64`s and the function is the color map's (the rest is as the package has it), for a matrix of `Float64`s: the limits of another type are printed as that type, which `Float64`s are not, so those are left to the package (and are refused when compiling).
 @device_override function UnicodePlots.heatmap(
         A::AbstractMatrix{T};
         xlim = UnicodePlots.KEYWORDS.xlim,
@@ -96,7 +96,7 @@ end
         labels::Bool = UnicodePlots.KEYWORDS.labels,
         array::Bool = false,
         kw...,
-    ) where {T <: Real}
+    ) where {T <: Float64}
     pkw, okw = UnicodePlots.split_plot_kw(kw)
     UnicodePlots.warn_on_lost_kw(okw)
 
@@ -214,8 +214,8 @@ end
 end
 
 # `polarplot`: the limit of the radius is `(0, 0)` (two integers) when it is not given, and the largest radius is then the maximum of the data or the integer that was given: one of two types, which makes the limits of the axes, the keywords of the plot and
-# the grid that is drawn have types that are unions. The limits are `Float64`s here, and the rest is as the package has it (for a vector of radii: a function is not).
-@device_override function UnicodePlots.polarplot(θ::AbstractVector, r::AbstractVector; rlim = (0, 0), kw...)
+# the grid that is drawn have types that are unions. The limits are `Float64`s here, and the rest is as the package has it, for a vector of `Float64` radii (others are left to the package, as their limits are printed as their own type).
+@device_override function UnicodePlots.polarplot(θ::AbstractVector, r::AbstractVector{Float64}; rlim = (0, 0), kw...)
     pkw, okw = UnicodePlots.split_plot_kw(kw)
 
     max_r = Float64(last(UnicodePlots.is_auto(rlim) ? extrema(r) : rlim))
@@ -238,7 +238,7 @@ end
 @device_override function UnicodePlots.polarplot!(
         plot::UnicodePlots.Plot{<:UnicodePlots.Canvas},
         θ::AbstractVector,
-        r::AbstractVector;
+        r::AbstractVector{Float64};
         rlim = (0, 0),
         degrees = true,
         num_rad_lab = 3,
@@ -317,8 +317,8 @@ end
         plot::UnicodePlots.Plot{<:UnicodePlots.Canvas},
         X::AbstractMatrix,
         Y::AbstractMatrix,
-        Z::AbstractMatrix,
-        H::Union{AbstractMatrix, Nothing} = nothing;
+        Z::AbstractMatrix{Float64},
+        H::Union{AbstractMatrix{Float64}, Nothing} = nothing;
         color::UnicodePlots.UserColorType = nothing,
         colormap = UnicodePlots.KEYWORDS.colormap,
         lines::Bool = false,

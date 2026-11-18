@@ -53,6 +53,9 @@ were found. The compiler finds the stores in the code that it compiles and in th
 A compilation is made in passes (the types of functions, callbacks, boxes and the slots of containers that one pass finds are what the next is made with). Nothing is written about them by default. Two variables, for
 looking at a compilation that takes long, or ends in "did not settle":
 
+- **A compilation is made of its program and of nothing else.** What was compiled before does not change what is compiled: the tables that compilations keep are forgotten when one begins, and what inference makes (the code instances of Julia's compiler) has a cache of its own for each compilation, which is emptied when it ends.
+  Only what is not made by compiling persists: the overrides, the registrations (`add_dispatch_candidates!`, `add_show_candidates!`, `add_callback!`, `prepare!`, ...) and the settings. `STATIC_RUNTIME_CACHE=1` makes compilations share what they infer (a compilation is then
+  quicker, and the facts that the analysis finds of each method are kept with it, so that it should not matter; `test/core/determinism.jl` compiles the same programs in other orders, and again, and checks that they are the same).
 - `STATIC_RUNTIME_TRACE=1` writes a line for each pass on the error output: how long it took, whether it was cut short by a change of the types of the slots or completed or failed, the candidates of the calls of
   unknown functions that it has and found (and why they were taken, or not), the number of methods that were optimized (and how many of them were different: a pass that optimizes the same methods again and again is
   where the time goes), and whether there is another pass. `STATIC_RUNTIME_TRACE=methoderrors` also lists the calls that have no method for the types that reach them (most are on paths that are never taken: they are what
@@ -93,12 +96,19 @@ Which types the union has depends on the type of the argument:
   that was not there is a `MethodError`, as in Julia. A package that defines more subtypes of `Shape` adds them to the union, and
   their methods to the code. (`StaticRuntime.DISPATCH_LIMIT[]` is the limit of 16.)
 * **`Any`, and abstract types that can't be listed** (`Number`, `AbstractString`, `AbstractArray`, or one that has a parametric
-  subtype whose instances are not known): the union is of the types that are *registered*, that are subtypes of it. These are
-  the numbers, `String`, `Char`, `Symbol`, `Nothing` and `Missing`, the same types that `show` of a value of `Any` uses (so
-  `println(x)` of an element of a `Vector{Any}` works), and what you add:
+  subtype whose instances are not known): the union is of
+  - the types that the program makes, or that are in its constants, that are not Julia's own (yours and those of packages: found
+    when compiling, see the slots below);
+  - the types that are *registered*: the numbers, `String`, `Char`, `Symbol`, `Nothing` and `Missing` (the same types that `show`
+    of a value of `Any` uses, so `println(x)` of an element of a `Vector{Any}` works), and what you add.
+
+  What is read from a container or a field of the type `Any` is first given the types that the program stores in it (see the slots
+  below), so most programs need to add nothing. What is left is a value of one of Julia's own types other than those (a
+  `Vector{Int}`, a `Tuple{Int,Float64}`) that reaches a call as an `Any` in a way that is not a store that is seen (a value from an
+  `inferencebarrier`, say), or a program compiled with `STATIC_RUNTIME_UNIVERSE=0`:
 
   ```julia
-  add_dispatch_candidates!(MyType, Tuple{Int,Float64})   # before compiling; the same list as `add_show_candidates!`
+  add_dispatch_candidates!(Tuple{Int,Float64})   # before compiling; the same list as `add_show_candidates!`
   ```
 
   A value of a type that is not registered **aborts the program when it reaches such a call**, with a message that says which

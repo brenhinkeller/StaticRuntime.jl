@@ -20,10 +20,13 @@ end
 # The `inttoptr` constants in an operand: it is one, or has them in it, when it is an address that is an offset
 # from one (`getelementptr (i8, inttoptr (...), -8)`: the tag of an object is 8 bytes before it). Replacing
 # the `inttoptr` itself, and not the expression it is a part of, keeps the arithmetic as it is.
+# (Or in a constant that is made of others: `store <2 x ptr> <ptr inttoptr (...), ptr inttoptr (...)>`, which the optimizer makes of two stores of pointers when the processor has
+# vector registers for them (x86: the SLP vectorizer; ARM did not), and a constant struct or array. An address that was only in one of those was not found, and stayed as the
+# address that it was in the process that compiled: a pointer to nothing in the program.)
 function inttoptr_nodes(op, found = LLVM.ConstantExpr[])
-    op isa LLVM.ConstantExpr || return found
+    (op isa LLVM.ConstantExpr || op isa LLVM.ConstantAggregate) || return found
     occursin("inttoptr", string(op)) || return found
-    if LLVM.API.LLVMGetConstOpcode(op) == LLVM.API.LLVMIntToPtr
+    if op isa LLVM.ConstantExpr && LLVM.API.LLVMGetConstOpcode(op) == LLVM.API.LLVMIntToPtr
         push!(found, op)
     else
         for sub in LLVM.operands(op)

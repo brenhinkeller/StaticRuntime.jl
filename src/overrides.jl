@@ -24,8 +24,9 @@ using .Runtime: link_runtime!, UnsupportedCodeError
 struct OverridesParams <: GPUCompiler.AbstractCompilerParams
     key::Int
     split_limit::Int
+    id::Int          # the cache of the compilation (`Compilation.id`): its own, so that what another compilation inferred is not found
 end
-OverridesParams(c) = OverridesParams(c.key, c.settings.split_limit) # (the compilation `c`: see compilation.jl)
+OverridesParams(c) = OverridesParams(c.key, c.settings.split_limit, c.id) # (the compilation `c`: see compilation.jl)
 OverridesParams() = OverridesParams(Compilation())                 # (of a compilation that has just begun)
 
 Base.Experimental.@MethodTable(method_table)
@@ -113,7 +114,7 @@ function early_entry_check(c, args, rooted; method_table, params, target)
         check_entry(args[1], args[2]; method_table, params, target)
         return
     catch e
-        (e isa InferenceError && c.slots.mode === :on && dispatch_was_used(c) && c.slots.passes == 0 && isempty(c.slots.types)) || rethrow()
+        (e isa InferenceError && c.slots.mode === :on && c.slots.passes == 0 && isempty(c.slots.types)) || rethrow()
     end
     job, _ = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
     Base.invokelatest(precompile, job)

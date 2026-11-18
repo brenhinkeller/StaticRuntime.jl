@@ -240,3 +240,40 @@ const EMBED_REFS = [Ref(nothing), Ref(nothing)]
         "two of them in a vector"   => () -> Int(EMBED_REFS[1] === EMBED_REFS[2]) + 2 * Int(EMBED_REFS[1] === EMBED_REFS[1]) + opaque(0),
     ]; batch = false)
 end
+
+# An address in a constant that is made of others (a vector of pointers, a struct) is embedded as one that is by itself. The optimizer makes `store <2 x ptr> <ptr inttoptr (...), ptr inttoptr (...)>` of
+# the two stores of the roots of an object when the processor has the vector registers (x86; ARM did not), and the address of a string that was only there was left as the address that it had in the
+# process that compiled: a program that read it crashed (a loop over `pairs` of a `NamedTuple` of strings of different lengths, on x86).
+@testset "Addresses in constants that are made of others" begin
+    SC = StaticRuntime.StaticCompiler
+    Runtime = StaticRuntime.Runtime
+    strings = ["first of the roots", "second of the roots"]
+    GC.@preserve strings begin
+        addrs = [UInt(pointer_from_objref(s)) for s in strings]
+        SC.GPUCompiler.JuliaContext() do ctx
+            for shape in (:vector, :struct, :array)
+                mod = LLVM.Module("aggregate_test")
+                try
+                    ptrT = LLVM.PointerType()
+                    fn = LLVM.Function(mod, "f", LLVM.FunctionType(LLVM.VoidType(), [ptrT]))
+                    @dispose builder = LLVM.IRBuilder() begin
+                        LLVM.position!(builder, LLVM.at_end(LLVM.BasicBlock(fn, "entry")))
+                        ptrs = [LLVM.const_inttoptr(LLVM.ConstantInt(Int64(a)), ptrT) for a in addrs]
+                        value = shape === :vector ? LLVM.ConstantVector(ptrs) :
+                                shape === :struct ? LLVM.ConstantStruct(ptrs; packed = false) :
+                                LLVM.ConstantArray(ptrT, ptrs)
+                        LLVM.store!(builder, value, LLVM.parameters(fn)[1])
+                        LLVM.ret!(builder)
+                    end
+                    @test occursin("inttoptr", string(fn))
+                    Runtime.embed_constants!(mod)
+                    text = string(fn)
+                    @test !occursin("inttoptr", text)
+                    @test length(unique(m.captures[1] for m in eachmatch(r"@(static_object_[0-9a-f]+)", text))) == 2
+                finally
+                    LLVM.dispose(mod)
+                end
+            end
+        end
+    end
+end

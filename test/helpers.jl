@@ -1,6 +1,7 @@
 # Helpers that the tests share: a program is compiled to an executable, and has to give what Julia gives for the same code.
 
 using Test, Random, Printf, Libdl
+using LLVM # (`program_size` reads the module: the helpers are also run in a module of their own, `test/packages/runtests.jl`, which has only what is here)
 using StaticRuntime
 
 # `include` of a file of the tests that is timed (`TEST_TIMING=1` prints the times at the end of `runtests.jl`; `TEST_PROGRESS=1` says to the error output which file is being run, which is what shows where a run
@@ -121,6 +122,8 @@ function program_size(f)
     end
 end
 const FOLDED_LIMIT = 14 # (a program that prints a constant has about 10)
+# how much of the message of a case that is not compiled is shown (`TEST_DETAIL=4000` shows where the call that needs the runtime is, which the first 300 characters do not)
+const DETAIL_CHARS = something(tryparse(Int, get(ENV, "TEST_DETAIL", "")), 300)
 check_folded() = !isempty(get(ENV, "TEST_FOLDED", ""))
 
 """
@@ -148,7 +151,7 @@ function check_cases(cases; broken = (), folded_ok = (), batch::Bool = true, chu
                 @test_broken static_status(f; kwargs...)[1] == :ok
             else
                 status, detail = statuses[i]
-                @test (status, first(replace(string(detail), '\n' => ' '), 300)) == (:ok, "")
+                @test (status, first(replace(string(detail), '\n' => ' '), DETAIL_CHARS)) == (:ok, "")
                 # (with `TEST_FOLDED=1`) the program has to do what the case does: not print an answer that the compiler found, which `opaque` values are for
                 if check_folded() && status == :ok && !(name in folded_ok)
                     n = program_size(f)

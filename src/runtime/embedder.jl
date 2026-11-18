@@ -39,6 +39,8 @@ mutable struct ObjectEmbedder
     # (what is found while one program is linked is its own: an address is of an object of this process now, and may be another's the next time, so none of it is kept for another program)
     failures::Dict{UInt,String} # why the objects that could not be embedded could not (for the messages of the ones that refer to them)
     dangling::Vector{Tuple{Any,Symbol}} # the fields of the constants that hold an address of this process, which are null in the program: see `warn_dangling_pointer`
+    well_known::Dict{UInt,Pair{String,Any}} # which of the well-known objects is at an address (found when the first is asked for: see `well_known_at`)
+    svecs::Dict{Int,Core.SimpleVector} # the lists of the types that stand for the `types` of a type, by their length (kept for as long as the program is linked, so that their addresses are not reused: see `sized_svec`)
 end
 
 # (the plans are not made if nothing uses them: see `egal_layout!`)
@@ -46,7 +48,8 @@ end
 calls_genericmemory_copyto(mod::LLVM.Module) = any(g -> startswith(LLVM.name(g), "jlplt_jl_genericmemory_copyto"), LLVM.globals(mod))
 
 ObjectEmbedder(mod::LLVM.Module, globals) =
-    ObjectEmbedder(mod, globals, haskey(LLVM.functions(mod), "jl_egal__unboxed") || calls_genericmemory_copyto(mod), Dict{UInt,String}(), Tuple{Any,Symbol}[])
+    ObjectEmbedder(mod, globals, haskey(LLVM.functions(mod), "jl_egal__unboxed") || calls_genericmemory_copyto(mod), Dict{UInt,String}(), Tuple{Any,Symbol}[],
+                   Dict{UInt,Pair{String,Any}}(), Dict{Int,Core.SimpleVector}())
 
 # an object we can't reproduce, and why
 struct EmbedFailure <: Exception
@@ -87,15 +90,13 @@ function well_known_object!(e::ObjectEmbedder, name::AbstractString, obj)
 end
 
 # which of the well-known objects is at an address, in this process
-const WELL_KNOWN_ADDRESSES = Dict{UInt,Pair{String,Any}}()
-
-function well_known_at(addr::UInt)
-    if isempty(WELL_KNOWN_ADDRESSES)
+function well_known_at(e::ObjectEmbedder, addr::UInt)
+    if isempty(e.well_known)
         for (name, obj) in WELL_KNOWN_OBJECTS
-            WELL_KNOWN_ADDRESSES[UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj))] = name => obj
+            e.well_known[UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj))] = name => obj
         end
     end
-    return get(WELL_KNOWN_ADDRESSES, addr, nothing)
+    return get(e.well_known, addr, nothing)
 end
 
 function define_well_known_objects!(e::ObjectEmbedder)
@@ -137,7 +138,7 @@ function embed_global!(e::ObjectEmbedder, addr::UInt)
         g === nothing && throw(EmbedFailure(string("an object that failed, or that it refers to: ", get(e.failures, addr, "(in progress)"))))
         return g
     end
-    wk = well_known_at(addr)
+    wk = well_known_at(e, addr)
     if wk !== nothing
         g = well_known_object!(e, first(wk), last(wk))
         e.globals[addr] = g
@@ -389,10 +390,8 @@ end
 
 # The `types` of a type is a list that is as long as the type has fields (the code that checks an index against the
 # number of the fields of a type reads its length): one of that length, of `nothing`s, stands for it.
-const SIZED_SVECS = Dict{Int,Core.SimpleVector}() # (kept, so that their addresses are not reused)
-
-function sized_svec(n::Int)
-    sv = get!(SIZED_SVECS, n) do
+function sized_svec(e::ObjectEmbedder, n::Int)
+    sv = get!(e.svecs, n) do
         Core.svec(ntuple(_ -> nothing, n)...)
     end
     return UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), sv))
@@ -429,7 +428,7 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 types_addr = unsafe_load(Ptr{UInt}(base + off))
                 n = types_addr == 0 ? 0 : (check_readable(types_addr, 8); Int(unsafe_load(Ptr{Int}(types_addr))))
                 (0 <= n <= 100_000 && types_addr % 8 == 0) || throw(EmbedFailure("a type whose fields are not a svec (not a type?), at $(string(addr, base = 16))"))
-                add!(LLVM.PointerType(), g -> embed_ref!(e, sized_svec(n)))
+                add!(LLVM.PointerType(), g -> embed_ref!(e, sized_svec(e, n)))
                 pos = off + sizeof(Ptr)
             elseif T <: Core.GenericMemoryRef && i == 1
                 # a pointer into the data of the memory, which is the second field

@@ -36,8 +36,75 @@ function note_slow_optimization!(cl::ClosureState, mi, seconds::Float64, stateme
     length(cl.slowest) > 5 && resize!(cl.slowest, 5)
     return
 end
+# What is found while the code of a method is inferred and optimized (the function types that it has, the callbacks and `@cfunction`s that it says, the calls of functions that are not known that it has, the boxes that it makes) is
+# found only when the method is inferred. A method that is taken from the cache, where an earlier compilation inferred it, would not give it again, and what the program is compiled with would then depend on what was compiled before.
+# So it is kept with the result of inference of the method (`analysis_results`, which the cache keeps with it), and the compilation takes it from all the methods that the program reaches, inferred now or not (`replay_findings!`).
+mutable struct InferenceFindings
+    functions::Vector{Type}
+    callbacks::Vector{Tuple{Type,Type}}
+    cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}}
+    boxes::Vector{Tuple{Core.CodeInfo,Core.MethodInstance}}   # the code of a method that makes boxes, as it was inferred (what `learn_boxes!` reads)
+    dispatch_requested::Bool
+    union_used::Bool
+    callback_call_requested::Bool
+    box_function_seen::Bool
+end
+InferenceFindings() = InferenceFindings(Type[], Tuple{Type,Type}[], Tuple{DataType,Vector{DataType},DataType,Any}[], Tuple{Core.CodeInfo,Core.MethodInstance}[], false, false, false, false)
+
+findings_of(x) = CC.traverse_analysis_results(x) do @nospecialize result
+    result isa InferenceFindings ? result : nothing
+end
+function findings!(result::CC.InferenceResult)
+    f = findings_of(result)
+    f === nothing || return f
+    f = InferenceFindings()
+    CC.stack_analysis_result!(result, f)
+    return f
+end
+# (the frame of inference that a call is made in: not the one of a method that is looked at again with the constants of a call, which is not what is kept)
+function frame_findings(sv)
+    # (a frame that is made for the constants of a call is not what is kept: what it finds is kept with the frame that made the call, whose code has it)
+    while sv isa CC.InferenceState && sv.result.overridden_by_const !== nothing
+        sv = CC.frame_parent(sv)
+    end
+    return sv isa CC.InferenceState ? findings!(sv.result) : nothing
+end
+function note_flag!(sv, name::Symbol)
+    f = frame_findings(sv)
+    f === nothing || setfield!(f, name, true)
+    return
+end
+
+function replay_findings!(c::Compilation, interp, root)
+    cl = c.closures
+    for ci in reachable_code_instances(interp, root)
+        f = findings_of(ci)
+        f === nothing && continue
+        for T in f.functions
+            T in cl.seen_functions_set && continue
+            push!(cl.seen_functions_set, T)
+            push!(cl.seen_functions, T)
+        end
+        for x in f.callbacks
+            x in cl.seen_callbacks || push!(cl.seen_callbacks, x)
+        end
+        for x in f.cfunctions
+            any(s -> s[1] === x[1] && s[2] == x[2] && s[3] === x[3], cl.seen_cfunctions) || push!(cl.seen_cfunctions, x)
+        end
+        f.dispatch_requested && (cl.dispatch_requested = true)
+        f.union_used && (cl.union_used = true)
+        f.callback_call_requested && (cl.callback_call_requested = true)
+        f.box_function_seen && (cl.box_function_seen = true)
+        for (src, mi) in f.boxes
+            learn_boxes!(c.boxes, src, mi)
+        end
+    end
+    return
+end
+
 function note_function!(cl::ClosureState, @nospecialize(T))
     interesting_function_type(T) || return
+    cl.sink isa InferenceFindings && !(T in cl.sink.functions) && push!(cl.sink.functions, T)
     if !(T in cl.seen_functions_set)
         push!(cl.seen_functions_set, T)
         push!(cl.seen_functions, T)
@@ -61,7 +128,7 @@ function note_functions_in!(cl::ClosureState, @nospecialize(x), depth::Int = 0, 
     elseif x isa Core.Box
         if isdefined(x, :contents)
             c = x.contents
-            c isa Function && (cl.box_function_seen = true)
+            c isa Function && (cl.box_function_seen = true; cl.sink isa InferenceFindings && (cl.sink.box_function_seen = true))
             note_functions_in!(cl, c, depth + 1, budget)
         end
     elseif depth >= 3 || x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
@@ -93,16 +160,17 @@ end
 # Only the code of the program is looked at (not that of Base, or of the standard libraries, whose functions pass the functions of the program around, and are
 # the ones that call them with the types that they have): a function that is stored where its type is lost is stored by the program (`Base.Fix2(+, 1)` is a call in
 # it, and its type is the type of that statement)
-# (what a module is is a fact of it, and the same in every compilation: it is kept)
-const USER_MODULES = Dict{Module,Bool}()
+# (what a module is is a fact of it: it is kept for the compilation. Outside of one, it is found each time)
 function user_module(mod::Module)
-    get!(USER_MODULES, mod) do
-        root = Base.moduleroot(mod)
-        (root === Base || root === Core || root === Base.Compiler || root === StaticRuntime || root === StaticTools || root === StaticCompiler) && return false
-        dir = try pkgdir(root) catch; nothing end
-        dir !== nothing && startswith(dir, Sys.STDLIB) && return false
-        return true
-    end
+    c = CURRENT_COMPILATION[]
+    return c === nothing ? find_user_module(mod) : get!(() -> find_user_module(mod), c.user_modules, mod)
+end
+function find_user_module(mod::Module)
+    root = Base.moduleroot(mod)
+    (root === Base || root === Core || root === Base.Compiler || root === StaticRuntime || root === StaticTools || root === StaticCompiler) && return false
+    dir = try pkgdir(root) catch; nothing end
+    dir !== nothing && startswith(dir, Sys.STDLIB) && return false
+    return true
 end
 function note_functions_of!(cl::ClosureState, code, types, linfo)
     def = linfo isa Core.MethodInstance ? linfo.def : nothing
@@ -214,8 +282,10 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_cal
         V = callback_value_type(arginfo.argtypes[2])
         F = CC.widenconst(arginfo.argtypes[3])
         seen = compilation().closures.seen_callbacks
-        if V !== nothing && F isa DataType && isconcretetype(F) && !(F <: Core.Builtin) && !((V, F) in seen)
-            push!(seen, (V, F))
+        if V !== nothing && F isa DataType && isconcretetype(F) && !(F <: Core.Builtin)
+            (V, F) in seen || push!(seen, (V, F))
+            f = frame_findings(sv)
+            f === nothing || (V, F) in f.callbacks || push!(f.callbacks, (V, F))
         end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -235,6 +305,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
     if length(arginfo.argtypes) >= 3
         c = compilation()
         c.closures.callback_call_requested = true
+        note_flag!(sv, :callback_call_requested)
         V = callback_value_type(arginfo.argtypes[2])
         inner = copy(arginfo.argtypes[3:end])
         T = CC.widenconst(inner[1])
@@ -246,6 +317,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
             u = function_union(c, T, inner, 1; candidates)
             if u !== nothing
                 c.closures.union_used = true
+                note_flag!(sv, :union_used)
                 inner[1] = u
                 call = CC.abstract_call(interp, CC.ArgInfo(fargs, inner), si, vtypes, sv)
                 return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
@@ -291,6 +363,7 @@ function CC.abstract_call_unknown(interp::OverridesInterpreter, @nospecialize(ft
         u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes)
         if u !== nothing
             c.closures.union_used = true
+                note_flag!(sv, :union_used)
             argtypes = copy(arginfo.argtypes)
             argtypes[1] = u
             closed = CC.ArgInfo(arginfo.fargs, argtypes)
@@ -322,7 +395,7 @@ end
 
 # `NamedTuple{names}(args)`: Base gives it the type `typeof(args)`, that of the *value* of the tuple, which for a tuple that has a value of a union of types (`Tuple{Union{UInt32,Missing}}`: the keywords of a call, the fields of `merge`) is one of the types
 # that the union has, so what comes out is a `NamedTuple` of a type that is not one (`NamedTuple{(:bgcol,)}`), and what is done with it is a call of the runtime. The type of the argument is a type that it can be a value of, and the `NamedTuple` is
-# given it (`NamedTuple{names,T}(args)` of Base: its fields hold what the argument holds, as a union). A call that has a constant for an argument is left to Julia, which finds the value, and so is one that has a value of the type `Any`, or of a union of many types (the candidates of one): those are split, as Julia splits them, which a `NamedTuple` that is converted to another one needs.
+# given it (`NamedTuple{names,T}(args)` of Base: its fields hold what the argument holds, as a union). A call that has a constant for an argument is left to Julia, which finds the value, and so is one that has a value of the type `Any`, or of a union of many types (the candidates of one): those are split, as Julia splits them, which a `NamedTuple` that is converted to another one needs. (What is different from Julia: the type of the `NamedTuple` has the union, `@NamedTuple{a::Union{Int64,Float64}}`, where Julia's is that of the value, `@NamedTuple{a::Float64}`: `typeof` says so, and a method for the one is not one for the other. It is that, or a call of the runtime, which a program can't make.)
 function CC.abstract_call_known(interp::OverridesInterpreter, f::Type{<:NamedTuple}, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     if length(arginfo.argtypes) == 2 && f isa UnionAll && f.body isa DataType && f.body.name === Base.typename(NamedTuple) && f.body.parameters[1] isa Tuple
@@ -333,6 +406,25 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::Type{<:NamedTup
             full = NamedTuple{f.body.parameters[1], t}
             argtypes = Any[CC.Const(full), arg]
             return CC.abstract_call_known(interp, full, CC.ArgInfo(arginfo.fargs, argtypes), si, vtypes, sv, max_methods)
+        end
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+end
+
+# `host_text(f, x)` (see show.jl): the text that `f` prints for `x` in the process that compiles, made when compiling, in its world, when both are known; what the program has is the text.
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(host_text), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if length(argtypes) == 3
+        p, x = CC.singleton_type(argtypes[2]), CC.singleton_type(argtypes[3])
+        if p !== nothing && x !== nothing
+            text = try
+                Base.invokelatest(host_string, p, x)
+            catch
+                nothing
+            end
+            text isa String && return CC.Future(CC.CallMeta(CC.Const(text), Union{}, CC.EFFECTS_TOTAL, CC.NoCallInfo()))
         end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -352,9 +444,11 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.kwc
         if unknown_function_type(T)
             c = compilation()
             c.closures.dispatch_requested = true
+            note_flag!(sv, :dispatch_requested)
             u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes, 3)
             if u !== nothing
                 c.closures.union_used = true
+                note_flag!(sv, :union_used)
                 argtypes = copy(arginfo.argtypes)
                 argtypes[3] = u
                 closed = CC.ArgInfo(arginfo.fargs, argtypes)

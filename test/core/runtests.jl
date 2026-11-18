@@ -52,4 +52,7 @@ end
 # what the others left behind: the state of the process that compiles
 @testset verbose=true "State" include_timed("state.jl")
 
+# a compilation is made of the program, and of nothing that another one left
+@testset verbose=true "Determinism" include_timed("determinism.jl")
+
 # End of Core tests

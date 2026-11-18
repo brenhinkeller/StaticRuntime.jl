@@ -335,20 +335,16 @@ end
 
 ## `LazyString`
 #
-# `lazy"..."` (what the messages of `SciMLLogging`, and of some other packages, are) keeps its parts as a `Tuple` in a field of the type `Tuple`, and `String(l)` prints them with `foreach(Fix1(print, io), l.parts)`, a loop over a tuple of
-# different types, which is a dynamic call for each. The parts are printed by recursing over them, as `print_to_string` does; the string is kept in the object, as Julia does (without an atomic: a program has one thread of this).
+# `lazy"..."` (what the messages of `SciMLLogging`, and of some other packages, are) keeps its parts in a field of the type `Tuple`, which is not a concrete type: what is in it, and where, is only known when the program runs, and there is
+# no way to read the elements of a tuple of a type that is not known without the runtime. Code that makes such messages compiles (the messages are made, and kept as they are); one that is turned into a `String` (printed, ...) is
+# an error when the program runs, which says so. (A string that was made before, `l.str`, is the one that is given.) The packages that make them make them for messages that are not shown by default (`SciMLLogging`).
 @device_override function Base.String(l::Base.LazyString)
-    old = getfield(l, :str)
+    old = @atomic :acquire l.str
     old === nothing || return old::String
-    s = IOBuffer()
-    io = BufIO(s)
-    parts = getfield(l, :parts)
-    if getfield(l, :compact)
-        print_each(IOContext(io, :compact => true, :limit => true), parts...)
-    else
-        print_each(io, parts...)
-    end
-    str = Base.takestring!(s)
-    setfield!(l, :str, str)
-    return str
+    throw(ArgumentError("a lazy string (`lazy\"...\"`) is made into a string when the program runs, which a program can't do: its parts are a tuple whose types are not known when compiling"))
 end
+
+# `disable_sigint(f)` (HiGHS calls its solver in it) defers what Julia does on a SIGINT (an `InterruptException`) with a count in the state of the thread, which a program does not
+# have: a program has no handler that turns a SIGINT into an exception (it is ended by it, as a C program is), so there is nothing to defer
+@device_override Base.sigatomic_begin() = nothing
+@device_override Base.sigatomic_end() = nothing

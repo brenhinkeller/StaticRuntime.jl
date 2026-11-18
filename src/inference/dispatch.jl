@@ -75,9 +75,13 @@ const OverridesInterpreter = GPUCompiler.GPUInterpreter{<:Union{OverridesTableVi
 
 Add concrete types to the ones that a call with an argument of the type `Any` (an element of a `Vector{Any}`, say), or of an abstract type
 that has too many subtypes to list (`Number`), dispatches over in compiled code: the usual ones (numbers, `String`, `Char`, `Symbol`,
-`Nothing`, `Missing`, `Vector{Any}`), and these. For example `add_dispatch_candidates!(MyType, Tuple{Int,Float64})`. A value of another
-type that reaches such a call is an error when the program runs (compiling says which calls were made this way). It is the same list
-as that of `show` (see [`add_show_candidates!`](@ref)). Call it before compiling the code that has such values.
+`Nothing`, `Missing`, `Vector{Any}`), and these. The types that the program makes that are not Julia's own are added without it, and
+what is read from a container of `Any` is given the types that are stored in it: this is for a value of one of Julia's own types (a
+`Vector{Int}`, a `Tuple{Int,Float64}`) that reaches such a call in another way, or for `STATIC_RUNTIME_UNIVERSE=0`. For example
+`add_dispatch_candidates!(Tuple{Int,Float64})`. A value of another type that reaches such a call is an error when the program runs
+(compiling says which calls were made this way). It is the same list as that of `show` (see [`add_show_candidates!`](@ref)). Call it
+before compiling the code that has such values, and not in a package for the types of the package (it is for all the programs that the
+process compiles, and they are found when a program has them).
 """
 add_dispatch_candidates!(types::Type...) = add_show_candidates!(types...)
 
@@ -100,15 +104,14 @@ const DEFAULT_DISPATCH_CANDIDATES = Type[T for T in DEFAULT_SHOW_CANDIDATES if T
 # The union of the concrete subtypes of the abstract type `T`, or `nothing` if there is no such type, or too many of them, or
 # we can't tell (a subtype that is not a concrete `DataType` and is not abstract). The types that are loaded now are
 # the closed world of the program that is compiled now: (it is looked up again in a newer world.)
-# (what the subtypes of a type are is a fact of the world, and of the limit that they are listed to: so it is kept for all compilations, by the type, the world and the limit; finding them is what takes the time)
-const CLOSED_SUBTYPES = Dict{Tuple{Any,UInt,Int},Any}()
+# (what the subtypes of a type are is a fact of the world, and of the limit that they are listed to: it is kept for the compilation, by the type, the world and the limit; finding them is what takes the time)
 function listed_union(c::Compilation, @nospecialize(T))
     T isa DataType && isabstracttype(T) && T !== Any || return nothing
     # (the types of functions are not listed: there is one for each function and closure, and finding them all, which `subtypes(Function)` does, takes more than a minute the first time
     # in a process that has this package loaded. The functions that a call can have are the ones of closures.jl.)
     T <: Function && return nothing
     limit = c.settings.dispatch_limit
-    get!(CLOSED_SUBTYPES, (T, Base.get_world_counter(), limit)) do
+    get!(c.closed_subtypes, (T, Base.get_world_counter(), limit)) do
         found = DataType[]
         function walk(S)
             for s in subtypes(S)
@@ -300,7 +303,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             key = string(fname, "(", join(("::" * (T isa Core.TypeofVararg ? string(T) : string(CC.widenconst(T))) for T in original[2:end]), ", "), ")")
             calls = c.dispatch.registered_calls
             calls[key] = get(calls, key, 0) + 1
-            note_dispatch_used!(c)
+            note_dispatch_used!(c, sv)
         end
     end
     # (an argument of an abstract type: what the slots of the program hold may make it a narrower type, see slots.jl. The types are those before it was closed to the subtypes that are listed: `LinkedList{Int}` closed to the one that has a method is
@@ -312,7 +315,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             # (a struct of the program with parameters that are not known, `Input` of `Input{T}`, is what is read from a slot that is declared so: what the slots hold is its instances. Not Julia's own, a `Vector` or a `Dict`
             # of some type: most programs have those, and would be analyzed for them)
             if ((T isa DataType && isabstracttype(T)) || unknown_parameters_of_program(T)) && !(T <: Function) && !(T <: Type)
-                note_dispatch_used!(c)
+                note_dispatch_used!(c, sv)
                 break
             end
         end
@@ -396,7 +399,7 @@ const STANDARD_STREAMS = (; stdin = STDIN, stdout = STDOUT, stderr = STDERR)
 # the stream that a global is, or `nothing`
 function standard_stream(@nospecialize(g))
     g isa GlobalRef && g.name in keys(STANDARD_STREAMS) || return nothing
-    return Base.binding_module(g.mod, g.name) === Base ? getfield(STANDARD_STREAMS, g.name) : nothing
+    return Base.binding_module(g.mod, g.name) in (Base, Core) ? getfield(STANDARD_STREAMS, g.name) : nothing
 end
 
 function CC.abstract_eval_globalref(interp::OverridesInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
@@ -436,6 +439,45 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.inv
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
+## A type made of a type that is one of a few
+
+# `ObjectiveFunction{F}()`, where `F` is the type of the objective that a solver of MathOptInterface has (`MOI.get(model, ObjectiveFunctionType())`: one of a few, of which inference knows the union of
+# `Type{X}`s) is the builtin `Core.apply_type`, made when the program runs: an executable can't make types. The answer is one of a few types too: the call is inferred as the call of
+# `split_apply_type`, which is made over the union (as a call of a function on a union is), with a constant type in each case, and the statement is made that call before it is optimized.
+split_apply_type(::Type{F}, ::Type{A}) where {F,A} = F{A}
+split_apply_type(::Type{F}, ::Type{A}, ::Type{B}) where {F,A,B} = F{A,B}
+split_apply_type(::Type{F}, ::Type{A}, ::Type{B}, ::Type{C}) where {F,A,B,C} = F{A,B,C}
+
+# whether the type of an argument of `apply_type` is one type that is known (`Type{X}`, or a constant type), or a union of a few such
+# (`Type{X}` is a `Core.TypeEq`, and in what inference has, a `Core.TypeEgal{X}`, which is a subtype of it)
+exact_type_argument(@nospecialize(t)) = (t isa CC.Const && t.val isa Type) ||
+    ((t isa Core.TypeEq || t isa Core.TypeEgal) && (p = try Base.type_parameter(t) catch; nothing end; p isa Type && !CC.has_free_typevars(p)))
+function few_types_argument(@nospecialize(t))
+    t isa Union || return false
+    members = Base.uniontypes(t)
+    return length(members) <= 4 && all(exact_type_argument, members)
+end
+
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.apply_type), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if 3 <= length(argtypes) <= 5 && exact_type_argument(argtypes[2]) && any(few_types_argument, argtypes[3:end]) &&
+       all(t -> exact_type_argument(t) || few_types_argument(t), argtypes[3:end])
+        split = CC.ArgInfo(nothing, Any[CC.Const(split_apply_type), argtypes[2:end]...])
+        return CC.abstract_call(interp, split, si, vtypes, sv)
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+end
+
+# whether what inference found of a call is that of a call of `split_apply_type` (see above)
+function calls_split_apply_type(@nospecialize(info))
+    info isa CC.UnionSplitInfo && return !isempty(info.split) && all(calls_split_apply_type, info.split)
+    info isa CC.MethodMatchInfo || return false
+    matches = info.results.matches
+    return !isempty(matches) && all(m -> m.method.name === :split_apply_type && m.method.module === @__MODULE__, matches)
+end
+
 # The function that a statement of the code before it is optimized calls (what a callee refers to, if that is a variable that a
 # statement before has loaded: `Base.invokelatest` is a `GlobalRef`, or `getproperty(Base, :invokelatest)`), or `nothing`
 # whether a binding partition (which optimized code refers to a global by) is one of a constant: it holds the value
@@ -464,12 +506,18 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
     code = opt.src.code
     replace_standard_streams!(code)
     c = compilation()
-    note_functions_of!(c.closures, code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
-    caller.linfo isa Core.MethodInstance && learn_boxes!(c.boxes, opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
+    findings = caller.overridden_by_const === nothing ? findings!(caller) : nothing # (what is found of the code is kept with its result, for the compilations that take it from the cache: see `InferenceFindings`)
+    c.closures.sink = findings
+    try
+        note_functions_of!(c.closures, code, opt.src.ssavaluetypes, caller.linfo) # (the functions that the code has: see closures.jl)
+    finally
+        c.closures.sink = nothing
+    end
+    if caller.linfo isa Core.MethodInstance
+        findings === nothing || any(st -> box_creation(code, st) !== nothing, code) && push!(findings.boxes, (copy(opt.src), caller.linfo))
+        learn_boxes!(c.boxes, opt.src, caller.linfo) # (the types of the boxes of the code: see boxes.jl)
+    end
     for pc in eachindex(code)
-        # (the keywords of a call that has a type as a value are a constant of the type that has the type as the type of the field: see `typed_keywords`)
-        t = opt.src.ssavaluetypes[pc]
-        t isa CC.Const && has_type_values(t.val) && (opt.src.ssavaluetypes[pc] = CC.Const(typed_constant(t.val)))
         st = code[pc]
         # (a call that is assigned to a variable is the second of the arguments of `=`)
         assigned = st isa Expr && st.head === :(=) && length(st.args) == 2 && st.args[2] isa Expr
@@ -484,8 +532,20 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
                 continue
             end
         end
-        replacement = if called === Core.invokelatest
+        # (the keywords of a call that has a type as a value: the constant that the call is given is one of the type that has the type as the type of the field, as the method was inferred for, see `typed_keywords`. Only the
+        # argument of the call: the value is what it is everywhere else, and `typeof` of it is what Julia says)
+        if called === Core.kwcall && length(call.args) >= 2
+            kw = call.args[2]
+            t = kw isa Core.SSAValue ? opt.src.ssavaluetypes[kw.id] : kw isa NamedTuple ? CC.Const(kw) : nothing
+            t isa CC.Const && has_type_values(t.val) && (call.args[2] = typed_constant(t.val))
+        end
+        replacement = if called === host_text && opt.src.ssavaluetypes[pc] isa CC.Const
+            # (the text that was made when compiling, see `host_text` in show.jl: the statement is the text, which Julia does not put in the place of a call that it is the value of, as it is not a value of bits)
+            opt.src.ssavaluetypes[pc].val
+        elseif called === Core.invokelatest
             Expr(:call, call.args[2:end]...)
+        elseif called === Core.apply_type && calls_split_apply_type(opt.stmt_info[pc])
+            Expr(:call, split_apply_type, call.args[2:end]...)
         elseif called === call_callback && length(call.args) >= 3
             # (`call_callback(T, f, args...)` is `f(args...)`, or no call at all where no function was registered for `T`: see closures.jl)
             opt.src.ssavaluetypes[pc] === Union{} ? Expr(:call, Core.throw, "a callback that was not registered") : Expr(:call, call.args[3:end]...)
@@ -494,15 +554,22 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
         end
         assigned ? (st.args[2] = replacement) : (code[pc] = replacement)
     end
-    if trace_on()
-        c.closures.optimized += 1
-        push!(c.closures.optimized_unique, caller.linfo)
-        started = time_ns()
-        result = @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
-        note_slow_optimization!(c.closures, caller.linfo, (time_ns() - started) / 1e9, length(code))
-        return result
+    # (what the analysis of the slots finds of the code of this method is kept with its result: see `SlotFactsResult`)
+    previous = c.slots.current_result
+    c.slots.current_result = caller
+    try
+        if trace_on()
+            c.closures.optimized += 1
+            push!(c.closures.optimized_unique, caller.linfo)
+            started = time_ns()
+            result = @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
+            note_slow_optimization!(c.closures, caller.linfo, (time_ns() - started) / 1e9, length(code))
+            return result
+        end
+        return @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
+    finally
+        c.slots.current_result = previous
     end
-    return @invoke CC.optimize(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
 end
 
 ## Fields of `Union{T,Nothing}`

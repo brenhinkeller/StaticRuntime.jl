@@ -65,8 +65,6 @@ include("cfunctions_link.jl") # the wrappers of `@cfunction`, that call the func
 function forget_process_state!()
     PIPE_FDS .= -1 # (the descriptors of a pipe that was made by the process that compiled the package are numbers that mean nothing here, and are not closed: another file may have them)
     DATATYPE_TAG[] = TYPENAME_TAG[] = SVEC_TAG[] = SYMBOL_TAG[] = EMPTY_SVEC[] = 0
-    empty!(WELL_KNOWN_ADDRESSES)
-    empty!(SIZED_SVECS)
     empty!(HEAP_IR)
     LOADER_IR[] = ""
     return nothing

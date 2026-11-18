@@ -152,7 +152,18 @@ kw_type_with_other() = kw_build(@opaque(3); shape = KwCircle, extra = 1).n
     check_cases([kw_type_given, kw_type_default, kw_type_forwarded, kw_type_untyped, kw_type_with_other])
 end
 
-# Values of a union of types in keywords and `NamedTuple`s
+# The keywords that are types are given the type that has the type in the call (see `typed_keywords`): a `NamedTuple` of a type that is a value elsewhere is of the type that Julia gives it
+kw_nt_constant() = (x = (T = Int, n = 1); println(typeof(x)); x.n)
+kw_nt_constant_and_keywords() = (kw = (shape = KwCircle,); println(typeof(kw)); kw_build(@opaque(3); kw...).n)
+kw_nt_union_value() = (v = @opaque(1) > 5 ? 1 : 2.5; nt = (a = v, b = "x"); println(nt.b); 0)
+
+@testset "NamedTuples of types are of the types that Julia gives them" begin
+    check_cases([kw_nt_constant, kw_nt_constant_and_keywords])
+    # (a `NamedTuple` of a value of a union of types: its field is the union, see `docs/src/limits.md`)
+    @test static_status(kw_nt_union_value) == (:ok, "")
+end
+
+# Values of a union of types in keywords and `NamedTuple`s (the field of the `NamedTuple` is the union: see `docs/src/limits.md`)
 @noinline kwu_color(color; bgcol = missing) = bgcol === missing ? 1 : Int(bgcol) + color
 @noinline kwu_two(; a = 0, b = 0.0) = a + b
 kwu_one() = kwu_color(5; bgcol = @opaque(1) > 100 ? UInt32(7) : missing)

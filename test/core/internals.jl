@@ -38,12 +38,12 @@ end
     @test !isempty(err.sites) && any(((_, sites),) -> any(s -> !isempty(s.path) && !isempty(s.frames), sites), err.sites)
     @test occursin("reached through", msg) && occursin(".jl:", msg)
 
-    # the global `stderr` has the abstract type `IO`: the message says to use `STDERR`
-    uses_stderr() = (println(stderr, "message"); 1)
+    # a global variable that is not a constant (`Base.PROGRAM_FILE`) is read by its address in this process: the message says so (the `stderr` of Base, which is a global of the abstract type `IO`, is `STDERR` in a program)
+    uses_stderr() = (println(Base.PROGRAM_FILE); 1)
     stderr_main = StaticRuntime.make_main(uses_stderr)
     err2 = try Base.invokelatest(compile_executable, stderr_main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(stderr_main))); nothing catch e; e end
     @test err2 isa UnsupportedCodeError
-    @test occursin("STDERR", sprint(showerror, err2))
+    @test occursin("by their address", sprint(showerror, err2))
     @test !isempty(err2.pointers) # references to Julia objects by their address are reported too
 
     # strict = false compiles code that has dynamic dispatch anyway (and the call aborts the program if
@@ -122,7 +122,7 @@ harness_throws() = (Base.inferencebarrier(1) > 0 ? throw(ArgumentError("it is no
         @test static_status(() -> harness_add(41)) == (:ok, "")
         @testset "what is written is compared too" begin
             @test static_status(() -> (println("a line"); 1)) == (:ok, "")
-            @test static_status(() -> (println(stderr, "to the standard error"); 1))[1] == :compile_error # (`stderr` is a global of an abstract type: see `STDERR`)
+            @test static_status(() -> (println(stderr, "to the standard error"); 1)) == (:ok, "") # (`stderr` of Base is `STDERR` in a program)
             @test static_status(() -> (println(STDERR, "to the standard error"); 1)) == (:ok, "")
         end
         # (the generator of the program is not seeded as Julia's is; what is said of a program that fails is in the message, which the log of a test that fails has)

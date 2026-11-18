@@ -9,8 +9,18 @@
 # a call that has no effect, and that is not made.
 mutable struct CFunctionGuard
     calls::Int
+    arguments::UInt # (what the arguments are folded into: see `define_cfunction_root`)
 end
-const CFUNCTION_GUARD = CFunctionGuard(0)
+const CFUNCTION_GUARD = CFunctionGuard(0, 0)
+
+# an argument of the target of a `@cfunction`, as a number that is stored: it is then used, whatever the function does with it (a struct that C passes by value is not, and can be dropped)
+cfunction_use(a::Ptr) = UInt(a)
+cfunction_use(a::Base.BitInteger) = a % UInt
+cfunction_use(a::Bool) = UInt(a)
+cfunction_use(a::Char) = UInt(reinterpret(UInt32, a))
+cfunction_use(a::Float64) = UInt(reinterpret(UInt64, a))
+cfunction_use(a::Float32) = UInt(reinterpret(UInt32, a))
+cfunction_use(a) = UInt(0)
 
 # The arguments of a compilation (the function and its types come first), with the entry point that has the targets of the `@cfunction`s that were found (the roots of the compilation `c`, and the functions that they call)
 function rooted_arguments(c::Compilation, args)
@@ -32,6 +42,8 @@ function CC.abstract_eval_cfunction(interp::OverridesInterpreter, e::Expr, sstat
            all(T -> T isa DataType && isconcretetype(T), argtypes)
             entry = (typeof(f), DataType[argtypes...], ret, f)
             any(s -> s[1] === entry[1] && s[2] == entry[2] && s[3] === entry[3], seen) || push!(seen, entry)
+            found = frame_findings(sv)
+            found === nothing || any(s -> s[1] === entry[1] && s[2] == entry[2] && s[3] === entry[3], found.cfunctions) || push!(found.cfunctions, entry)
         end
     catch
         # (what is not found is a `@cfunction` that fails to compile, as it did)
@@ -46,8 +58,11 @@ function define_cfunction_root(mod::Module, root::Runtime.CFunctionRoot, f)
     params = [:($(argnames[i])::$(root.args[i])) for i in eachindex(root.args)]
     call = :($(QuoteNode(f))($(argnames...)))
     body = root.ret === Nothing ? :($call; nothing) : :($call::$(root.ret))
+    # (each argument is used, whatever `f` does with it: the function that is compiled has the parameters that C gives, which is what the wrapper of the `@cfunction` is made to call. A
+    # function that ignores some, as the callback of HiGHS does, is otherwise compiled without them)
     Core.eval(mod, :(@noinline function $name($(params...))::$(root.ret)
         $(CFUNCTION_GUARD).calls += 1
+        $(CFUNCTION_GUARD).arguments = $(foldl((acc, a) -> :(xor($acc, $(cfunction_use)($a))), argnames; init = :(UInt(0))))
         return $body
     end))
     return name

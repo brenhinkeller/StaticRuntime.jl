@@ -69,7 +69,8 @@ end
 system_library(path::AbstractString) = any(p -> startswith(path, p), ("/usr/lib/", "/System/", "/lib/", "/lib64/", "/usr/lib64/", "/usr/lib32/"))
 
 # The libraries that the library `lib` (at `path`) needs, as (library, handle) that are loaded in this process: those that its `LazyLibrary` has,
-# and, when they are to be copied, those that the file says (`otool -L`, or `ldd`) that are not of the system.
+# and those that the file says (`otool -L`, or `ldd`) that are not of the system, as this process has them. (A library that a package names by its
+# path, as HiGHS does, has no list: `libhighs` needs `libz` and `libblastrampoline` by `@rpath`, which is its own folder, where they are not.)
 function library_needs(lib, path::String, libraries::Symbol)
     needs = Tuple{Any,Any}[]
     if lib isa Libdl.LazyLibrary
@@ -80,7 +81,6 @@ function library_needs(lib, path::String, libraries::Symbol)
             h === nothing || push!(needs, (d, h))
         end
     end
-    libraries === :bundle || return needs
     names = String[]
     try
         if Sys.isapple()

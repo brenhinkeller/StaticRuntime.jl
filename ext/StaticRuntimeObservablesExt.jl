@@ -7,7 +7,7 @@
 
 module StaticRuntimeObservablesExt
 
-using StaticRuntime: StaticRuntime, @device_override, add_dispatch_candidates!, note_callback, call_callback, add_callback!
+using StaticRuntime: StaticRuntime, @device_override, note_callback, call_callback, add_callback!
 using Observables: Observables, Observable, AbstractObservable, ObserverFunction, to_value, appendinputs!
 
 # `observable[] = val`: the value is converted to the type of the observable (the field is of the type `T`), and the listeners are called
@@ -163,11 +163,6 @@ end
     end
     update && callback(nothing)
     return obsfuncs
-end
-
-# A value of the type `Any` (what a `Dict{Symbol,Any}` of attributes holds) is an `Observable{Any}` when the package is used for that: a call on it is made over this type too
-function __init__()
-    add_dispatch_candidates!(Observable{Any})
 end
 
 end # module

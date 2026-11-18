@@ -90,7 +90,7 @@ end
 end
 
 # `eltype` of a tuple type that has types that are not all one: it is the join of them (`Any` for `String` and `Int`), and so is that of the `pairs` of a `NamedTuple` (inference did not find that with the limit that we split a union in)
-@testset "eltype of the types of a tuple" begin
+@testset "`eltype` of the types of a tuple" begin
     check_cases([
         "eltype of a mixed NamedTuple" => () -> length(string(eltype(typeof((; a = "x", b = "y", c = 1 + opaque(0), d = 2))))),
         "eltype of pairs, mixed"       => () -> length(string(eltype(pairs((; a = "x", b = "y", c = 1 + opaque(0)))))),

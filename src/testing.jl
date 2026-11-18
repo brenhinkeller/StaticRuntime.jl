@@ -70,13 +70,24 @@ end
 
 # what `f()` writes to stdout and to stderr in this process (the result, which the compiled `main`
 # prints as the last line of the standard output, is returned too)
+# What Julia writes when it runs the code of a test, without its deprecation warnings (`Base.depwarn`, which are shown under `--depwarn=yes`, as `Pkg.test` runs Julia, once for each place in the code): a program does not
+# show them (see `depwarn` in overrides/base.jl), and whether Julia does depends on what ran before, in the same place. The other messages are given to the logger that there is.
+struct NoDepwarnLogger{L<:Base.CoreLogging.AbstractLogger} <: Base.CoreLogging.AbstractLogger
+    inner::L
+end
+Base.CoreLogging.shouldlog(l::NoDepwarnLogger, level, _module, group, id) = group !== :depwarn && Base.CoreLogging.shouldlog(l.inner, level, _module, group, id)
+Base.CoreLogging.min_enabled_level(l::NoDepwarnLogger) = Base.CoreLogging.min_enabled_level(l.inner)
+Base.CoreLogging.catch_exceptions(l::NoDepwarnLogger) = Base.CoreLogging.catch_exceptions(l.inner)
+Base.CoreLogging.handle_message(l::NoDepwarnLogger, args...; kwargs...) = Base.CoreLogging.handle_message(l.inner, args...; kwargs...)
+without_depwarns(f) = Base.CoreLogging.with_logger(f, NoDepwarnLogger(Base.CoreLogging.current_logger()))
+
 function expected_output(f)
     out_path, out_io = mktemp()
     err_path, err_io = mktemp()
     result = try
         redirect_stdout(out_io) do
             redirect_stderr(err_io) do
-                r = f()
+                r = without_depwarns(f)
                 flush(stdout); flush(stderr)
                 Libc.flush_cstdio() # what was written with the streams of libc
                 r
@@ -87,6 +98,9 @@ function expected_output(f)
     end
     return read(out_path, String) * string(as_int(result), "\n"), read(err_path, String)
 end
+
+# how much of the message of a program that failed is given (`TEST_DETAIL=4000`: the places in the code of a call that needs the runtime, which the first 300 characters do not reach)
+detail_limit() = something(tryparse(Int, get(ENV, "TEST_DETAIL", "")), 300)
 
 """
     static_status(f; kwargs...) -> (status::Symbol, detail)
@@ -104,14 +118,14 @@ function static_status(f; kwargs...)
     catch e
         status = e isa ProcessFailedException || occursin("failed process", sprint(showerror, e)) ?
                  :link_error : :compile_error
-        return status, first(sprint(showerror, e), 300)
+        return status, first(sprint(showerror, e), detail_limit())
     end
     err_path = tempname()
     out = try
         read(pipeline(`$exe`; stderr = err_path), String)
     catch e
         crash_backtrace(exe, e) # (what a crash of the program was, in the log of CI, where it can't be run again by hand)
-        return :runtime_error, first(sprint(showerror, e), 300)
+        return :runtime_error, first(sprint(showerror, e), detail_limit())
     end
     # after compiling, which snapshots the state of any global data
     expected, expected_err = expected_output(f)
@@ -139,7 +153,7 @@ function expected_batch(fs)
             redirect_stderr(err_io) do
                 for (i, f) in enumerate(fs)
                     print(stdout, "@@case ", i, "@@\n"); print(stderr, "@@case ", i, "@@\n")
-                    r = f()
+                    r = without_depwarns(f)
                     print(stdout, as_int(r), "\n")
                     flush(stdout); flush(stderr)
                     Libc.flush_cstdio() # what was written with the streams of libc

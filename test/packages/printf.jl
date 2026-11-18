@@ -13,5 +13,5 @@ const FORMAT = Printf.Format("%s=%08.3f\n") # made once, as `@printf` does
     "Printf.format"         => () -> (Printf.format(STDOUT, FORMAT, "pi", 3.14159); 1),
     "Printf.Format runtime" => () -> (Printf.format(STDOUT, Printf.Format("%s=%08.3f\n"), "pi", 3.14159); 1),
     "@printf unicode/%%"    => () -> (Printf.@printf(STDOUT, "%s 100%% %5s|\n", "é∑", "日本"); 1),
-    ], broken = ("@printf", "Printf.Format runtime"))
+    ], broken = ("Printf.Format runtime",))
 end

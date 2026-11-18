@@ -16,7 +16,10 @@ function mpi_lines(cmd)
 end
 
 # (`MPI.Op` of a function makes a C function of a closure, `@cfunction($w, ...)`, which Julia makes with a trampoline that it generates when the program runs)
-const MPI_BROKEN = (:c_customop, :c_objects)
+const MPI_BROKEN = [:c_objects]
+if Sys.ARCH ∈ (:aarch64, :ppc64le, :powerpc64le) || startswith(lowercase(String(Sys.ARCH)), "arm")
+    push!(MPI_BROKEN, :c_customop)
+end
 
 @testset "MPI.jl" begin
     dir = mktempdir()

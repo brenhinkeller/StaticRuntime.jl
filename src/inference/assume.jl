@@ -137,7 +137,9 @@ function assumed_result(@nospecialize(found), @nospecialize(R))
 end
 
 function CC.finishinfer!(me::CC.InferenceState, interp::OverridesInterpreter, cycleid::Int, opt_cache::IdDict{Core.MethodInstance,Core.CodeInstance})
-    R = assumed_return(compilation(), me.linfo)
+    c = compilation()
+    c.settings.share_cache || push!(c.inferred, (me.linfo, CC.cache_owner(interp))) # (what it makes is taken out of the cache when the compilation ends: `purge_inferred!`)
+    R = assumed_return(c, me.linfo)
     R === nothing || (me.bestguess = assumed_result(me.bestguess, R))
     return @invoke CC.finishinfer!(me::CC.InferenceState, interp::CC.AbstractInterpreter, cycleid::Int, opt_cache::IdDict{Core.MethodInstance,Core.CodeInstance})
 end

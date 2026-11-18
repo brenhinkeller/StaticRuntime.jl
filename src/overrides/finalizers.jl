@@ -16,14 +16,12 @@
 
 # (The number and the list of a site are made by generated functions, `finalizer_site_id` and `finalizer_registry`, whose code Julia keeps for the process: they can only be tables of the process, by the types of the site,
 # and a number is the same for a site in every program. The lists are the programs' own: they are empty here, as nothing but a program that runs puts a finalizer in one.)
-const FINALIZER_SITES = Dict{Tuple{DataType,DataType},Int}()
 const FINALIZER_REGISTRIES = Dict{Tuple{DataType,DataType},Any}()
 const FINALIZER_NEVER = Ref(false)
 
 @generated function finalizer_site_id(::Type{F}, ::Type{T}) where {F,T}
-    id = get!(FINALIZER_SITES, (F, T)) do
-        length(FINALIZER_SITES) + 1
-    end
+    # (a number that is made of the types of the site, and not of how many sites there were before: the program is the same whatever was compiled before it)
+    id = Int(hash((string(F), string(T))) >> 2)
     return :($id)
 end
 

@@ -13,13 +13,17 @@ Base.show_circular(::ShowStream, @nospecialize(x)) = false
 ## names of types
 
 # The text that Base's `show` makes for what is shown to a stream (as `stdout`, for which the types of `Main` are
-# not written with their module), made when compiling by the `@generated` functions below. A generator runs in
-# the world age of its definition, in which what the program defines (its types in `Main`, ...) is not visible, so
-# Base's `show` writes `Main.Pt` where it writes `Pt` for the program; the `Main.` is dropped. (Types of other modules that
+# not written with their module), made when compiling (`host_text`). Base's `show` writes `Main.Pt` where it writes
+# `Pt` for the program; the `Main.` is dropped. (Types of other modules that
 # the program makes visible with `using` or `import` (`Diagonal` of `LinearAlgebra`) do get their module: a difference with Base.)
 host_string(f, x) = replace(sprint(f, x; context = :module => Main), r"(?<![\w.])Main\." => "")
+# What the generators below put in the code they make, in place of the text itself: a call that inference makes when compiling (its arguments are constants), in the world of the compilation (see
+# `abstract_call_known` for `host_text` in closures.jl). A generator runs in the world of its own definition, in which the methods that a package defines after this one is loaded are not there, and
+# printing a type can need them (`Indicator{ACTIVATE_ON_ONE}` of MathOptInterface prints the value of its `@enum` with the `namemap` that the package defines): what a generator printed itself was an
+# error there. (This method is what the call is in Julia: it gives the same text.)
+host_text(f, x) = host_string(f, x)
 
-@generated type_name(::Type{T}) where {T} = host_string(show, T)
+type_name(::Type{T}) where {T} = host_text(show, T)
 Base.show(io::ShowStream, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
 # (an `IOBuffer` is a stream that a program makes itself, as `summary` does: the name of the type is the same)
 Base.show(io::Base.GenericIOBuffer, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
@@ -30,7 +34,7 @@ Base.show(io::Base.GenericIOBuffer, ::Type{T}) where {T} = (print(io, type_name(
 ## if it is not visible from where it is shown), but it finds that out with lookups of modules and bindings, in
 ## libjulia. The text is made when compiling (as for the names of types).
 
-@generated singleton_text(::Type{T}) where {T} = Base.issingletontype(T) ? host_string(show, T.instance) : nothing
+@generated singleton_text(::Type{T}) where {T} = Base.issingletontype(T) ? :(host_text(show, $(QuoteNode(T.instance)))) : nothing
 
 function Base.show(io::ShowStream, f::Function)
     text = singleton_text(typeof(f))
@@ -62,8 +66,8 @@ end
     eltype_X = eltype(XT)
     # the strings that Base makes, for the container being empty and not
     if XT <: AbstractDict
-        full = host_string(print, XT)
-        name = host_string(Base.show_type_name, XT.name)
+        full = :(host_text(print, $XT))
+        name = :(host_text(Base.show_type_name, $(QuoteNode(XT.name))))
         if eltype_X == eltype_ctx
             return :(($name, false))
         else
@@ -75,7 +79,7 @@ end
     else
         implicit = Base.typeinfo_implicit(eltype_X)
         text = Base.print_without_params(eltype_X) ?
-            host_string(Base.show_type_name, Base.unwrap_unionall(eltype_X).name) : host_string(print, eltype_X)
+            :(host_text(Base.show_type_name, $(QuoteNode(Base.unwrap_unionall(eltype_X).name)))) : :(host_text(print, $eltype_X))
         return implicit ? :(isempty(X) ? ($text, false) : ("", true)) : :(($text, false))
     end
 end
@@ -210,7 +214,7 @@ end
 @generated function Base.show_default(io::ShowStream, x::T) where {T}
     isconcretetype(T) || return :(error("show: the type of a value is not known when compiling"))
     isprimitivetype(T) && return :(error("show: a primitive type needs a method of `show`"))
-    body = Expr(:block, :(print(io, $(host_string(show, T)), '(')))
+    body = Expr(:block, :(print(io, host_text(show, $T), '(')))
     n = fieldcount(T)
     for i in 1:n
         i > 1 && push!(body.args, :(print(io, ", ")))
