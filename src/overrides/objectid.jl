@@ -186,10 +186,16 @@ end
     return (a <: b) & (b <: a)
 end
 
-# `hash` of a type is made from `jl_type_hash`, which for a `DataType` is its `hash` field, as `objectid` is (above). The other types (a
-# `Union`, a `UnionAll`) have it computed from what they are made of, which is libjulia's, and so is as it was.
-#
-# OPEN: a program that hashes one of those is refused when compiling (`jl_type_hash` is a call that needs libjulia). It is reached only when the code that hashes is not folded
-# by the compiler: Distributions' `MvNormal` with a diagonal covariance does it under `--code-coverage` (which stops Julia from inlining and constant-folding the code of
-# packages), and not otherwise; see `test/packages/distributions.jl`. Computing the hash of a `Union` or a `UnionAll` here (from the hashes of its parts, as libjulia does) would end it.
-@device_override Base._jl_type_hash(T::Type) = T isa DataType ? UInt(getfield(T, :hash) % UInt32) : ccall(:jl_type_hash, UInt, (Any,), T)
+# `hash` of a type is made from `jl_type_hash`, which for a `DataType` is its `hash` field, as `objectid` is (above). The other types (a `Union`, a `UnionAll`) have it computed by libjulia from what they are made of, which
+# is a call of libjulia, so here it is made from the same parts: the hashes of the two types of a `Union`, and of the bounds of the variable and the body of a `UnionAll`. (Not the number that libjulia gives: a table that has
+# them, which is made when the program runs, is what they are for: the type is a value that the program has, as `Type` of a slot of types, see slots.jl.)
+@inline function type_hash_part(@nospecialize(x))
+    x isa DataType && return UInt(getfield(x, :hash) % UInt32)
+    x isa Union && return UInt(bitmix(UInt64(type_hash_part(getfield(x, :a))), UInt64(type_hash_part(getfield(x, :b)))) % UInt32)
+    if x isa UnionAll
+        v = getfield(x, :var)
+        return UInt(bitmix(bitmix(UInt64(type_hash_part(getfield(v, :lb))), UInt64(type_hash_part(getfield(v, :ub)))), UInt64(type_hash_part(getfield(x, :body)))) % UInt32)
+    end
+    return UInt(0)
+end
+@device_override Base._jl_type_hash(T::Type) = type_hash_part(T)

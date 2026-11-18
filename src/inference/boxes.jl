@@ -250,11 +250,43 @@ function box_content_type(bx::BoxState, sv, @nospecialize(x))
     return nothing
 end
 
+# the type of `t[i]` for a tuple `t` that is a constant with a type in it, and an `i::Int` that is not a constant: a union of the types of its elements, with `Type{x}` for each that is a type; or `nothing`
+function types_of_constant_tuple(argtypes)
+    length(argtypes) == 3 || return nothing
+    t, i = argtypes[2], argtypes[3]
+    (t isa Core.Const && t.val isa Tuple && !(i isa Core.Const) && CC.widenconst(i) === Int) || return nothing
+    (any(e -> e isa Type, t.val) && length(t.val) <= SLOT_LIMIT[]) || return nothing
+    return Union{(e isa Type ? Core.TypeEgal{e} : typeof(e) for e in t.val)...}
+end
+
+# A read of a slot of types (see slots.jl) has the slots of the program looked at: it is what a program that has types as values does, which may make no other call that would have them looked at (`Vector{T}`
+# of a `T` that is read is the builtin `apply_type`)
+function type_slot_read!(c::Compilation, sv, key)
+    (key === nothing || c.dispatch.registered_used || c.slots.mode === :off) && return
+    type_value_declared(key[1] === :elem ? key[2] : fieldtype(key[2], key[3])) && note_dispatch_used!(c, sv)
+    return
+end
+
+# the type of a read that is checked (see `type_slot_get`) is the union of the types that the slot holds: what inference makes of the checks is a union of at most three of them, as a merge of constants is
+typed_read(call, @nospecialize(T), interp, sv) = CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+    return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
+end
+
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.getfield), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+    # (an element of a tuple that is a constant, that has types in it, by an index that is not known: `Type[Int, Float64][i]`: the types that it has, each a type that is known, and not the `DataType` that the field of the tuple is)
+    T = types_of_constant_tuple(arginfo.argtypes)
+    if T !== nothing && (sv isa CC.InferenceState || CC.isready(call))
+        return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+            return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
+        end
+    end
     c = compilation()
+    if isempty(c.slots.types) && !c.dispatch.registered_used && c.slots.mode !== :off && length(arginfo.argtypes) == 3 && arginfo.argtypes[3] isa Core.Const && (arginfo.argtypes[3].val isa Symbol || arginfo.argtypes[3].val isa Integer)
+        type_slot_read!(c, sv, field_slot_key(arginfo.argtypes[2], arginfo.argtypes[3].val))
+    end
     isempty(c.boxes.types) && isempty(c.slots.types) && isempty(c.registered.fields) && isempty(c.registered.embedded) && return call
     # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
     (sv isa CC.InferenceState || CC.isready(call)) || return call
@@ -273,6 +305,11 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
         key === nothing || (T = slot_read_type(c, key))
     end
     T === nothing && return call
+    mentions_type_value(T) && in_type_slot_read(sv) && return call
+    if mentions_type_value(T) && length(argtypes) == 3 && t isa Core.Const
+        # (types as values: the read is the call of a check of them, see dispatch.jl)
+        return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_field), argtypes[2], CC.Const(Val(t.val)), CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
+    end
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
         return CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
     end
@@ -284,13 +321,21 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.mem
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
     c = compilation()
-    isempty(c.slots.types) && return call
-    (sv isa CC.InferenceState || CC.isready(call)) || return call
     length(arginfo.argtypes) >= 2 || return call
+    if isempty(c.slots.types)
+        type_slot_read!(c, sv, elem_slot_key(arginfo.argtypes[2]))
+        return call
+    end
+    (sv isa CC.InferenceState || CC.isready(call)) || return call
     key = elem_slot_key(arginfo.argtypes[2])
     key === nothing && return call
     T = slot_read_type(c, key)
     T === nothing && return call
+    mentions_type_value(T) && in_type_slot_read(sv) && return call # (the read of a check of types: it is the slot itself)
+    if mentions_type_value(T) && length(arginfo.argtypes) == 4 && arginfo.argtypes[3] == CC.Const(:not_atomic) && arginfo.argtypes[4] == CC.Const(false)
+        # (types as values: the read is the call of a check of them, see dispatch.jl)
+        return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_get), arginfo.argtypes[2], CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
+    end
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
         return CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
     end

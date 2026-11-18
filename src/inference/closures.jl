@@ -496,7 +496,7 @@ function run_passes(c::Compilation, compile)
                     # (the types that the slots were given in this pass may be what failed: the first pass that has them uses what was stored that the analysis could type, and the passes that follow take back what it
                     # was wrong about; a pass that does not compile is not followed by one. The program is compiled once more without them, as it was before they were: with the failure that it has then, if it has one)
                     s.fell_back = true
-                    empty!(s.types)
+                    empty!(s.types); s.type_slots = false
                     s.mode = :off
                     slots_retry = true
                     failure = nothing

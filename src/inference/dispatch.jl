@@ -314,11 +314,17 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             T = CC.widenconst(T)
             # (a struct of the program with parameters that are not known, `Input` of `Input{T}`, is what is read from a slot that is declared so: what the slots hold is its instances. Not Julia's own, a `Vector` or a `Dict`
             # of some type: most programs have those, and would be analyzed for them)
-            if ((T isa DataType && isabstracttype(T)) || unknown_parameters_of_program(T)) && !(T <: Function) && !(T <: Type)
+            if (((T isa DataType && isabstracttype(T)) || unknown_parameters_of_program(T)) && !(T <: Function) && !(T <: Type)) || type_value_slot(T)
+                # (a type as a value that is not known, `Type`: it is what is read from a slot of types, see slots.jl)
                 note_dispatch_used!(c, sv)
                 break
             end
         end
+    end
+    # (a call on a type that is one of a few types, which are the cases that it is split in: Julia does not follow a call that has more methods than `max_methods`, which there can be for a function of types)
+    # (only where the program has slots of types, whose reads are such unions: a union of a few types is in much of the code of Base, `convert(::Union{Type{Bool},Type{Int}}, x)`, which more methods would be looked up for)
+    if c.slots.type_slots && any(a -> !(a isa Core.TypeofVararg) && (T = CC.widenconst(a); T isa Union && all(exact_type_value, Base.uniontypes(T))), arginfo.argtypes[2:end])
+        max_methods = max(max_methods, c.settings.split_limit)
     end
     call = @invoke CC.abstract_call_gf_by_type(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo, atype::Any,
                     vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
@@ -455,7 +461,31 @@ exact_type_argument(@nospecialize(t)) = (t isa CC.Const && t.val isa Type) ||
 function few_types_argument(@nospecialize(t))
     t isa Union || return false
     members = Base.uniontypes(t)
-    return length(members) <= 4 && all(exact_type_argument, members)
+    # (up to 16: a type that is read from a `Vector{Type}` is one of all the types that the program stores in one, which the slot of all of them has)
+    return length(members) <= 16 && all(exact_type_argument, members)
+end
+
+# the union of the types that `apply_type` makes from arguments that are each a type or a union of a few (`Union{Type{Vector{Int}},Type{Vector{Float64}}}`), or `nothing` if there are too many, or one can not be made
+function applied_types(argtypes)
+    choices = Any[]
+    for t in argtypes[2:end]
+        if t isa CC.Const
+            push!(choices, Any[t.val])
+        else
+            push!(choices, Any[Base.type_parameter(m) for m in Base.uniontypes(t)])
+        end
+    end
+    prod(length, choices) <= 64 || return nothing
+    made = Any[]
+    for combination in Iterators.product(choices...)
+        R = try
+            Core.apply_type(combination...)
+        catch
+            return nothing
+        end
+        push!(made, Core.TypeEgal{R})
+    end
+    return Union{made...}
 end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.apply_type), arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -464,7 +494,14 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.app
     if 3 <= length(argtypes) <= 5 && exact_type_argument(argtypes[2]) && any(few_types_argument, argtypes[3:end]) &&
        all(t -> exact_type_argument(t) || few_types_argument(t), argtypes[3:end])
         split = CC.ArgInfo(nothing, Any[CC.Const(split_apply_type), argtypes[2:end]...])
-        return CC.abstract_call(interp, split, si, vtypes, sv)
+        call = CC.abstract_call(interp, split, si, vtypes, sv)
+        T = applied_types(argtypes)
+        T === nothing && return call
+        # (what the call gives is one of the types that it makes, each a type that is known: what inference makes of the cases is a merge of constants, which is a union of at most three of them, and then
+        # `Type{<:Vector}`, which a call on it is not made over the cases of)
+        return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+            return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
+        end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
@@ -546,6 +583,8 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
             Expr(:call, call.args[2:end]...)
         elseif called === Core.apply_type && calls_split_apply_type(opt.stmt_info[pc])
             Expr(:call, split_apply_type, call.args[2:end]...)
+        elseif (called === Core.memoryrefget || called === Core.getfield) && (slot_call = type_slot_call(opt.stmt_info[pc])) !== nothing
+            slot_call[1] === type_slot_get ? Expr(:call, type_slot_get, call.args[2], slot_call[2]) : Expr(:call, type_slot_field, call.args[2], Val(call.args[3] isa QuoteNode ? call.args[3].value : call.args[3]), slot_call[2])
         elseif called === call_callback && length(call.args) >= 3
             # (`call_callback(T, f, args...)` is `f(args...)`, or no call at all where no function was registered for `T`: see closures.jl)
             opt.src.ssavaluetypes[pc] === Union{} ? Expr(:call, Core.throw, "a callback that was not registered") : Expr(:call, call.args[3:end]...)
@@ -663,8 +702,11 @@ end
 function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
     c = compilation()
     ir = assert_assumed_returns!(c, ir, opt.linfo)
-    (c.settings.check_types || !isempty(c.registered.fields) || !isempty(c.registered.embedded)) && (ir = check_slot_reads!(c, ir))
+    # (not in `type_slot_get` and `type_slot_field`: what they read is what they check)
+    (c.settings.check_types || !isempty(c.registered.fields) || !isempty(c.registered.embedded)) && !in_type_slot_read(opt) && (ir = check_slot_reads!(c, ir))
     ir = assert_field_receivers!(ir)
+    ir = expand_type_value_tests!(ir)
+    ir = concretize_type_tuples!(ir)
     expand_dynamic_getfield!(ir)
     ir = expand_setproperty!(ir)
     trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
@@ -715,6 +757,189 @@ function check_slot_reads!(c::Compilation, ir::CC.IRCode)
     return changed ? CC.compact!(ir) : ir
 end
 
+## Types as values: what is read from a slot of types
+
+# What is read from a slot of types (`Vector{Type}`, a field of the type `Type`) is of the types that were stored in it (see slots.jl): `Union{Type{Int},Type{Float64}}`. The read is checked, as every read of a slot is: a store that
+# the compiler did not see (a method that is given a type and stores it, and is not inlined) would be a type that the code that is made over the union does not have a case for. It is a call of `type_slot_get` (or
+# `type_slot_field`, for a field), which inference is made to take the read for and the optimizer to call (the type is given as a `Val`: a generated function is made for the types of its arguments, which are not those of `Type{Union{...}}`), and which gives the type that the value is, as a constant: `v === Int ? Int : v === Float64 ? Float64 : error`. (A union of
+# types of the program is not tested with `isa`: that is a call of the runtime for `Type{X}`.)
+mentions_type_value(@nospecialize(T)) = any(m -> exact_type_value(m) || (m isa DataType && m <: Tuple && any(p -> p isa Type && mentions_type_value(p), m.parameters)), Base.uniontypes(T))
+
+# The members of the type `U` as a tuple of `Val`s (a generator over the type alone: the value that is checked is of a type that is not concrete (`Type`), which a generator can not be made for), and what is asked of each: whether
+# the value is it, and what it then is: a type is itself (a constant), and the value as it is for a tuple (the types of its elements are those that the code that reads them was inferred with) and for a type that is concrete.
+@generated members(::Val{U}) where {U} = Expr(:tuple, (:(Val{$(QuoteNode(m))}()) for m in Base.uniontypes(U))...)
+
+@inline matches_any(v, ::Tuple{}) = false
+@inline matches_any(v, ms::Tuple) = matches_member(v, first(ms)) | matches_any(v, Base.tail(ms))
+@inline value_any(v, ::Tuple{}) = Core.throw("a type that was stored in a slot of types was not found when compiling")
+@inline value_any(v, ms::Tuple) = matches_member(v, first(ms)) ? member_value(v, first(ms)) : value_any(v, Base.tail(ms))
+
+# the type `X` of `Type{X}` (a generator, which is run when compiling)
+@generated type_value_constant(::Val{M}) where {M} = QuoteNode(type_value_parameter(M))
+
+@inline matches_member(v, ::Val{M}) where {M} = (M isa Core.TypeEq || M isa Core.TypeEgal) ? v === type_value_constant(Val{M}()) : (M <: Tuple && !isconcretetype(M)) ? matches_tuple(v, Val{M}()) : Core.isa(v, M)
+@inline member_value(v, ::Val{M}) where {M} = (M isa Core.TypeEq || M isa Core.TypeEgal) ? type_value_constant(Val{M}()) : (M <: Tuple && !isconcretetype(M)) ? Core.typeassert(v, concrete_tuple_type(Val{M}())) : Core.typeassert(v, M)
+
+# the type that a tuple of the type `M` (which has types as elements) is: `Tuple{DataType,Float64}` for `Tuple{Union{Type{Int},Type{Float64}},Float64}`; and `M` if it is not known (see `concretize_type_tuples!`)
+@generated function concrete_tuple_type(::Val{M}) where {M}
+    elements = Any[]
+    for p in M.parameters
+        members = Base.uniontypes(p)
+        kinds = unique(exact_type_value(m) ? typeof(type_value_parameter(m)) : m for m in members)
+        length(kinds) == 1 && isconcretetype(kinds[1]) || return QuoteNode(M)
+        push!(elements, kinds[1])
+    end
+    return QuoteNode(Tuple{elements...})
+end
+
+# whether each element of a tuple (of the type that it is, a concrete one: `Tuple{DataType,Float64}`, which a generator can be made for, and which has its elements read with the index known) is one of the types that the element can be
+@generated function matches_elements(w, ::Val{M}) where {M}
+    tests = Any[:(matches_any(getfield(w, $i), members(Val{$(QuoteNode(fieldtype(M, i)))}()))) for i in 1:fieldcount(M)]
+    return foldl((a, b) -> :($a & $b), tests)
+end
+@inline function matches_tuple(v, ::Val{M}) where {M}
+    CT = concrete_tuple_type(Val{M}())
+    return Core.isa(v, CT) && matches_elements(Core.typeassert(v, CT), Val{M}())
+end
+
+@inline checked_type_value(v, ::Val{U}) where {U} = value_any(v, members(Val{U}()))
+@inline type_slot_get(ref, ::Val{U}) where {U} = checked_type_value(Core.memoryrefget(ref, :not_atomic, false), Val{U}())
+@inline type_slot_field(x, ::Val{name}, ::Val{U}) where {name,U} = checked_type_value(Core.getfield(x, name), Val{U}())
+
+# whether the code that is inferred is one of these (what they read is the slot itself, not what is given to it)
+function in_type_slot_read(sv)
+    mi = sv isa CC.OptimizationState ? sv.linfo : CC.frame_instance(sv)
+    return mi isa Core.MethodInstance && mi.def isa Method && parentmodule(mi.def) === (@__MODULE__) && (mi.def.name === :type_slot_get || mi.def.name === :type_slot_field)
+end
+
+# the call that the statement was taken for (by `type_slot_get` or `type_slot_field`), as the function and the type that is checked, or `nothing`
+function type_slot_call(@nospecialize(info))
+    info isa CC.MethodMatchInfo || return nothing
+    matches = info.results.matches
+    length(matches) == 1 || return nothing
+    m = only(matches).method
+    (parentmodule(m) === (@__MODULE__) && (m.name === :type_slot_get || m.name === :type_slot_field)) || return nothing
+    V = only(matches).spec_types.parameters[end]
+    (V isa DataType && V <: Val && length(V.parameters) == 1 && V.parameters[1] isa Type) || return nothing
+    return (m.name === :type_slot_get ? type_slot_get : type_slot_field), Val{V.parameters[1]}()
+end
+
+## Types as values: tests of what a type is
+
+# `isa(x, Type{Int})` (what a call over the types that a value can be is made of: a union of `Type{X}`, and Julia tests the value against each member) is a call of the runtime, which looks at what `Type{Int}` is: for a type that is
+# one type it is `x === Int`, and for a union of them the tests that are or-ed.
+function type_value_test(ir::CC.IRCode, @nospecialize(operand))
+    t = CC.argextype(operand, ir)
+    t isa CC.Const && t.val isa Type || return nothing
+    U = t.val
+    all(exact_type_value, Base.uniontypes(U)) || return nothing
+    return U
+end
+
+# the bounds `(lower, upper)` of what `isa` tests against, if it is `Type{T} where lb<:T<:ub` (a method that takes `Type{<:S}`), or `nothing`
+function type_bounds_test(ir::CC.IRCode, @nospecialize(operand))
+    t = CC.argextype(operand, ir)
+    t isa CC.Const && t.val isa UnionAll || return nothing
+    u = t.val
+    u.body isa Type && u.body === Type{u.var} || return nothing
+    (u.var.lb isa Type && u.var.ub isa Type) || return nothing
+    return u.var.lb, u.var.ub
+end
+
+function expand_type_value_tests!(ir::CC.IRCode)
+    changed = false
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call && length(st.args) == 3 || continue
+        CC.singleton_type(CC.argextype(st.args[1], ir)) === Core.isa || continue
+        x = st.args[2]
+        bounds = type_bounds_test(ir, st.args[3])
+        if bounds !== nothing && CC.widenconst(CC.argextype(x, ir)) <: Type
+            # (`isa(x, Type{<:S})`, for the type `x` that is a type: `x <: S`)
+            lb, ub = bounds
+            result = Expr(:call, Core.:(<:), x, ub)
+            if lb !== Union{}
+                previous = CC.insert_node!(ir, pc, CC.NewInstruction(result, Bool), false)
+                this = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.:(<:), lb, x), Bool), false)
+                result = Expr(:call, Core.Intrinsics.and_int, previous, this)
+            end
+            ir.stmts[pc][:stmt] = result
+            changed = true
+            continue
+        end
+        U = type_value_test(ir, st.args[3])
+        U === nothing && continue
+        result = nothing
+        for m in Base.uniontypes(U)
+            test = Expr(:call, Core.:(===), x, type_value_parameter(m))
+            if result === nothing
+                result = test
+            else
+                previous = CC.insert_node!(ir, pc, CC.NewInstruction(result, Bool), false)
+                this = CC.insert_node!(ir, pc, CC.NewInstruction(test, Bool), false)
+                result = Expr(:call, Core.Intrinsics.or_int, previous, this)
+            end
+        end
+        ir.stmts[pc][:stmt] = result
+        changed = true
+    end
+    return changed ? CC.compact!(ir) : ir
+end
+
+# A tuple that has types as elements (`(Int, Float64)` of a union of them that is read from a slot) has the type of its elements, which are all `DataType`: `Tuple{DataType,DataType}`, which is a type that has a size, and is made
+# in the code. (The type that is known is `Tuple{Type,Type}`, which is not the type of any tuple: a tuple of it is made with a call of the runtime, which finds the type of each element.) Where each element is a type or
+# one of a few, whose types are all the same, the tuple is made as `Tuple{DataType,...}`.
+function concretize_type_tuples!(ir::CC.IRCode)
+    changed = false
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call && length(st.args) >= 2 || continue
+        f = CC.singleton_type(CC.argextype(st.args[1], ir))
+        if f === Core.getfield && length(st.args) >= 3
+            # (an element of a tuple that has types as elements, of the type that the program has for it: `Tuple{Type,Type}`, which no tuple is. The elements of all tuples of types are references, whichever of
+            # `DataType`, `UnionAll` and `Union` each is, so the tuple is read as `Tuple{DataType,DataType}`, as a read of a tuple that has a type that is concrete is: a load, and not a call of the runtime)
+            X = CC.widenconst(CC.argextype(st.args[2], ir))
+            if X isa DataType && X <: Tuple && !isconcretetype(X) && !isempty(X.parameters) && all(p -> p isa Type && (isconcretetype(p) || p === Type), X.parameters) && any(p -> p === Type, X.parameters)
+                C = Tuple{(p === Type ? DataType : p for p in X.parameters)...}
+                isconcretetype(C) || continue
+                st.args[2] = CC.insert_node!(ir, pc, CC.NewInstruction(Core.PiNode(st.args[2], C), C), false)
+                changed = true
+            end
+            continue
+        end
+        f === Core.tuple || continue
+        T = CC.widenconst(ir.stmts[pc][:type])
+        (T isa DataType && T <: Tuple && !isconcretetype(T) && length(T.parameters) == length(st.args) - 1) || continue
+        elements = Any[]
+        any_type = false
+        for a in st.args[2:end]
+            t = CC.argextype(a, ir)
+            if t isa CC.Const && t.val isa Type
+                push!(elements, typeof(t.val)); any_type = true
+            else
+                W = CC.widenconst(t)
+                members = Base.uniontypes(W)
+                if !isempty(members) && all(exact_type_value, members)
+                    kinds = unique(typeof(type_value_parameter(m)) for m in members)
+                    length(kinds) == 1 || (elements = nothing; break)
+                    push!(elements, kinds[1]); any_type = true
+                elseif isconcretetype(W)
+                    push!(elements, W)
+                else
+                    elements = nothing; break
+                end
+            end
+        end
+        (elements === nothing || !any_type) && continue
+        C = Tuple{elements...}
+        isconcretetype(C) || continue
+        ir.stmts[pc][:stmt] = Expr(:new, C, st.args[2:end]...)
+        ir.stmts[pc][:type] = C
+        changed = true
+    end
+    return changed ? CC.compact!(ir) : ir
+end
+
 function assert_field_receivers!(ir::CC.IRCode)
     changed = false
     for pc in 1:length(ir.stmts)
@@ -754,6 +979,9 @@ function expand_dynamic_getfield!(ir::CC.IRCode)
         else
             mi = CC.specialize_method(only(methods(index_field)), Tuple{typeof(index_field),T,Int}, Core.svec())
             ir.stmts[pc][:stmt] = Expr(:invoke, mi, index_field, st.args[2], st.args[3])
+            # (the elements of a tuple that is a constant, and has types in it: each is a type that is known, see `types_of_constant_tuple`; what the callee gives is the `DataType` that they are all of)
+            types = types_of_constant_tuple(Any[nothing, CC.argextype(st.args[2], ir), CC.argextype(st.args[3], ir)])
+            types === nothing || (ir.stmts[pc][:type] = types)
         end
     end
     return ir

@@ -100,13 +100,48 @@ end
     @test StaticRuntime.user_relevant(UMeters)
     @test StaticRuntime.user_relevant(Vector{UMeters})
     @test !StaticRuntime.user_relevant(Val{UMeters})
-    check_cases(universe_cases())
+    # (`uuse` of a `UBox{UMeters}` is 7 whatever the box holds: what the case is about is that it compiles)
+    check_cases(universe_cases(); folded_ok = ("a parametric type of it",))
     withenv("STATIC_RUNTIME_CHECK_TYPES" => "1") do
-        check_cases(universe_cases())
+        check_cases(universe_cases(); folded_ok = ("a parametric type of it",))
     end
     # (without it, the types that were not registered abort: as they did)
     withenv("STATIC_RUNTIME_UNIVERSE" => "0") do
         @test static_status(universe_cases()[1].second)[1] == :runtime_error
         @test static_status(universe_cases()[4].second)[1] == :ok
     end
+end
+
+# Types as values of a program: a `Vector{Type}`, a `Set{Type}`, a `Dict{Type,...}`, a tuple of types (see "Types as values" in slots.jl). What is read from a slot that is declared `Type` is one of the types that the program stored in
+# it (the compiler finds them: they are the cases that a call on it is made over), and the read is checked. Which type it is is not known when compiling (`opaque`).
+tv_index(i) = opaque(i)
+tv_pick(i) = i == 1 ? Int : i == 2 ? Float64 : String
+tv_kind(::Type{Int}) = "int"
+tv_kind(::Type{Float64}) = "float"
+tv_kind(::Type{<:AbstractString}) = "string"
+tv_kind(::Type) = "other"
+tv_kind4(::Type{Int}) = 1
+tv_kind4(::Type{Float64}) = 2
+tv_kind4(::Type{<:AbstractString}) = 3
+tv_kind4(::Type) = 4
+abstract type TVShape end
+struct TVCircle <: TVShape end
+struct TVSquare <: TVShape end
+tv_cases() = [
+    "equality of a type"         => () -> (v = Type[Int, Float64][tv_index(1)]; println(v === Int, " ", v == Int, " ", isequal(v, Float64)); 0),
+    "printing a type"            => () -> (v = Type[Int, Vector{Float64}][tv_index(2)]; println(v); println(string(v)); 0),
+    "subtype of a type"          => () -> (v = Type[Int, Float64, String][tv_index(1)]; println(v <: Integer, " ", v <: Real, " ", Real >: v); 0),
+    "a method of a type"         => () -> (v = Type[Int, Float64, String, Char][tv_index(3)]; println(tv_kind(v)); 0),
+    "a type that has four methods" => () -> (v = Type[Int, Float64, String, Char][tv_index(4)]; println(tv_kind4(v)); 0),
+    "hash of a type"             => () -> (v = Type[Int, Float64][tv_index(1)]; println(hash(v) == hash(Int)); 0),
+    "a set of types"             => () -> (s = Set{Type}(); push!(s, tv_pick(tv_index(1))); push!(s, Float64); push!(s, tv_pick(tv_index(1))); println(length(s), " ", Int in s, " ", String in s); 0),
+    "a dict of types"            => () -> (d = Dict{Type,Int}(); d[tv_pick(tv_index(1))] = 1; d[Float64] = 2; d[tv_pick(tv_index(2))] = 3; println(get(d, Int, 0), " ", get(d, Float64, 0), " ", length(d)); 0),
+    "a tuple of types"           => () -> (v = Tuple{Type,Type}[]; push!(v, (tv_pick(tv_index(1)), Float64)); println(v[1][1] === Int, " ", v[1][2], " ", length(v)); 0),
+    "a set of tuples of types"   => () -> (s = Set{Tuple{Type,Type}}(); push!(s, (tv_pick(tv_index(1)), Float64)); push!(s, (Int, Float64)); push!(s, (String, Float64)); println(length(s)); 0),
+    "a type made of types"       => () -> (v = Type[Int, Float64][tv_index(1)]; println(Vector{v} === Vector{Int}, " ", Tuple{v,String} === Tuple{Int,String}, " ", eltype(Vector{v}) === Int); 0),
+    "a type that is made"        => () -> (v = Type[TVCircle, TVSquare][tv_index(2)]; println(v <: TVShape, " ", v() isa TVShape, " ", v === TVSquare); 0),
+]
+@testset "Types as values" begin
+    # (one program for all: the slot of all the `Vector{Type}`s of a program holds all the types that it stores in them, more than each case has)
+    check_cases(tv_cases())
 end

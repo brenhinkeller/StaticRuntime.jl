@@ -132,11 +132,13 @@ mutable struct SlotState
     store_context::Any
     store_operand::Any
     current_result::Any                      # the `InferenceResult` that is being optimized: what is found of its code is kept with it (see `record_slot_facts!`)
+    type_slots::Bool                         # whether some of `types` are of slots of types (`Vector{Type}`, see slots.jl): only then are the calls on a union of types looked at further
+    holds_types::Dict{SlotKey,Bool}          # (whether each slot is one of types, once asked: `note_slot_store!`, which is called for each store)
 end
 SlotState(mode::Symbol) = SlotState(mode, false, 0, Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{Any,Vector{Any}}(),
                                     Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{SlotKey,Set{Any}}(), Set{Any}(), false,
                                     IdDict{Any,Vector{Tuple{SlotKey,Any}}}(), nothing,
-                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing)
+                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing, false, Dict{SlotKey,Bool}())
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState

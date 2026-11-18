@@ -1,7 +1,7 @@
 # Helpers that the tests share: a program is compiled to an executable, and has to give what Julia gives for the same code.
 
 using Test, Random, Printf, Libdl
-using LLVM # (`program_size` reads the module: the helpers are also run in a module of their own, `test/packages/runtests.jl`, which has only what is here)
+using LLVM # (tests read modules: the helpers are also run in a module of their own, `test/packages/runtests.jl`, which has only what is here)
 using StaticRuntime
 
 # `include` of a file of the tests that is timed (`TEST_TIMING=1` prints the times at the end of `runtests.jl`; `TEST_PROGRESS=1` says to the error output which file is being run, which is what shows where a run
@@ -100,38 +100,17 @@ end
 # (libm can differ from Julia's in the last bit: results of functions of it are compared to 6 digits)
 r6(x) = round(Int, 1e6 * x)
 
-# The number of instructions in the program of the zero-argument `f` (without the runtime, which is added when the program is made): a program that only prints a constant has a few,
-# because the compiler has run `f`.
-function program_size(f)
-    main = StaticRuntime.make_main(f)
-    return Base.invokelatest() do
-        StaticRuntime.StaticCompiler.GPUCompiler.JuliaContext() do ctx
-            # (the objects are embedded in the module, in place of their addresses, as the runtime does it: before that the module has raw pointers, which StaticCompiler warns about. The rest of the runtime is not linked)
-            size = Ref(0)
-            count_program!(mod) = begin
-                e = StaticRuntime.Runtime.ObjectEmbedder(mod, Dict())
-                StaticRuntime.Runtime.define_well_known_objects!(e)
-                StaticRuntime.Runtime.embed_constants!(e)
-                size[] = sum(count(_ -> true, (i for bb in LLVM.blocks(fn) for i in LLVM.instructions(bb))) for fn in LLVM.functions(mod) if !LLVM.isdeclaration(fn) && !startswith(LLVM.name(fn), "j_"); init = 0)
-                return mod
-            end
-            mod = Base.invokelatest(static_llvm_module, main, ENTRY_TYPES; strict = false, llvm_postprocess = count_program!)
-            LLVM.dispose(mod)
-            size[]
-        end
-    end
-end
-const FOLDED_LIMIT = 14 # (a program that prints a constant has about 10)
 # how much of the message of a case that is not compiled is shown (`TEST_DETAIL=4000` shows where the call that needs the runtime is, which the first 300 characters do not)
 const DETAIL_CHARS = something(tryparse(Int, get(ENV, "TEST_DETAIL", "")), 300)
-check_folded() = !isempty(get(ENV, "TEST_FOLDED", ""))
+check_folded() = get(ENV, "TEST_FOLDED", "1") != "0" # (on unless `TEST_FOLDED=0`; `TEST_FOLDED=report` lists the cases instead of failing them)
 
 """
     check_cases(cases; broken = (), folded_ok = (), batch = true, chunk = 24, kwargs...)
 
 Each element of `cases` is a testset: the program of a zero-argument function has to compile, and give what the function gives in Julia (what it writes, and its result: see
 `static_status`). An element is `name => f`, or a function (named by its name). The names in `broken` are the cases that don't work yet: when one does, it is an unexpected pass
-that has to be taken off the list. With `TEST_FOLDED=1` a case fails if the compiler runs it (see `opaque`), unless it is in `folded_ok`.
+that has to be taken off the list. A case fails if the compiler runs it (unless `TEST_FOLDED=0`) (its program computes nothing from a value that is only known when it runs, see `opaque` and
+`StaticRuntime.input_dependent_cases`), unless it is in `folded_ok`.
 
 The cases have to be independent of each other: they are compiled in groups of `chunk` (`batch = true`), each group as one program that runs them in turn, which is much faster than a
 program for each; a group that does not pass is compiled again case by case, so that what is said of a case is what it would be on its own. `kwargs` are the options of the compilation.
@@ -140,10 +119,17 @@ function check_cases(cases; broken = (), folded_ok = (), batch::Bool = true, chu
     named = [c isa Pair ? c : string(nameof(c)) => c for c in cases]
     isbroken = [name in broken for (name, _) in named]
     statuses = Vector{Tuple{Symbol,String}}(undef, length(named))
+    inputs = Vector{Union{Missing,Bool}}(missing, length(named)) # (with `TEST_FOLDED`: whether the program of each computes something when it runs, from the module that it was compiled in)
     todo = [i for i in eachindex(named) if !isbroken[i]]
     for group in Iterators.partition(todo, batch ? chunk : 1)
         fs = Function[named[i][2] for i in group]
-        statuses[group] = StaticRuntime.static_status_batch(fs; kwargs...)
+        if check_folded()
+            found = Vector{Union{Missing,Bool}}(missing, length(fs))
+            statuses[group] = StaticRuntime.static_status_batch(fs; inputs = found, kwargs...)
+            inputs[group] = found
+        else
+            statuses[group] = StaticRuntime.static_status_batch(fs; kwargs...)
+        end
     end
     for (i, (name, f)) in enumerate(named)
         @testset "$name" begin
@@ -154,11 +140,10 @@ function check_cases(cases; broken = (), folded_ok = (), batch::Bool = true, chu
                 @test (status, first(replace(string(detail), '\n' => ' '), DETAIL_CHARS)) == (:ok, "")
                 # (with `TEST_FOLDED=1`) the program has to do what the case does: not print an answer that the compiler found, which `opaque` values are for
                 if check_folded() && status == :ok && !(name in folded_ok)
-                    n = program_size(f)
                     if get(ENV, "TEST_FOLDED", "") == "report" # (lists them, and goes on)
-                        n > FOLDED_LIMIT || println("FOLDED ", name, " (", n, " instructions)")
+                        inputs[i] === true || println("FOLDED ", name)
                     else
-                        @test n > FOLDED_LIMIT # the program of this case is only a constant
+                        @test inputs[i] === true # the program of this case computes nothing when it runs: it is only the answer that the compiler found
                     end
                 end
             end

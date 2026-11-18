@@ -133,6 +133,18 @@ Still dynamic, and rejected when compiling:
 * Calls that compute a type from the types of the arguments at run time (`Dict(k => v)` of pairs with abstract values, `typejoin`,
   `sum(f, v)` of a `Vector{Any}`, whose element type is a union of the results).
 
+### Types as values
+
+A type that the program has as a value, and does not know which when compiling (`T = types[i]` of a `Vector{Type}`, the key of a `Dict{Type,...}`, an element of a `Set{Type}`, a tuple of types in a
+`Vector{Tuple{Type,Type}}`), is one of the types that the program stores in that kind of container: the compiler finds them in the code (as it does for the elements of a `Vector{Any}`, see above), and what is
+read is a union of a few `Type{X}`, which a call on it is made over, with a constant in each case. This is what makes `kind(T)` (a function with a method for each type), `T <: Integer`, `hash(T)`, `Set{Type}` and
+`Dict{Type,...}`, `Vector{T}`, `Tuple{T,String}`, `eltype(T)`, `T()` and `show` of a type work when `T` is a value that is only known when the program runs. Every read of such a container is checked: a type that
+the compiler did not find (stored by a method that the compiler did not see the argument of) stops the program, and is not taken for one of the others. A type that is a `UnionAll` or a `Union` has a hash that is
+made from its parts, which is not the number that Julia gives (a table that is made when the program runs is not affected).
+
+What is not found is a type that is made by the program from values that are not types (`Vector{eltype(x)}` of a value `x` of a type that is not known is the call of `eltype` on the type of `x`, which is the same as above),
+and a type that reaches the program as a `Type` argument of a function that the compiler does not see the callers of (an entry point, a `@cfunction`).
+
 ### Functions that are not known: closures in collections and in boxes
 
 A call `f(x)` of an `f` whose type is not known when compiling (a `Function` from a `Vector{Function}`, a `Dict` of functions, a field of the

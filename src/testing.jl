@@ -23,8 +23,11 @@ function define_main(prefix::Symbol, body::Vector)
     return Base.invokelatest(getproperty, Wrappers, name)
 end
 
+# the call `f()` in a `main`: not inlined into it when `isolate` (each case is then a function of its own in the module, which `input_dependent_cases` looks at)
+case_call(f, isolate::Bool) = isolate ? Expr(:macrocall, Base.var"@noinline", nothing, :($f())) : :($f())
+
 # a `main(argc, argv)` that prints `as_int(f())`
-make_main(f) = define_main(:static_main_, Any[:(printf(c"%ld\n", $as_int($f())))])
+make_main(f; isolate::Bool = false) = define_main(:static_main_, Any[:(printf(c"%ld\n", $as_int($(case_call(f, isolate)))))])
 
 """
     static_result(f; kwargs...) -> Int
@@ -107,14 +110,17 @@ detail_limit() = something(tryparse(Int, get(ENV, "TEST_DETAIL", "")), 300)
 
 Classify how far `f()` gets as a standalone executable: `:compile_error`, `:link_error`,
 `:runtime_error`, `:mismatch` or `:ok`. What `f` writes to stdout and to stderr, and what it
-returns, must match what it does in Julia.
+returns, must match what it does in Julia. With `inputs = Ref{Union{Missing,Bool}}(missing)`, it is also said
+there whether the program of `f` computes something from a value that is only known when it runs (see
+[`input_dependent_cases`](@ref)).
 """
-function static_status(f; kwargs...)
+function static_status(f; inputs::Union{Nothing,Base.RefValue{Union{Missing,Bool}}} = nothing, kwargs...)
     dir = mktempdir()
-    main = make_main(f)
+    main = make_main(f; isolate = inputs !== nothing)
     exe = try
         # linker failures are reported as a failed process; everything before is "compile"
-        Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), dir, string(nameof(main)); kwargs...)
+        inspect = inputs === nothing ? nothing : (mod -> (inputs[] = only(input_dependent_cases(mod, Any[f]))))
+        Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), dir, string(nameof(main)); inspect_llvm = inspect, kwargs...)
     catch e
         status = e isa ProcessFailedException || occursin("failed process", sprint(showerror, e)) ?
                  :link_error : :compile_error
@@ -136,10 +142,10 @@ function static_status(f; kwargs...)
 end
 
 # A `main` that runs each of `fs` in turn, writing a line with the number of the case (to the standard output, and to the standard error) before it, and the result after
-function make_batch_main(fs)
+function make_batch_main(fs; isolate::Bool = false)
     body = Any[]
     for (i, f) in enumerate(fs)
-        push!(body, :(printf(c"@@case %ld@@\n", $i)), :(printf($STDERR, c"@@case %ld@@\n", $i)), :(printf(c"%ld\n", $as_int($f()))))
+        push!(body, :(printf(c"@@case %ld@@\n", $i)), :(printf($STDERR, c"@@case %ld@@\n", $i)), :(printf(c"%ld\n", $as_int($(case_call(f, isolate))))))
     end
     return define_main(:static_batch_, body)
 end
@@ -179,20 +185,32 @@ function split_batch(text::AbstractString, n::Int)
 end
 
 """
-    static_status_batch(fs; kwargs...) -> Vector{Tuple{Symbol,String}}
+    static_status_batch(fs; inputs = nothing, kwargs...) -> Vector{Tuple{Symbol,String}}
 
 `static_status` of each of the zero-argument functions `fs`, for cases that don't depend on one another (their results and what they write are compared with Julia's, as for `static_status`).
 They are compiled as **one** program that runs them in turn, which takes much less time than a program for each; and if that is not `:ok` for all (it does not compile, or crashes, or
 the output of some is not what Julia writes) those that are not are compiled on their own, so that each has the status that it would have.
+
+With `inputs` (a `Vector{Union{Missing,Bool}}` of the length of `fs`), each element is set to whether the program of that case computes something from a value that is only known when
+it runs (see [`input_dependent_cases`](@ref)), from the module of the program that the case was compiled in; `missing` where that is not known.
 """
-function static_status_batch(fs::AbstractVector; kwargs...)
+function static_status_batch(fs::AbstractVector; inputs::Union{Nothing,AbstractVector} = nothing, kwargs...)
     n = length(fs)
-    n <= 1 && return Tuple{Symbol,String}[static_status(f; kwargs...) for f in fs]
-    ok = Tuple{Symbol,String}[]
+    inputs === nothing || fill!(inputs, missing)
+    single(i) = if inputs === nothing
+        static_status(fs[i]; kwargs...)
+    else
+        r = Ref{Union{Missing,Bool}}(missing)
+        status = static_status(fs[i]; inputs = r, kwargs...)
+        inputs[i] = r[]
+        status
+    end
+    n <= 1 && return Tuple{Symbol,String}[single(i) for i in 1:n]
     mismatched = Int[]
     try
-        main = make_batch_main(fs)
-        exe = Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(main)); kwargs...)
+        main = make_batch_main(fs; isolate = inputs !== nothing)
+        inspect = inputs === nothing ? nothing : (mod -> copyto!(inputs, input_dependent_cases(mod, fs)))
+        exe = Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(main)); inspect_llvm = inspect, kwargs...)
         err_path = tempname()
         out = read(pipeline(`$exe`; stderr = err_path), String)
         err = read(err_path, String)
@@ -203,7 +221,184 @@ function static_status_batch(fs::AbstractVector; kwargs...)
         @debug "a batch of cases was not run as one program; they are compiled one by one" exception = (e, catch_backtrace())
         mismatched = collect(1:n) # (it does not compile, or crashes: which of them is found by compiling each)
     end
-    return Tuple{Symbol,String}[i in mismatched ? static_status(fs[i]; kwargs...) : (:ok, "") for i in 1:n]
+    return Tuple{Symbol,String}[i in mismatched ? single(i) : (:ok, "") for i in 1:n]
+end
+
+## Whether a case computes something when it runs
+
+"""
+    input_dependent_cases(mod::LLVM.Module, fs) -> Vector{Bool}
+
+For each of the zero-argument functions `fs`, whether its code in the module `mod` (each is a function of its own there: see `make_batch_main` with `isolate`) computes something from a value that is
+only known when the program runs: the time, which `opaque` in the tests is made of (`time_ns()` is a call of `clock_gettime`, which writes into memory), and the entropy of the system (`getentropy`), which the random numbers start from. Values are followed from what is read of that memory
+through the instructions that use them, what is stored and read again (in a slot of the stack or an object of the binary, which are told apart, and the rest of memory, which is not), the arguments of the functions that they are given to, and what functions return. A case does if, in the code from which it can still return normally, it stores such a value, returns one, gives one to a call, or branches on one where both ways can return. A case whose function is not in the module (the compiler found what it returns, and the call is gone) does not.
+It also does if its own code reads memory that is not of its own stack and uses what it reads (a global that is not `const`, a mutable object that it captured: what is in them is known only when the
+program runs; a read of a constant is folded by LLVM), calls a function of the program (whose code runs then, whatever its arguments are: `print` of a number), or uses what a function of a library or of the system
+gives (`stat` of a file). A case that does neither is one whose program is only the answer that the compiler found: the test of it tests the compiler's constant folding,
+and not the code that it is about.
+"""
+function input_dependent_cases(mod::LLVM.Module, fs)
+    found = Bool[]
+    for f in fs
+        fns = case_functions(mod, f)
+        push!(found, !isempty(fns) && computes_from_input(values_from_input(fns)))
+    end
+    return found
+end
+
+# What is found of the values that come from the time and the entropy in the code that the functions `roots` reach (the functions that they call, and those that those call): the values, the memory that
+# holds them, the arguments that are given them, the functions that return them; and the functions that are looked at. For each case on its own, so that a function that two cases call is given what
+# one of them gives it only when that case is looked at.
+struct InputValues
+    roots::Vector{LLVM.Function}
+    tainted::Set{Ptr{Cvoid}}    # values
+    memory::Set{Ptr{Cvoid}}     # the stack slots (allocas) and the constant objects that hold such a value: known by their address, which is the same in all the code
+    heap::Base.RefValue{Bool}   # whether the rest of memory (what is allocated, reached through pointers that are loaded or given) holds one: it is not told apart
+end
+
+llvm_key(v) = Ptr{Cvoid}(v.ref)
+function pointer_base(v)
+    for _ in 1:32
+        if v isa LLVM.GetElementPtrInst || v isa LLVM.BitCastInst || v isa LLVM.AddrSpaceCastInst
+            v = LLVM.operands(v)[1]
+        elseif v isa LLVM.ConstantExpr && LLVM.API.LLVMGetConstOpcode(v) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
+            v = LLVM.operands(v)[1]
+        else
+            break
+        end
+    end
+    return v
+end
+exact_memory(v) = v isa LLVM.AllocaInst || v isa LLVM.Constant # (a slot of the stack, or an object of the binary: its address is a constant)
+is_pointer(v) = LLVM.value_type(v) isa LLVM.PointerType
+input_source(name) = occursin("clock_gettime", name) || occursin("gettimeofday", name) || occursin("mach_absolute_time", name) || occursin("getentropy", name)
+has_input(s::InputValues, v) = llvm_key(v) in s.tainted
+function holds_input(s::InputValues, p) # (whether what a pointer points to holds one)
+    b = pointer_base(p)
+    return exact_memory(b) ? llvm_key(b) in s.memory : s.heap[]
+end
+reaches_input(s::InputValues, v) = has_input(s, v) || (is_pointer(v) && holds_input(s, v))
+
+function values_from_input(roots::Vector{LLVM.Function})
+    # (the functions that are reached)
+    fns = LLVM.Function[]
+    seen = Set{Ptr{Cvoid}}()
+    todo = copy(roots)
+    while !isempty(todo)
+        fn = pop!(todo)
+        llvm_key(fn) in seen && continue
+        push!(seen, llvm_key(fn))
+        push!(fns, fn)
+        for bb in LLVM.blocks(fn), inst in LLVM.instructions(bb)
+            inst isa LLVM.CallInst || continue
+            callee = LLVM.called_operand(inst)
+            callee isa LLVM.Function && !LLVM.isdeclaration(callee) && push!(todo, callee)
+        end
+    end
+    s = InputValues(roots, Set{Ptr{Cvoid}}(), Set{Ptr{Cvoid}}(), Ref(false))
+    params = Set{Tuple{Ptr{Cvoid},Int}}() # (function, argument) that is given one
+    returns = Set{Ptr{Cvoid}}()           # functions that return one
+    changed = Ref(true)
+    add!(set, x) = (x in set || (push!(set, x); changed[] = true); nothing)
+    function hold!(p) # (what `p` points to now holds one)
+        b = pointer_base(p)
+        exact_memory(b) ? add!(s.memory, llvm_key(b)) : (s.heap[] || (s.heap[] = true; changed[] = true))
+        return
+    end
+    while changed[]
+        changed[] = false
+        for fn in fns
+            for (i, p) in enumerate(LLVM.parameters(fn))
+                (llvm_key(fn), i) in params && add!(s.tainted, llvm_key(p))
+            end
+            for bb in LLVM.blocks(fn), inst in LLVM.instructions(bb)
+                ops = LLVM.operands(inst)
+                if inst isa LLVM.LoadInst
+                    reaches_input(s, ops[1]) && add!(s.tainted, llvm_key(inst))
+                elseif inst isa LLVM.StoreInst
+                    has_input(s, ops[1]) && hold!(ops[2])
+                elseif inst isa LLVM.CallInst
+                    callee = LLVM.called_operand(inst)
+                    name = callee isa LLVM.Function ? LLVM.name(callee) : ""
+                    args = ops[1:end-1]
+                    if input_source(name)
+                        LLVM.value_type(inst) isa LLVM.VoidType || add!(s.tainted, llvm_key(inst)) # (`mach_absolute_time` returns it)
+                        for a in args
+                            is_pointer(a) && hold!(a)
+                        end
+                    elseif startswith(name, "llvm.memcpy") || startswith(name, "llvm.memmove")
+                        reaches_input(s, args[2]) && hold!(args[1])
+                    elseif startswith(name, "llvm.memset")
+                        has_input(s, args[2]) && hold!(args[1])
+                    elseif callee isa LLVM.Function && !LLVM.isdeclaration(callee)
+                        for (i, a) in enumerate(args)
+                            reaches_input(s, a) && add!(params, (llvm_key(callee), i))
+                        end
+                        llvm_key(callee) in returns && add!(s.tainted, llvm_key(inst))
+                    elseif any(a -> reaches_input(s, a), args) || has_input(s, callee)
+                        LLVM.value_type(inst) isa LLVM.VoidType || add!(s.tainted, llvm_key(inst))
+                    end
+                elseif inst isa LLVM.RetInst
+                    !isempty(ops) && has_input(s, ops[1]) && add!(returns, llvm_key(fn))
+                elseif !(LLVM.value_type(inst) isa LLVM.VoidType) && any(o -> has_input(s, o), ops)
+                    add!(s.tainted, llvm_key(inst))
+                end
+            end
+        end
+    end
+    return s
+end
+
+# Whether the case computes something with such a value that it gives on: in its own functions (`s.roots`), stores one, returns one, gives one to a call, or decides by one which way to go. Only in the blocks from which
+# the function can still return (the others are the paths of an error: a check that a value is in range, which does not change the answer when it passes), and a branch only where both ways can.
+function computes_from_input(s::InputValues)
+    for fn in s.roots
+        blocks = collect(LLVM.blocks(fn))
+        index = Dict(llvm_key(bb) => i for (i, bb) in enumerate(blocks))
+        succs = [Int[index[llvm_key(t)] for t in LLVM.successors(LLVM.terminator(bb)) if haskey(index, llvm_key(t))] for bb in blocks]
+        live = Bool[LLVM.terminator(bb) isa LLVM.RetInst for bb in blocks]
+        grew = true
+        while grew
+            grew = false
+            for i in eachindex(blocks)
+                live[i] || !any(j -> live[j], succs[i]) || (live[i] = true; grew = true)
+            end
+        end
+        for (i, bb) in enumerate(blocks)
+            live[i] || continue
+            for inst in LLVM.instructions(bb)
+                ops = LLVM.operands(inst)
+                if inst isa LLVM.RetInst
+                    !isempty(ops) && has_input(s, ops[1]) && return true
+                elseif inst isa LLVM.LoadInst
+                    # (a read of memory that is not of the case's own stack, whose value is used: of a global that is not `const`, of a mutable object (a `Matrix` that the case captured), of what the case made. What is in it
+                    # is known only when the program runs: a read of a constant is folded by LLVM, and is not here)
+                    !(pointer_base(ops[1]) isa LLVM.AllocaInst) && !isempty(LLVM.uses(inst)) && return true
+                elseif inst isa LLVM.StoreInst
+                    has_input(s, ops[1]) && return true
+                elseif inst isa LLVM.CallInst
+                    callee = LLVM.called_operand(inst)
+                    # (not the intrinsics: what a `memcpy` moves is followed to where it is used; and the memory that is cleared before the time is written into it is the same memory, as the order of the code is not looked at)
+                    (callee isa LLVM.Function && (input_source(LLVM.name(callee)) || startswith(LLVM.name(callee), "llvm."))) && continue
+                    # (a function of the program: its code runs when the program does, `print` of a number, `show` of a matrix, whatever the arguments are. One of a library or of the system, whose result is used: what
+                    # it gives is known only then, `stat` of a file, a match of a regex. Not one whose result is not used, with arguments that are constants: `printf` of a text that the compiler made, which is the answer)
+                    callee isa LLVM.Function && !LLVM.isdeclaration(callee) && return true
+                    !(LLVM.value_type(inst) isa LLVM.VoidType) && !isempty(LLVM.uses(inst)) && return true
+                    # (a value, or a pointer to memory that holds one that is known: `heap` is everything else, and many calls are given a pointer of it)
+                    any(a -> has_input(s, a) || (is_pointer(a) && exact_memory(pointer_base(a)) && llvm_key(pointer_base(a)) in s.memory), ops[1:end-1]) && return true
+                elseif inst isa LLVM.BrInst || inst isa LLVM.SwitchInst
+                    any(o -> has_input(s, o), ops) && count(j -> live[j], succs[i]) >= 2 && return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+# the functions of the module that are the code of `f` (`julia_<name>_<number>`, the name of its method: that of the function, or of the closure, `#8`, as `_8`)
+function case_functions(mod::LLVM.Module, f)
+    prefix = "julia_" * replace(string(nameof(f)), '#' => '_') * "_"
+    return [fn for fn in LLVM.functions(mod) if !LLVM.isdeclaration(fn) && startswith(LLVM.name(fn), prefix) && all(isdigit, LLVM.name(fn)[ncodeunits(prefix)+1:end])]
 end
 
 """

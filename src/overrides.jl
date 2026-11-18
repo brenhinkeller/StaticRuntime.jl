@@ -125,7 +125,7 @@ end
 for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_module)
     @eval begin
         function $f(args...; method_table = method_table, params = nothing, strict::Bool = true, stub_errors::Bool = true, allow = (), gc = default_gc(), target = default_target(),
-                    libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(), strip::Bool = true, llvm_postprocess = nothing, kwargs...)
+                    libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(), strip::Bool = true, llvm_postprocess = nothing, inspect_llvm = nothing, kwargs...)
             libraries in (:system, :bundle) || throw(ArgumentError("`libraries` is `:system` or `:bundle`, not `$(repr(libraries))`"))
             check_gc(gc)
             register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
@@ -133,7 +133,8 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             # (The code keeps its debug information until it has been accepted, which is what says where in the Julia code the calls of the runtime that it refuses are: `link_runtime!` removes it then, as `strip` says. The code
             # was made without it, and made again with it when it was refused: that was twice the time of what is refused. With a postprocess of the caller's, the code is given to it as `strip` says.)
             ours = llvm_postprocess === nothing
-            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries))) : llvm_postprocess
+            # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked to it, and does not change it; see `input_dependent_cases` in testing.jl)
+            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries))) : llvm_postprocess
             result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 entry_args = rooted_arguments(c, args)

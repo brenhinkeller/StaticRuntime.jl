@@ -121,7 +121,9 @@ gl_ref_untyped() = (gl_ref[] += 1; gl_ref[])
 gl_vec_untyped() = (push!(gl_untyped_vec, 9); sum(gl_untyped_vec))
 
 @testset "Global variables that are not const" begin
-    check_cases([gl_read, gl_write, gl_typed_read, gl_typed_write, gl_bump3, gl_loop, gl_strings, gl_retype, gl_vec_push, gl_vec_new, gl_dict_add, gl_point_update, gl_many_allocations, gl_two_functions, gl_float_update, gl_declared])
+    check_cases([gl_read, gl_write, gl_typed_read, gl_typed_write, gl_bump3, gl_loop, gl_strings, gl_retype, gl_vec_push, gl_vec_new, gl_dict_add, gl_point_update, gl_many_allocations, gl_two_functions, gl_float_update, gl_declared];
+                # (it writes 9 to a global and gives the 9 that it wrote, which the compiler knows)
+                folded_ok = ("gl_write",))
 
     # a global of a type that is not known (`Any`) that holds a value that is not of the registered types can't be used: and the message says why
     @testset "untyped globals of other types" begin
@@ -168,8 +170,8 @@ end
 @noinline kwu_two(; a = 0, b = 0.0) = a + b
 kwu_one() = kwu_color(5; bgcol = @opaque(1) > 100 ? UInt32(7) : missing)
 kwu_two_values() = Int(kwu_two(; a = @opaque(1) > 100 ? 1 : 2.0, b = @opaque(1) > 100 ? 1.0f0 : 2.0))
-kwu_merge() = (a = (x = @opaque(1) > 100 ? 1 : 2.0,); m = merge(a, (y = 1,)); Int(m.x) + m.y)
-kwu_merge_keywords() = (a = (x = 1, z = @opaque(1) > 100 ? 1 : 2.0); m = merge(a, (; w = 2)); Int(m.z) + m.w)
+kwu_merge() = (a = (x = @opaque(1) > 1 ? 1 : 2.0,); m = merge(a, (y = 1,)); Int(m.x) + m.y)
+kwu_merge_keywords() = (a = (x = 1, z = @opaque(1) > 1 ? 1 : 2.0); m = merge(a, (; w = 2)); Int(m.z) + m.w)
 kwu_splat() = (nt = (a = @opaque(1) > 100 ? 1 : 2.0,); Int(kwu_two(; nt...)))
 
 @testset "Keywords and NamedTuples of unions of types" begin

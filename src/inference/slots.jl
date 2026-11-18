@@ -135,10 +135,22 @@ end
 struct SlotsChanged <: Exception end
 
 # whether what is read from a slot of the declared type `T` has a type that is not known: `Any`, an abstract type, a union with one of them. (A concrete type, and a union of them, are known already.)
-needs_slot_type(@nospecialize(T)) = !(isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T))) || T <: Type)
+needs_slot_type(@nospecialize(T)) = !(isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T))) || (T <: Type && !type_value_slot(T)))
+
+# Types as values (`Vector{Type}`, `Dict{Type,Int}`, a field of the type `Type`): what a slot of the declared type `Type` (or `Type{<:Number}`) holds is the types that the program stores in it, each of which is a type that is
+# known, `Type{Int}`: what is read is a union of a few of them, which Julia splits a call over, with a constant in each case. A slot whose declared type is one type (`Type{Int}`) is a type that is known already.
+type_value_parameter(@nospecialize(T)) = try Base.type_parameter(T) catch; nothing end # (it has none for a `Type{X}` whose `X` is a type with a free variable: `nothing`)
+exact_type_value(@nospecialize(T)) = (T isa Core.TypeEq || T isa Core.TypeEgal) && (p = type_value_parameter(T); p isa Type && !CC.has_free_typevars(p))
+# (not `DataType`, `UnionAll` or `Union`, which are concrete: what they hold is any type, as before, and they are in much of the code, where making them slots would make the slots of every program be looked at)
+type_value_slot(@nospecialize(T)) = T isa Type && T !== Union{} && T <: Type && !isconcretetype(T) && !all(exact_type_value, Base.uniontypes(T))
+# the type of a value that is stored: `Type{x}` for a type (which is what is known of it), else the type of the value
+stored_value_type(@nospecialize(x)) = x isa Type ? Type{x} : typeof(x)
 
 # whether a type is one that a slot can be said to hold: concrete, or a union of them
-closed_type(@nospecialize(T)) = all(isconcretetype, Base.uniontypes(T))
+closed_type(@nospecialize(T)) = all(closed_member, Base.uniontypes(T))
+# (a concrete type, a type that is one type as a value, or a tuple of such: `Tuple{Type{Int},Float64}`)
+closed_member(@nospecialize(t)) = isconcretetype(t) || exact_type_value(t) ||
+    (t isa DataType && t <: Tuple && !isempty(t.parameters) && all(p -> p isa Type && closed_type(p), t.parameters))
 
 # The type of what is stored where the type of the value is `T`: a value of a type that is `Type{...}`, or `Type`, is a type object, which is a `DataType`, a `UnionAll` or a `Union` (a type that is not concrete otherwise)
 function stored_type(@nospecialize(T))
@@ -146,9 +158,40 @@ function stored_type(@nospecialize(T))
     return !isconcretetype(T) && T <: Type ? Union{DataType,UnionAll,Union} : T
 end
 
-function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T))
+# what is stored in a slot that holds types as values: the types that are known (`Type{Int}`), and `Type` for those that are not (the slot is given up)
+function stored_in_type_slot(@nospecialize(T))
+    T isa Union && return Union{(stored_in_type_slot(t) for t in Base.uniontypes(T))...}
+    # (a type that is known is `Core.TypeEgal{X}`, as inference has it where it makes a union of types: the code that is made over them, `show` of a type and the like, takes those)
+    exact_type_value(T) && return Core.TypeEgal{type_value_parameter(T)}
+    if T isa DataType && T <: Tuple && !isempty(T.parameters) && !any(p -> p isa Core.TypeofVararg || p isa TypeVar, T.parameters)
+        return Tuple{(stored_in_type_slot(p) for p in T.parameters)...}
+    end
+    return T !== Union{} && T <: Type ? Type : T # (a type that is not known: `Type`, which is not a type that is closed, and gives the slot up)
+end
+
+# a tuple type that has `Type{X}` as an element (see `value_type_of`) as it is for a slot that does not hold types as values: `DataType` (or `UnionAll`, `Union`) for the element
+function widen_tuple_type_values(@nospecialize(T))
+    mentions_type_value(T) || return T # (most stores: no type is made)
+    T isa Union && return Union{(widen_tuple_type_values(t) for t in Base.uniontypes(T))...}
+    if T isa DataType && T <: Tuple && !isempty(T.parameters) && !any(p -> p isa Core.TypeofVararg || p isa TypeVar, T.parameters)
+        return Tuple{(exact_type_value(p) ? typeof(type_value_parameter(p)) : widen_tuple_type_values(p) for p in T.parameters)...}
+    end
+    return T
+end
+
+# whether a slot of this declared type holds types as values: `Type`, or a tuple that has such an element (`Tuple{Type,Type}`)
+type_value_declared(@nospecialize(T)) = type_value_slot(T) || (T isa DataType && T <: Tuple && any(p -> p isa Type && type_value_declared(p), T.parameters))
+
+function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param::Bool = false)
     s, settings = c.slots, c.settings
-    T = stored_type(T)
+    if get!(() -> type_value_declared(key[1] === :elem ? key[2] : fieldtype(key[2], key[3])), s.holds_types, key)
+        T = stored_in_type_slot(T)
+        # (a type that a method is given, that is stored: a method is made for the types of its arguments, which for a type that is an argument is `DataType` (`Base.__safe_setindex!(::Vector{Type}, ::DataType, ::Int)`), and the type is what the
+        # caller has: the stores of the callers, which are of the types that they have, are those that are looked at. A store that is missed is found when the program runs, by the check of what is read)
+        param && !closed_type(T) && return
+    else
+        T = stored_type(widen_tuple_type_values(T))
+    end
     T === Union{} && return
     key in c.registered.embedded && !closed_type(T) && return # (see `@assume_field_embedded`: the reads are checked)
     if s.facts_sink !== nothing
@@ -218,8 +261,41 @@ function field_slot_key(@nospecialize(S), @nospecialize(name))
     return (:field, S, fieldname(S, idx))
 end
 
+# The type of what a lattice element is, with the types that it has as values: `widenconst` of a tuple that holds types (`(Int, 3)`) is `Tuple{DataType,Int}`, which is not the types that it has
+function value_type_of(@nospecialize(t))
+    if t isa CC.Const
+        v = t.val
+        v isa Type && return Type{v}
+        v isa Tuple && any(e -> e isa Type, v) && return Tuple{(e isa Type ? Type{e} : typeof(e) for e in v)...}
+    elseif t isa CC.PartialStruct && t.typ isa DataType && t.typ <: Tuple && length(t.fields) == length(t.typ.parameters) && any(f -> f isa CC.Const && f.val isa Type, t.fields)
+        return Tuple{(value_type_of(f) for f in t.fields)...}
+    end
+    return CC.widenconst(t)
+end
+
 # the type of an operand of a statement of optimized code, where the arguments are those of the specialization of the method
 function slot_operand_type(src::Core.CodeInfo, mi::Core.MethodInstance, x)
+    x isa Type && return Type{x} # (a type that the code has as a value: `Type{Int}`, not `DataType`)
+    x isa QuoteNode && x.value isa Type && return Type{x.value}
+    if x isa GlobalRef || x isa Core.BindingPartition
+        v = constant_operand(x) # (the code refers to a global through its binding partition: a constant that is a type)
+        v isa Type && return Type{v}
+    end
+    if x isa Core.SSAValue && src.ssavaluetypes isa Vector
+        T = value_type_of(src.ssavaluetypes[x.id])
+        # (the type of a tuple that is made in the code, as the types that its elements have: what the optimized code has for it is `Tuple{Type,DataType}` when an element is a type)
+        if T isa DataType && T <: Tuple && !isempty(T.parameters)
+            st = src.code[x.id]
+            st isa Expr && st.head === :(=) && length(st.args) == 2 && (st = st.args[2])
+            if st isa Expr && !isconcretetype(T) && st.head === :call && length(st.args) == length(T.parameters) + 1 && called_function(src.code, st.args[1]) === Core.tuple
+                return Tuple{(slot_operand_type(src, mi, a) for a in st.args[2:end])...}
+            elseif st isa Expr && st.head === :new && length(st.args) == length(T.parameters) + 1 && st.args[1] === T && any(p -> p === DataType || p === UnionAll, T.parameters)
+                # (a tuple of types that was made as `Tuple{DataType,...}`, see `concretize_type_tuples!`)
+                return Tuple{(slot_operand_type(src, mi, a) for a in st.args[2:end])...}
+            end
+        end
+        return T
+    end
     if x isa Core.Argument
         sig = Base.unwrap_unionall(mi.specTypes)
         sig isa DataType && x.n <= length(sig.parameters) || return Any
@@ -233,9 +309,10 @@ end
 const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer) ? x : nothing
 
 # What a statement stores in the slots: `called(x)` is the function (or the type) that the operand `x` is, and `optype(x)` the type of an operand
-function learn_statement!(c::Compilation, call::Expr, called, optype)
+function learn_statement!(c::Compilation, call::Expr, called, optype; precise::Bool = true)
     s = c.slots
-    store!(key, operand) = (s.store_operand = operand; note_slot_store!(c, key, optype(operand)))
+    # (`precise` is whether the types of the operands are those that inference had: the types of the statements of the optimized code are not, for a tuple that has types in it, which the facts that were kept from before the optimizer are: see `record_slot_facts!`)
+    store!(key, operand) = (s.store_operand = operand; note_slot_store!(c, key, optype(operand); param = operand isa Core.Argument || !precise))
     # `x.name = v` that is a call of `setproperty!` (not inlined, or before the inliner): a store of `v` in the field `name`, where that is known. (The method itself, which sets the field that its argument names, is not looked at: see
     # `learn_slots!`: this is how the stores that are made by it are known, with the name and the value of each call.)
     if (call.head === :call && length(call.args) == 4 && called(call.args[1]) === Base.setproperty!) ||
@@ -278,7 +355,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype)
                     for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
             else
                 key = field_slot_key(S, name)
-                key === nothing || (s.store_operand = operand; note_slot_store!(c, key, T))
+                key === nothing || (s.store_operand = operand; note_slot_store!(c, key, T; param = operand isa Core.Argument || !precise))
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
@@ -327,7 +404,7 @@ function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstanc
             defs = [string("%", a.id, " = ", first(string(code[a.id]), 150), " :: ", src.ssavaluetypes[a.id]) for a in call.args if a isa Core.SSAValue]
             s.store_context = string(mi, " #", pc, ": ", first(string(call), 160), "   WHERE ", join(defs, " ; "))
         end
-        learn_statement!(c, call, called, optype)
+        learn_statement!(c, call, called, optype; precise = false)
     end
     return
 end
@@ -357,7 +434,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     s.facts_sink = facts
     try
         called = x -> CC.singleton_type(CC.argextype(x, ir))
-        optype = x -> CC.widenconst(CC.argextype(x, ir))
+        optype = x -> value_type_of(CC.argextype(x, ir))
         for pc in 1:length(ir.stmts)
             st = ir.stmts[pc][:stmt]
             if c.settings.why
@@ -431,7 +508,7 @@ function scan_facts(@nospecialize(x0))
             for i in eachindex(x)
                 isassigned(x, i) || continue
                 e = x[i]
-                slot && push!(facts, (key, typeof(e)))
+                slot && push!(facts, (key, stored_value_type(e)))
                 push!(stack, e)
             end
         elseif x isa Tuple
@@ -448,7 +525,7 @@ function scan_facts(@nospecialize(x0))
             for i in 1:fieldcount(S)
                 isdefined(x, i) || continue
                 v = getfield(x, i)
-                needs_slot_type(fieldtype(S, i)) && push!(facts, ((:field, S, fieldname(S, i)), typeof(v)))
+                needs_slot_type(fieldtype(S, i)) && push!(facts, ((:field, S, fieldname(S, i)), stored_value_type(v)))
                 push!(stack, v)
             end
         end
@@ -528,7 +605,7 @@ function analyze_slots!(c::Compilation, interp, root)
         # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
         @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
         had_types = !isempty(s.types)
-        empty!(s.types)
+        empty!(s.types); s.type_slots = false
         s.mode = :off
         had_types && throw(SlotsChanged())
         return
@@ -559,7 +636,7 @@ function analyze_slots!(c::Compilation, interp, root)
     s.passes += 1
     if s.passes > SLOT_PASS_LIMIT
         # (it does not settle: the compilation is made as if there were no slots)
-        empty!(s.types)
+        empty!(s.types); s.type_slots = false
         s.mode = :off
     end
     throw(SlotsChanged())
@@ -641,6 +718,7 @@ function update_slot_types!(c::Compilation)
             changed = true
         end
     end
+    s.type_slots = any(k -> get!(() -> type_value_declared(k[1] === :elem ? k[2] : fieldtype(k[2], k[3])), s.holds_types, k), keys(s.types))
     return changed
 end
 
