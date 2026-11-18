@@ -61,11 +61,10 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * `titlecase` of a string (it needs the grapheme breaks of utf8proc),
   the `MersenneTwister` generator, and `Random.seed!(seed)` of the default generator need things of libjulia that are not there.
 
-* **Tuples that have a `Union` as an element** (`Tuple{Union{Vector{Float64},Vector{ComplexF64}},Int}`: what a function returns when the type of one of two values depends on the data) are made by Julia
-  with the types that the values have when the program runs, which an executable can't make. They are fine when the function that makes them is inlined (the tuple is not made), which the
-  compiler favors for them. A tuple that is returned by a function that is not inlined, or that is stored in an array or a `Dict`, is rejected when compiling; `enumerate` and `zip` of a
-  `Union` of tuples of different types compile, and stop when they are run.
-
+* **Tuples that have a `Union` as an element** (`Tuple{Union{Vector{Float64},Vector{ComplexF64}},Int}`: what a function returns when the type of one of two values depends on the data) are made and read as
+  one of the tuples that they are made of (`Tuple{Vector{Float64},Int}` or `Tuple{Vector{ComplexF64},Int}`), as a call on a union is made over its cases, when there are at most as many of them as `split_limit`
+  says (64): returned by a function that is not inlined, stored in an array, or made by `enumerate`. One of more cases, or of elements of abstract types, is made by Julia with the types that the values have
+  when the program runs, which an executable can't make, and is rejected when compiling.
 **What a binary starts with**
 
 * **What the compiling Julia has is copied.** A `const` container, a `Ref`, a string, ... is in the binary as it was when compiling, and

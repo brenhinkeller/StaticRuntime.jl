@@ -284,6 +284,25 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
         end
     end
     c = compilation()
+    # (an element of a tuple that is one of a few tuples: read as one of them, see `split_tuple` in dispatch.jl)
+    split = split_tuple_read(interp, arginfo, si, vtypes, sv)
+    split === nothing || return split
+    # (a field of an object that is known, which the program does not change: what it has, see objects.jl)
+    if c.slots.mode === :on && (sv isa CC.InferenceState || CC.isready(call))
+        folded = fold_field_read(c, arginfo.argtypes)
+        if folded !== nothing
+            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+                return result.rt === Union{} ? result : CC.CallMeta(folded, result.exct, result.effects, result.info, result.refinements)
+            end
+        end
+        # (a field of an object that is known, which the program writes: what it has, and what is stored in it)
+        OT = object_field_type(c, arginfo.argtypes)
+        if OT !== nothing
+            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+                return CC.CallMeta(refined_read(OT, result.rt), result.exct, result.effects, result.info, result.refinements)
+            end
+        end
+    end
     if isempty(c.slots.types) && !c.dispatch.registered_used && c.slots.mode !== :off && length(arginfo.argtypes) == 3 && arginfo.argtypes[3] isa Core.Const && (arginfo.argtypes[3].val isa Symbol || arginfo.argtypes[3].val isa Integer)
         type_slot_read!(c, sv, field_slot_key(arginfo.argtypes[2], arginfo.argtypes[3].val))
     end

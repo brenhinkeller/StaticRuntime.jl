@@ -31,10 +31,6 @@ const WORKERS = Dict(
     "Markdown.parse"           => refusal_in_process("() -> length(string(Markdown.parse(opaque(\"# a\"))))"),
 )
 
-# a tuple that has a `Union` as an element, and that is not removed by inlining (here it is returned by a function that is not inlined): it is made with the types that its values have when the
-# program runs, which an executable can't make. (When the function is inlined the tuple is not made: see `inline_tupleret_bonus` in `src/inference/dispatch.jl`.)
-@noinline union_tuple(n::Int) = (n > 0 ? [1.0] : [1.0im], n)
-
 @noinline recurse_forever(n::Int) = n == 0 ? 0 : 1 + recurse_forever(n - 1)
 @noinline function nested_try(n::Int, v::Vector{Int}) # (the recursion is not a loop that the compiler can make: a value is kept after each call)
     n == 0 && return 0
@@ -52,8 +48,6 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
 
 @testset "Refused when compiling" begin
     cases = [
-        # a tuple that has an element of a `Union` of types, and is made when the program runs
-        "a tuple with a Union element, not inlined" => () -> (p = union_tuple(opaque(1)); p[2] * 10 + length(p[1])),
         # code that is made when the program runs
         "eval"                        => () -> Core.eval(Main, :(1 + 1)),
         # functions of the libraries that Julia has (utf8proc) and does not have as libraries of their own

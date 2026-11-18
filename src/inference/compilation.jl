@@ -42,6 +42,7 @@ struct Settings
     dispatch_limit::Int
     slot_limit::Int
     share_cache::Bool               # `STATIC_RUNTIME_CACHE=1`: what is inferred is kept for the compilations that follow (faster; not what compiling is for: see `Compilation.id`)
+    objects::Bool                   # the objects that are constants are known one by one (objects.jl; `STATIC_RUNTIME_OBJECTS=0`: not)
 end
 
 function Settings(; strict::Bool = true)
@@ -57,7 +58,8 @@ function Settings(; strict::Bool = true)
                     haskey(ENV, "STATIC_RUNTIME_SLOTS_WHY"),
                     String[s for s in split(get(ENV, "STATIC_RUNTIME_SLOTS_BLIND", ""), ',') if !isempty(s)],
                     SPLIT_LIMIT[], DISPATCH_LIMIT[], SLOT_LIMIT[],
-                    get(ENV, "STATIC_RUNTIME_CACHE", "0") == "1")
+                    get(ENV, "STATIC_RUNTIME_CACHE", "0") == "1",
+                    get(ENV, "STATIC_RUNTIME_OBJECTS", "1") != "0")
 end
 
 # (`hash` of a struct that has a `Vector` is not that of what is in it)
@@ -146,6 +148,47 @@ SlotState(mode::Symbol) = SlotState(mode, false, 0, Dict{SlotKey,Any}(), Set{Slo
                                     IdDict{Any,Vector{Tuple{SlotKey,Any}}}(), nothing,
                                     Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing, false, Dict{SlotKey,Bool}(), Any[], nothing, Dict{Any,Set{Any}}(), Dict{Any,Set{Any}}(), Dict{Any,Vector{Any}}())
 
+# (an object, compared and hashed by what it is, and not by what it holds)
+struct ObjRef
+    x::Any
+end
+Base.:(==)(a::ObjRef, b::ObjRef) = a.x === b.x
+Base.hash(a::ObjRef, h::UInt) = hash(objectid(a.x), h)
+
+const MANY_INSTANCES = ObjRef(:many) # (a type that the constants have more than one object of)
+
+"What a compilation knows of the objects that are its constants (see objects.jl): found in a pass, and used in the next."
+mutable struct ObjectState
+    # found in this pass
+    instances::Dict{DataType,ObjRef}         # the object of each type that the constants have (or `MANY_INSTANCES`)
+    made::Set{Any}                           # the types that the code makes (`new`)
+    made_any::Bool                           # the code makes objects of types that are not known (a foreign call that does)
+    written::Set{Tuple{Any,Symbol}}          # the fields that the code writes: (type, name), (type, :*) for any field of it, (nothing, name) for the field of any type
+    written_any::Bool                        # a field of any object (of a type that is not known, by a name that is not known)
+    # used in this pass (what the pass before found)
+    use_instances::Dict{DataType,ObjRef}
+    use_made::Set{Any}
+    use_written::Set{Tuple{Any,Symbol}}
+    ready::Bool                              # whether there was a pass before (that found what is used): before, nothing is known of the objects
+    wanted::Bool                             # what was read in this pass could have been known with the facts of a pass before
+    folds::Int                               # (the reads that were known in this pass, for `STATIC_RUNTIME_TRACE`)
+    # what is stored in the fields of the objects, found in this pass (see "Stores in objects" in objects.jl)
+    stores::Dict{Tuple{ObjRef,Symbol},Any}   # (object, field) => the union of the types stored in it
+    unattributed::Dict{Tuple{Any,Symbol},Any} # (type, field) => what was stored in that field of an object of the type that is not known
+    unknown::Set{Any}                        # the (object, field) and (type, field) that something of a type that is not known was stored in
+    recvstores::Dict{Tuple{Any,Int},Vector{Tuple{Symbol,Any}}} # (method instance, n) => what its code stores in the fields of its argument `n`: (field, the argument whose value it is, or a type)
+    callsites::Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}} # method instance => its calls: (the caller, what each argument is: an object, an argument (method instance, n) of the caller, or `nothing`; the type of each)
+    use_stores::Dict{Tuple{ObjRef,Symbol},Any}
+    use_unattributed::Dict{Tuple{Any,Symbol},Any}
+    use_unknown::Set{Any}
+    scanned::Base.IdSet{Any}                 # (the constants whose objects were noted in this pass)
+    holds::IdDict{Any,Bool}                  # (`holds_object_slots` of each type, once asked: for the whole compilation)
+end
+ObjectState() = ObjectState(Dict{DataType,ObjRef}(), Set{Any}(), false, Set{Tuple{Any,Symbol}}(), false,
+                            Dict{DataType,ObjRef}(), Set{Any}(), Set{Tuple{Any,Symbol}}(), false, false, 0,
+                            Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Symbol,Any}}}(),
+                            Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Base.IdSet{Any}(), IdDict{Any,Bool}())
+
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
     registered_used::Bool
@@ -167,6 +210,7 @@ mutable struct Compilation
     boxes::BoxState
     slots::SlotState
     dispatch::DispatchState
+    objects::ObjectState                     # the objects that the program has as constants (objects.jl)
     nospecializeinfer::Vector{Method}        # the methods whose `@nospecializeinfer` was cleared for as long as the compilation runs (see `restore_nospecializeinfer!`)
     libraries::Base.RefValue{Runtime.LibraryPlan} # the libraries that the program calls, when it has been linked (`libraries = :bundle` copies them)
     id::Int                                  # what the cache of inference of this compilation is called (`OverridesParams`): its own, that nothing that another compilation inferred is in, and that is emptied when it ends (see `purge_inferred!`)
@@ -178,7 +222,7 @@ mutable struct Compilation
 end
 
 function Compilation(settings::Settings = Settings(), registered::Registered = Registered())
-    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[])
+    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), ObjectState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[])
     append!(c.closures.callbacks, registered.callbacks) # (those that exist before the program: see `add_callback!`)
     c.key = inference_key(c)
     return c
@@ -307,6 +351,7 @@ function begin_pass!(c::Compilation)
     empty!(s.argstores); empty!(s.argpasses); empty!(s.callargs)
     c.dispatch.registered_used = false
     empty!(c.dispatch.unions)
+    begin_objects_pass!(c.objects)
     c.key = inference_key(c)
     return c
 end

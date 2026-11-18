@@ -27,7 +27,7 @@ sy_made_twice() = (Symbol("new_" * sy_word()) === Symbol("new_" * sy_word())) + 
 sy_made_hash() = (hash(Symbol("new_" * sy_word())) == hash(Symbol("new_" * sy_word()))) + 2 * (hash(Symbol(Base.inferencebarrier("abc"))) == hash(:abc))
 sy_made_in_dict() = (d = Dict{Symbol,Int}(); for i in 1:50; d[Symbol("key", i)] = i; end; s = 0; for i in 1:50; s += d[Symbol("key", i)]; end; s + length(d))
 sy_many() = (s = 0; for i in 1:2000; s += Symbol("sym_", i) === Symbol("sym_", i); end; s)
-sy_roundtrip() = (n = 0; for s in (:red, :green, :blue); n += (Symbol(string(s)) === s) + (Symbol(String(s)) === s); end; n)
+sy_roundtrip() = (n = 0; for s in (opaque(:red), opaque(:green), opaque(:blue)); n += (Symbol(string(s)) === s) + (Symbol(String(s)) === s); end; n)
 
 # strings from symbols, and symbols from strings
 sy_string() = sy_p(string(sy_sym()))

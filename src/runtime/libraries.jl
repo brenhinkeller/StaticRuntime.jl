@@ -89,9 +89,13 @@ function library_needs(lib, path::String, libraries::Symbol)
                 m === nothing || push!(names, basename(m.captures[1]))
             end
         elseif Sys.islinux()
+            # (`libfoo.so.1 => /path/libfoo.so.1 (0x...)`, or `libfoo.so.1 => not found` for one that the system's loader does not find by itself, as `libblastrampoline` of a JLL is not: the name, which is that of the
+            # library that is loaded, and the path where there is one)
             for line in split(read(`ldd $path`, String), '\n')
                 m = match(r"^\s*(\S+)\s+=>\s+(\S+)", line)
-                m === nothing || push!(names, basename(m.captures[2]))
+                m === nothing && continue
+                push!(names, basename(m.captures[1]))
+                startswith(m.captures[2], "/") && push!(names, basename(m.captures[2]))
             end
         end
     catch

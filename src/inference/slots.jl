@@ -329,8 +329,15 @@ end
 const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer) ? x : nothing
 
 # What a statement stores in the slots: `called(x)` is the function (or the type) that the operand `x` is, and `optype(x)` the type of an operand
-function learn_statement!(c::Compilation, call::Expr, called, optype; precise::Bool = true, argof = x -> x isa Core.Argument ? x.n : nothing)
+function learn_statement!(c::Compilation, call::Expr, called, optype; precise::Bool = true, argof = x -> x isa Core.Argument ? x.n : nothing, lattice = x -> nothing)
     s = c.slots
+    # (a foreign call that makes a struct, of a type that is an argument of it: objects of any type are made, see objects.jl)
+    if call.head === :foreigncall && !isempty(call.args)
+        fname = call.args[1] isa QuoteNode ? call.args[1].value : call.args[1]
+        fname isa Tuple && !isempty(fname) && (fname = fname[1])
+        (fname isa Symbol || fname isa String) && occursin("new_struct", string(fname)) && note_made_any!(c)
+        return
+    end
     # (`precise` is whether the types of the operands are those that inference had: the types of the statements of the optimized code are not, for a tuple that has types in it, which the facts that were kept from before the optimizer are: see `record_slot_facts!`)
     store!(key, operand) = (s.store_operand = operand; a = argof(operand); note_slot_store!(c, key, optype(operand); param = a !== nothing || !precise, arg = a))
     # `x.name = v` that is a call of `setproperty!` (not inlined, or before the inliner): a store of `v` in the field `name`, where that is known. (The method itself, which sets the field that its argument names, is not looked at: see
@@ -340,12 +347,15 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
         o = call.head === :call ? 2 : 3
         name = const_field_name(call.args[o+1])
         S = optype(call.args[o])
+        note_written!(c, CC.widenconst(S), name) # (see objects.jl)
         if name === nothing
             S isa DataType && isconcretetype(S) && isstructtype(S) &&
                 for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
         else
             key = field_slot_key(S, name)
             key === nothing || store!(key, call.args[o+2])
+            v = call.args[o+2]
+            note_object_store!(c, CC.widenconst(S), name, lattice(call.args[o]), argof(call.args[o]), argof(v), optype(v))
         end
         return
     end
@@ -367,6 +377,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
             i = f === Core.replacefield! ? 5 : 4
             name = const_field_name(call.args[3])
             S = optype(call.args[2])
+            note_written!(c, CC.widenconst(S), name) # (see objects.jl)
             # (`stored`: whether the value is an operand. It can be the constant `nothing` itself, `x.val = nothing`, which is a store of `Nothing`: a `nothing` for "no operand" made it a store of
             # an unknown type, which opened every slot that a `nothing` is stored in, `Observable{Any}.val` of Makie's axes)
             stored = !(f === Core.modifyfield! || length(call.args) < i)
@@ -379,10 +390,12 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
             else
                 key = field_slot_key(S, name)
                 key === nothing || (s.store_operand = operand; a = stored ? argof(operand) : nothing; note_slot_store!(c, key, T; param = a !== nothing || !precise, arg = a))
+                note_object_store!(c, CC.widenconst(S), name, lattice(call.args[2]), argof(call.args[2]), stored ? argof(operand) : nothing, T)
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
             P = CC.widenconst(optype(call.args[2]))
+            P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && note_written!(c, P.parameters[1], nothing) # (a struct that is written through a pointer: any field of it)
             if P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && needs_slot_type(P.parameters[1])
                 note_slot_store!(c, (:elem, P.parameters[1], nothing), Any)
                 note_raw_store!(c, P.parameters[1])
@@ -390,6 +403,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
         end
     elseif call.head === :new && length(call.args) >= 2
         S = called(call.args[1])
+        note_made!(c, S) # (see objects.jl)
         S isa DataType && isconcretetype(S) && isstructtype(S) && !(S <: Tuple) || return
         for (i, a) in enumerate(call.args[2:end])
             i <= fieldcount(S) || break
@@ -399,6 +413,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
     elseif call.head === :splatnew && length(call.args) >= 2
         # (`new(t...)`: the fields are the elements of the tuple)
         S = called(call.args[1])
+        note_made!(c, S)
         S isa DataType && isconcretetype(S) && isstructtype(S) && !(S <: Tuple) || return
         TT = CC.widenconst(optype(call.args[2]))
         for i in 1:fieldcount(S)
@@ -424,7 +439,7 @@ function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstanc
         call = st isa Expr && st.head === :(=) && length(st.args) == 2 ? st.args[2] : st
         call isa Expr || continue
         c.settings.why && (s.store_context = (mi, pc, call, src)) # (made into text only for a store that is reported: `context_text`)
-        learn_statement!(c, call, called, optype; precise = false)
+        learn_statement!(c, call, called, optype; precise = false, lattice = x -> optimized_lattice(src, x))
     end
     return
 end
@@ -463,7 +478,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
                 s.store_operand = nothing
                 s.store_context = (mi, pc, st, nothing)
             end
-            st isa Expr && learn_statement!(c, st, called, optype; argof)
+            st isa Expr && learn_statement!(c, st, called, optype; argof, lattice = x -> CC.argextype(x, ir))
         end
         record_call_arguments!(facts, ir, mi)
         note_universe_statements!(c, (ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
@@ -509,6 +524,7 @@ can_hold_types(@nospecialize(P)) = P isa Type && P !== Union{} && (P <: Type || 
 
 # the calls of a method (before it is inlined: a call and what inference found it to be), and what they give to the arguments of the methods that they call: see above
 function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
+    c = compilation()
     for pc in 1:length(ir.stmts)
         st = ir.stmts[pc][:stmt]
         st isa Expr || continue
@@ -520,6 +536,15 @@ function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
             first_arg = 2
         elseif st.head === :call
             info = ir.stmts[pc][:info]
+            # (the calls that give an object to a method that may store in it: each method that the call may be, see objects.jl)
+            for m in call_matches(info)
+                # (only a call that gives an object whose stores are kept, which its signature says: the method instance is looked up only for those)
+                sig_m = Base.unwrap_unionall(m.spec_types)
+                (sig_m isa DataType && length(st.args) == length(sig_m.parameters) && gives_object(c, sig_m)) || continue
+                callee_m = CC.specialize_method(m)
+                callee_m isa Core.MethodInstance || continue
+                note_object_call!(c, ir, mi, callee_m, st.args, sig_m)
+            end
             info isa CC.MethodMatchInfo && length(info.results.matches) == 1 || continue
             callee = CC.specialize_method(only(info.results.matches))
             first_arg = 1
@@ -529,6 +554,7 @@ function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
         sig isa DataType || continue
         nargs = length(st.args) - first_arg + 1
         nargs == length(sig.parameters) || continue
+        st.head === :invoke && gives_object(c, sig) && note_object_call!(c, ir, mi, callee, view(st.args, first_arg:length(st.args)), sig)
         for n in 2:nargs
             can_hold_types(sig.parameters[n]) || continue
             a = st.args[first_arg + n - 1]
@@ -584,6 +610,14 @@ function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
             push!(get!(Set{Any}, s.argpasses, key[2]), T)
         elseif k === :callarg
             push!(get!(Vector{Any}, s.callargs, key[2]), T)
+        elseif k === :objstore || k === :unattributed || k === :recvstore || k === :callsite
+            apply_object_fact!(c, k, key[2], key[3], T)
+        elseif k === :instances_of
+            note_instances_of!(c, T.x, get!(() -> scan_facts(T.x), s.scan_cache, T.x))
+        elseif k === :made
+            key[2] === Any ? (c.objects.made_any = true) : note_made!(c, key[2])
+        elseif k === :written
+            note_written!(c, key[2], key[3])
         else
             note_slot_store!(c, key, T)
         end
@@ -613,6 +647,7 @@ scan_leaf(@nospecialize(x)) = x isa Type || x isa Module || x isa Symbol || x is
 # the facts about the slots, and the universe, that are in `x0` and in what it refers to: `(slot, type of what is stored)`, `((:universe, type, nothing), Any)` and `((:truncated, nothing, nothing), Any)`, each once
 function scan_facts(@nospecialize(x0))
     facts = Set{Tuple{SlotKey,Any}}()
+    instances = Any[]
     seen = Base.IdSet{Any}()
     stack = Any[x0]
     budget = SCAN_BUDGET
@@ -626,6 +661,7 @@ function scan_facts(@nospecialize(x0))
         end
         budget -= 1
         ismutable(x) && (x in seen ? continue : push!(seen, x))
+        tracked_object_type(typeof(x)) && push!(instances, x) # (the objects of each type, see objects.jl: kept apart from `facts`, which would hash them, and the hash of an immutable object is of all that it holds)
         if x isa Core.GenericMemory
             key = (:elem, eltype(x), nothing)
             slot = needs_slot_type(eltype(x))
@@ -652,7 +688,11 @@ function scan_facts(@nospecialize(x0))
             end
         end
     end
-    return collect(facts)
+    found = collect(facts)
+    for x in instances
+        push!(found, ((:instance, typeof(x), nothing), ObjRef(x)))
+    end
+    return found
 end
 
 function note_slots_in!(c::Compilation, @nospecialize(x))
@@ -661,9 +701,12 @@ function note_slots_in!(c::Compilation, @nospecialize(x))
         return
     end
     facts = get!(() -> scan_facts(x), c.slots.scan_cache, x)
+    # (the objects of the constant, see objects.jl: a method that refers to it keeps that it does, once, and not each of its objects, which can be many)
+    sink = c.slots.facts_sink
+    sink === nothing ? note_instances_of!(c, x, facts) : push!(sink, ((:instances_of, nothing, nothing), ObjRef(x)))
     for (key, T) in facts
         k = key[1]
-        k === :universe ? note_universe!(c, key[2]) : k === :truncated ? note_truncated!(c) : note_slot_store!(c, key, T)
+        k === :universe ? note_universe!(c, key[2]) : k === :truncated ? note_truncated!(c) : k === :instance ? nothing : note_slot_store!(c, key, T)
     end
     return
 end
@@ -721,10 +764,16 @@ function analyze_slots!(c::Compilation, interp, root)
         c.settings.why && (s.store_context = ("a constant that the code refers to", ci.def))
         note_slots_in_constants!(c, src.code)
     end
+    callers = Dict{Any,Set{Any}}() # (the methods that the code of each reaches, and so may call it: see `resolve_object_stores!`)
     for ci in reachable_code_instances(interp, root)
         c.settings.why && (s.store_context = ("kept from the inference of", ci.def))
         replay_slot_facts!(c, ci)
+        for e in ci.edges
+            callee = e isa Core.CodeInstance ? e.def : e
+            callee isa Core.MethodInstance && push!(get!(Set{Any}, callers, callee), ci.def)
+        end
     end
+    resolve_object_stores!(c, callers)
     c.settings.why && (s.store_context = "what the callers give to an argument that a method stores (see `resolve_argument_stores!`)")
     resolve_argument_stores!(c)
     if s.scan_truncated
@@ -746,6 +795,7 @@ function analyze_slots!(c::Compilation, interp, root)
     s.mode === :observe && return
     c.settings.why && report_why(c)
     changed = update_slot_types!(c)
+    changed |= update_objects!(c) # (what is known of the objects, see objects.jl)
     # Program types, that a call over an `Any` splits over; any new finds that were not used in this pass are used in the next
     if c.settings.universe && used
         add_stored_types!(c)

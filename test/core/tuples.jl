@@ -98,3 +98,15 @@ end
         "pairs of mixed, iterated"     => () -> (s = 0; for (k, v) in pairs((; a = "xx", b = "y", c = 5 + opaque(0))); s += v isa String ? length(v) : v; end; s),
     ]; batch = false)
 end
+# A tuple that has an element of a few types (`Tuple{Union{Vector{Float64},Vector{ComplexF64}},Int}`) is made and read as one of the tuples that it is made of (see `split_tuple` in src/inference/dispatch.jl):
+# returned by a function that is not inlined, stored in an array, and made by `enumerate` (Julia makes these with the types of the values, which an executable can't)
+@noinline union_tuple(n::Int) = (n > 0 ? [1.0] : [1.0im], n)
+const UNION_TUPLE_ANY = Any[1, 2.5]
+@testset "Tuples that have an element of a few types" begin
+    check_cases([
+        "returned by a function that is not inlined" => () -> (p = union_tuple(opaque(1)); p[2] * 10 + length(p[1])),
+        "stored in an array"                         => () -> (v = [union_tuple(opaque(1)), union_tuple(opaque(-1))]; length(v[1][1]) * 10 + v[2][2]),
+        "made by enumerate"                          => () -> (s = 0.0; for (i, x) in enumerate(UNION_TUPLE_ANY[1:opaque(2)]); s += i * (x::Union{Int,Float64}); end; s),
+        "a pair of values of two types"              => () -> (t = (opaque(1) > 1 ? 1 : 2.5, "s"); println(t[1] + 1, " ", t[2]); 0),
+    ])
+end

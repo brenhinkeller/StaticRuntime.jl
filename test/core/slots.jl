@@ -145,3 +145,26 @@ tv_cases() = [
     # (one program for all: the slot of all the `Vector{Type}`s of a program holds all the types that it stores in them, more than each case has)
     check_cases(tv_cases())
 end
+
+# Objects that are constants are known one by one (see src/inference/objects.jl): a field of an abstract type of each of them holds what it has and what is stored in it, and not what all of the objects of its type hold.
+# Here a listener stores the values of two cells as a pair in a third (as Makie's `transform_func` is the pair of `xscale[]` and `yscale[]`): with one slot for the field of all cells, its types would be pairs of its own types,
+# and pairs of those, without end (given up, the program needs the runtime). The other cells hold values of many types. (Only `identity` is stored in the first: a pair that is one of two, `Tuple{Union{A,B},C}`, is a tuple
+# that is made by the runtime, which is another limit.)
+mutable struct OTCell
+    val::Any
+end
+struct OTPair{A,B,C}
+    a::A
+    b::B
+    out::C
+end
+(p::OTPair)() = (p.out.val = (p.a.val, p.b.val); nothing)
+const OT_X = OTCell(identity)
+const OT_Y = OTCell(identity)
+const OT_T = OTCell((identity, identity))
+const OT_OTHERS = OTCell[OTCell(x) for x in (1, 2.0, "s", :a, 'c', 0x01, Int32(2), 1f0, (1, 2), nothing, missing)]
+const OT_LISTENER = OTPair(OT_X, OT_Y, OT_T)
+ot_pairs() = (opaque(1) == 1 && (OT_X.val = identity); OT_LISTENER(); t = OT_T.val; println(t[1] === identity, " ", t[2] === identity, " ", OT_OTHERS[opaque(3)].val isa String); 0)
+@testset "Objects known one by one" begin
+    check_cases(["a pair of the values of two objects, stored in a third" => ot_pairs])
+end

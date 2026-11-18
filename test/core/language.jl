@@ -168,8 +168,8 @@ end
 # Values of a union of types in keywords and `NamedTuple`s (the field of the `NamedTuple` is the union: see `docs/src/limits.md`)
 @noinline kwu_color(color; bgcol = missing) = bgcol === missing ? 1 : Int(bgcol) + color
 @noinline kwu_two(; a = 0, b = 0.0) = a + b
-kwu_one() = kwu_color(5; bgcol = @opaque(1) > 100 ? UInt32(7) : missing)
-kwu_two_values() = Int(kwu_two(; a = @opaque(1) > 100 ? 1 : 2.0, b = @opaque(1) > 100 ? 1.0f0 : 2.0))
+kwu_one() = kwu_color(5; bgcol = @opaque(1) > 1 ? UInt32(7) : missing)
+kwu_two_values() = Int(kwu_two(; a = @opaque(1) > 1 ? 1 : 2.0, b = @opaque(1) > 1 ? 1.0f0 : 2.0))
 kwu_merge() = (a = (x = @opaque(1) > 1 ? 1 : 2.0,); m = merge(a, (y = 1,)); Int(m.x) + m.y)
 kwu_merge_keywords() = (a = (x = 1, z = @opaque(1) > 1 ? 1 : 2.0); m = merge(a, (; w = 2)); Int(m.z) + m.w)
 kwu_splat() = (nt = (a = @opaque(1) > 100 ? 1 : 2.0,); Int(kwu_two(; nt...)))

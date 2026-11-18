@@ -525,6 +525,91 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.app
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
+# A tuple with an element that is one of a few types (`Tuple{Union{A,B},C}`, the pair of what two observables hold) is not a type that a value has: a value of it is one of the tuples that it is made of (`Tuple{A,C}` or
+# `Tuple{B,C}`), and Julia makes and reads it with the runtime (`jl_f_tuple`, `jl_get_nth_field_checked`), as it does not know which. `Core.tuple` of an argument of a few types, and `getfield` of such a tuple, are inferred
+# as calls of `split_tuple` and `split_getfield` (as a call of a function on a union is made over its cases: the tuple is made, or read, as one of a type that is known in each), and the statement is made that call before it
+# is optimized (see `optimize`), as `split_apply_type` is.
+for n in 1:16 # (a method for each number of elements: a method of any number of them has a `Vararg` in its signature, which the code that looks at the calls of methods takes as a type)
+    xs = [Symbol(:x, i) for i in 1:n]
+    @eval split_tuple($(xs...)) = ($(xs...),)
+end
+split_getfield(t::Tuple, i::Int) = getfield(t, i)
+
+# the tuple types that a tuple type of a few cases is made of (`Tuple{Union{A,B},C}`: `Tuple{A,C}` and `Tuple{B,C}`), each a type that values have, or `nothing`
+function tuple_cases(@nospecialize(T), limit::Int)
+    if T isa Union
+        found = Any[]
+        for u in Base.uniontypes(T)
+            c = tuple_cases(u, limit)
+            c === nothing && return nothing
+            append!(found, c)
+            length(found) > limit && return nothing
+        end
+        return found
+    end
+    (T isa DataType && T <: Tuple && !Base.isvatuple(T)) || return nothing
+    isconcretetype(T) && return Any[T]
+    found = Any[Tuple{}]
+    for p in T.parameters
+        options = element_cases(p, limit)
+        options === nothing && return nothing
+        found = Any[Tuple{f.parameters..., o} for f in found for o in options]
+        length(found) > limit && return nothing
+    end
+    return found
+end
+function element_cases(@nospecialize(p), limit::Int)
+    p isa Type || return nothing
+    isconcretetype(p) && return Any[p]
+    p isa Union && all(isconcretetype, Base.uniontypes(p)) && return Any[Base.uniontypes(p)...]
+    return p isa DataType && p <: Tuple ? tuple_cases(p, limit) : nothing
+end
+
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.tuple), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if length(argtypes) >= 2 && !any(a -> a isa Core.TypeofVararg, argtypes) && any(a -> (T = CC.widenconst(a); T isa Union && element_cases(T, compilation().settings.split_limit) !== nothing), argtypes[2:end])
+        T = Tuple{(CC.widenconst(a) for a in argtypes[2:end])...}
+        cases = tuple_cases(T, compilation().settings.split_limit)
+        if !(cases === nothing || length(argtypes) > 17)
+            call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(split_tuple), argtypes[2:end]...]), si, vtypes, sv)
+            # (what the call gives is the tuple that `Core.tuple` gives, `Tuple{Union{A,B},C}` or one made of what is known of the arguments: what inference makes of the cases is a merge of them, which is
+            # `Tuple{Any,C}` for more than a few, where Julia has the union)
+            rt = CC.tuple_tfunc(CC.typeinf_lattice(interp), argtypes[2:end])
+            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+                return result.rt === Union{} ? result : CC.CallMeta(rt, result.exct, result.effects, result.info, result.refinements)
+            end
+        end
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+end
+
+# (the read of an element of a tuple of a few cases, by an index that is a constant: the call of `split_getfield` on the union of the cases, or `nothing`)
+function split_tuple_read(interp, arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, sv)
+    argtypes = arginfo.argtypes
+    length(argtypes) == 3 || return nothing
+    (argtypes[3] isa Core.Const && argtypes[3].val isa Int) || return nothing
+    T = CC.widenconst(argtypes[2])
+    (T isa Union || (T isa DataType && T <: Tuple)) && !isconcretetype(T) || return nothing
+    cases = tuple_cases(T, compilation().settings.split_limit)
+    (cases === nothing || length(cases) < 2) && return nothing
+    call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(split_getfield), Union{cases...}, argtypes[3]]), si, vtypes, sv)
+    # (what is read is what `getfield` gives, as for `split_tuple` above: the union of what the cases give, which inference merges)
+    rt = CC.getfield_tfunc(CC.typeinf_lattice(interp), argtypes[2], argtypes[3])
+    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+        return result.rt === Union{} ? result : CC.CallMeta(rt, result.exct, result.effects, result.info, result.refinements)
+    end
+end
+
+# whether what inference found of a call is that of a call of a function of this module that is named `name` (each of the methods that it may be)
+function calls_helper(@nospecialize(info), name::Symbol)
+    info isa CC.UnionSplitInfo && return !isempty(info.split) && all(i -> calls_helper(i, name), info.split)
+    info isa CC.MethodMatchInfo || return false
+    matches = info.results.matches
+    return !isempty(matches) && all(m -> m.method.name === name && m.method.module === @__MODULE__, matches)
+end
+
 # whether what inference found of a call is that of a call of `split_apply_type` (see above)
 function calls_split_apply_type(@nospecialize(info))
     info isa CC.UnionSplitInfo && return !isempty(info.split) && all(calls_split_apply_type, info.split)
@@ -601,6 +686,10 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
             Expr(:call, call.args[2:end]...)
         elseif called === Core.apply_type && calls_split_apply_type(opt.stmt_info[pc])
             Expr(:call, split_apply_type, call.args[2:end]...)
+        elseif called === Core.tuple && calls_helper(opt.stmt_info[pc], :split_tuple)
+            Expr(:call, split_tuple, call.args[2:end]...)
+        elseif called === Core.getfield && length(call.args) == 3 && calls_helper(opt.stmt_info[pc], :split_getfield)
+            Expr(:call, split_getfield, call.args[2:end]...)
         elseif (called === Core.memoryrefget || called === Core.getfield) && (slot_call = type_slot_call(opt.stmt_info[pc])) !== nothing
             slot_call[1] === type_slot_get ? Expr(:call, type_slot_get, call.args[2], slot_call[2]) : Expr(:call, type_slot_field, call.args[2], Val(call.args[3] isa QuoteNode ? call.args[3].value : call.args[3]), slot_call[2])
         elseif called === call_callback && length(call.args) >= 3
@@ -754,7 +843,8 @@ function check_slot_reads!(c::Compilation, ir::CC.IRCode)
             continue
         end
         key === nothing && continue
-        slot_read_type(c, key) === nothing && continue
+        # (a read of a slot that was given types, or of a field of an object that is known: see objects.jl)
+        (slot_read_type(c, key) !== nothing || (f === Core.getfield && known_object(c, CC.argextype(st.args[2], ir)) !== nothing)) || continue
         (c.settings.check_types || haskey(c.registered.fields, key) || key in c.registered.embedded) || continue # (what is assumed is always checked)
         reads[pc] = key
         T = CC.widenconst(ir.stmts[pc][:type])

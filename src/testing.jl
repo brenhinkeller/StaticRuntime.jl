@@ -131,7 +131,9 @@ function static_status(f; inputs::Union{Nothing,Base.RefValue{Union{Missing,Bool
         read(pipeline(`$exe`; stderr = err_path), String)
     catch e
         crash_backtrace(exe, e) # (what a crash of the program was, in the log of CI, where it can't be run again by hand)
-        return :runtime_error, first(sprint(showerror, e), detail_limit())
+        # (and what the program said before it stopped: a library that it could not open, an error)
+        said = isfile(err_path) ? strip(read(err_path, String)) : ""
+        return :runtime_error, first(sprint(showerror, e) * (isempty(said) ? "" : " | stderr: " * said), detail_limit())
     end
     # after compiling, which snapshots the state of any global data
     expected, expected_err = expected_output(f)
