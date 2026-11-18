@@ -154,6 +154,7 @@ end
 # a global that is a container, which can be changed to refer to objects that are made later: it has to be looked at
 const HEAP_KEEP = Any[]
 const HEAP_REF = Ref{Any}(nothing)
+const HEAP_SINK = Ref{Vector{Int}}(Int[]) # (where the vectors of `bounded` go: an object that is stored in a global can not be removed by the optimizer, as one that nothing reads can)
 mutable struct HeapNode; v::Int; next::Union{HeapNode,Nothing}; end
 @noinline heap_message(i) = string("e", i)
 
@@ -186,10 +187,12 @@ mutable struct HeapNode; v::Int; next::Union{HeapNode,Nothing}; end
         function bounded(argc::Int, argv::Ptr{Ptr{UInt8}})
             s = 0
             for i in 1:3_000_000
-                v = Base.inferencebarrier(Vector{Int}(undef, 4 + (i & 3)))::Vector{Int}
+                v = Vector{Int}(undef, 4 + (i & 3))
                 v[1] = i
-                s += v[1]
+                HEAP_SINK[] = v # (it escapes: the allocation can not be removed, which LLVM did on x86_64 for a vector that is only read in the loop)
+                s += HEAP_SINK[][1]
             end
+            HEAP_SINK[] = Int[] # (so that the last one is garbage too)
             GC.gc()
             # (`s` is printed, so that the loop is not dead code: the allocations are what this is about, and the compiler may remove a loop that has no result)
             printf(c"%d %d %d %ld\n", gc_collections() > 0, gc_heap_bytes() < 64 << 20, gc_live_bytes() < 1 << 20, s)

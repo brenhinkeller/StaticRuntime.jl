@@ -89,7 +89,6 @@ jobs:
         env:
           GROUP: Packages
           TEST_FOLDED: 1
-          STATIC_RUNTIME_SLP: ${{ matrix.slp || '1' }}
           STATIC_RUNTIME_GC: ${{ matrix.gc || 'auto' }}
   fuzz:
     # random values and programs, each compiled and run in a process of its own with a time limit (`test/fuzz`, the group `Fuzzing`): the seeds that failed once, and random ones. A seed that fails
@@ -102,7 +101,6 @@ jobs:
         os:
           - ubuntu-latest
         gc:
-          - 'true'
           - '3'
     steps:
       - uses: actions/checkout@v2

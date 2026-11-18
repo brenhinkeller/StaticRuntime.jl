@@ -40,7 +40,7 @@ StaticRuntimeUnicodePlotsExt = "UnicodePlots"
 
 [compat]
 FunctionWrappers = "1"
-GPUCompiler = "2.19"
+GPUCompiler = "2.23"
 InteractiveUtils = "1"
 LLVM = "10"
 Libdl = "1"

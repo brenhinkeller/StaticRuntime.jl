@@ -215,7 +215,7 @@ function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param:
     T === Union{} && return
     key in c.registered.embedded && !closed_type(T) && return # (see `@assume_field_embedded`: the reads are checked)
     if s.facts_sink !== nothing
-        settings.why && !closed_type(T) && push!(s.unknown_census, (key, s.store_operand isa Core.Argument, string(s.store_context)))
+        settings.why && !closed_type(T) && push!(s.unknown_census, (key, s.store_operand isa Core.Argument, context_text(s.store_context)))
         push!(s.facts_sink, (key, T))
         return
     end
@@ -225,7 +225,7 @@ function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param:
         push!(s.seen_unknown, key)
         if settings.why
             why = get!(Vector{String}, s.unknown_stores, key)
-            length(why) < 6 && push!(why, string(T, "  in  ", s.store_context))
+            length(why) < 6 && push!(why, string(T, "  in  ", context_text(s.store_context)))
         end
         return
     end
@@ -367,15 +367,18 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
             i = f === Core.replacefield! ? 5 : 4
             name = const_field_name(call.args[3])
             S = optype(call.args[2])
-            operand = f === Core.modifyfield! || length(call.args) < i ? nothing : call.args[i]
-            T = operand === nothing ? Any : optype(operand)
+            # (`stored`: whether the value is an operand. It can be the constant `nothing` itself, `x.val = nothing`, which is a store of `Nothing`: a `nothing` for "no operand" made it a store of
+            # an unknown type, which opened every slot that a `nothing` is stored in, `Observable{Any}.val` of Makie's axes)
+            stored = !(f === Core.modifyfield! || length(call.args) < i)
+            operand = stored ? call.args[i] : nothing
+            T = stored ? optype(operand) : Any
             if name === nothing
                 # (a field that is not known when compiling: any of the fields that hold an unknown type may be it)
                 S isa DataType && isconcretetype(S) && isstructtype(S) &&
                     for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
             else
                 key = field_slot_key(S, name)
-                key === nothing || (s.store_operand = operand; a = operand === nothing ? nothing : argof(operand); note_slot_store!(c, key, T; param = a !== nothing || !precise, arg = a))
+                key === nothing || (s.store_operand = operand; a = stored ? argof(operand) : nothing; note_slot_store!(c, key, T; param = a !== nothing || !precise, arg = a))
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
@@ -420,10 +423,7 @@ function learn_slots!(c::Compilation, src::Core.CodeInfo, mi::Core.MethodInstanc
         st = code[pc]
         call = st isa Expr && st.head === :(=) && length(st.args) == 2 ? st.args[2] : st
         call isa Expr || continue
-        if c.settings.why
-            defs = [string("%", a.id, " = ", first(string(code[a.id]), 150), " :: ", src.ssavaluetypes[a.id]) for a in call.args if a isa Core.SSAValue]
-            s.store_context = string(mi, " #", pc, ": ", first(string(call), 160), "   WHERE ", join(defs, " ; "))
-        end
+        c.settings.why && (s.store_context = (mi, pc, call, src)) # (made into text only for a store that is reported: `context_text`)
         learn_statement!(c, call, called, optype; precise = false)
     end
     return
@@ -461,7 +461,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
             st = ir.stmts[pc][:stmt]
             if c.settings.why
                 s.store_operand = nothing
-                s.store_context = string(mi, " #", pc, ": ", first(string(st), 120))
+                s.store_context = (mi, pc, st, nothing)
             end
             st isa Expr && learn_statement!(c, st, called, optype; argof)
         end
@@ -643,7 +643,6 @@ function scan_facts(@nospecialize(x0))
         elseif isstructtype(typeof(x)) && !(x isa Core.CodeInstance) && !(x isa Core.MethodInstance) && !(x isa Method) && !(x isa Core.TypeName) &&
                !(x isa Task) # (a task is the state of the process that compiles: its scope, its storage, the tasks that wait for it. The tasks of a program are made by the program (see tasks.jl). `Base.roottask` is a constant of code that waits)
             S = typeof(x)
-            fieldcount(S) > SCAN_FIELDS && get(ENV, "SR_WIDE", "") == "1" && println(stderr, "SRWIDE ", S) # TEMPORARY
             budget -= fieldcount(S) ÷ SCAN_FIELDS # (a struct of many fields, Makie's `Axis` of 152, is looked at as an array of as many elements would be: its fields count as objects)
             for i in 1:fieldcount(S)
                 isdefined(x, i) || continue
@@ -719,11 +718,14 @@ function analyze_slots!(c::Compilation, interp, root)
         src isa Core.CodeInfo && ci.def isa Core.MethodInstance || continue
         learn_slots!(c, src, ci.def)
         note_universe_statements!(c, src.ssavaluetypes isa Vector ? src.ssavaluetypes : Any[], src.code, ci.def)
+        c.settings.why && (s.store_context = ("a constant that the code refers to", ci.def))
         note_slots_in_constants!(c, src.code)
     end
     for ci in reachable_code_instances(interp, root)
+        c.settings.why && (s.store_context = ("kept from the inference of", ci.def))
         replay_slot_facts!(c, ci)
     end
+    c.settings.why && (s.store_context = "what the callers give to an argument that a method stores (see `resolve_argument_stores!`)")
     resolve_argument_stores!(c)
     if s.scan_truncated
         # If a constant is too large, the program is compiled as if there were no slots
@@ -765,6 +767,18 @@ function analyze_slots!(c::Compilation, interp, root)
         s.mode = :off
     end
     throw(SlotsChanged())
+end
+
+# (for `STATIC_RUNTIME_SLOTS_WHY`: where a store is, as text. It is kept as the method, the statement and its code, and made into text only for the stores that are reported: making it for each statement of a large program, as
+# was done, took longer than compiling it)
+function context_text(ctx)
+    ctx isa Tuple || return string(ctx)
+    length(ctx) == 2 && return string("(", ctx[1], ") ", ctx[2])
+    mi, pc, st, src = ctx
+    src === nothing && return string(mi, " #", pc, ": ", first(string(st), 120))
+    code = src.code
+    defs = [string("%", a.id, " = ", first(string(code[a.id]), 150), " :: ", src.ssavaluetypes[a.id]) for a in st.args if a isa Core.SSAValue]
+    return string(mi, " #", pc, ": ", first(string(st), 160), "   WHERE ", join(defs, " ; "))
 end
 
 # (for `STATIC_RUNTIME_SLOTS_WHY`: why the slots are given up, as text on the error output)

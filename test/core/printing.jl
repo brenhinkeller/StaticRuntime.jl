@@ -8,8 +8,6 @@
     "println Vector Float64" => () -> (println([1.5, 2.0]); 1),
     "string mixed"          => () -> length(string("a", 1, 'b', 2.5)),
     "sprint"                => () -> length(sprint(print, 12345)),
-    "stdout"                => () -> (println(stdout, "to stdout"); 1),
-    "stderr"                => () -> (println(stderr, "to stderr"); 1),
     "STDOUT"                => () -> (println(STDOUT, "explicit ", 1, ' ', 2.5); print(STDOUT, "x", 'y'); println(STDOUT); 1),
     "STDERR"                => () -> (println(STDERR, "to stderr"); print(STDERR, 1, 2, 3); println(STDERR); 1),
     "STDOUT show"  => @opaque(() -> (show(STDOUT, 12); show(STDOUT, "str"); show(STDOUT, 'c'); println(STDOUT); 1)),
@@ -48,8 +46,10 @@ sty_color(name) = Symbol(Base.inferencebarrier(name))
 end
 
 # The streams of Julia (`stdout`, `stderr`, `stdin`) are the streams of libc in a program: packages write to them as the default of an `io`
-@testset "stdout and stderr of Base" begin
+@testset "Base `stdout` and `stderr`" begin
     check_cases([
+        "println to stdout"     => () -> (println(stdout, "to stdout"); 1),
+        "println to stderr"     => () -> (println(stderr, "to stderr"); 1),
         "print, show, @printf"  => () -> (print(stderr, "e", opaque(4)); show(stdout, opaque(5)); println(); @printf(stdout, "%d %s\n", opaque(6), "a"); 0),
         "io = stdout default"   => () -> (f(io = stdout) = println(io, opaque(7)); f(); 0),
         "flush"                 => () -> (println("a"); flush(stdout); flush(stderr); 0),
