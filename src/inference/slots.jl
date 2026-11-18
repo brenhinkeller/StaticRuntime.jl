@@ -179,16 +179,36 @@ function widen_tuple_type_values(@nospecialize(T))
     return T
 end
 
+# the types that are the members of `U` that are types that are known, and the elements of its tuples that are
+function collect_type_values!(found::Vector{Any}, @nospecialize(U))
+    for m in Base.uniontypes(U)
+        if exact_type_value(m)
+            push!(found, type_value_parameter(m))
+        elseif m isa DataType && m <: Tuple
+            for p in m.parameters
+                p isa Type && collect_type_values!(found, p)
+            end
+        end
+    end
+    return found
+end
+
 # whether a slot of this declared type holds types as values: `Type`, or a tuple that has such an element (`Tuple{Type,Type}`)
 type_value_declared(@nospecialize(T)) = type_value_slot(T) || (T isa DataType && T <: Tuple && any(p -> p isa Type && type_value_declared(p), T.parameters))
 
-function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param::Bool = false)
+function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param::Bool = false, arg::Union{Nothing,Int} = nothing)
     s, settings = c.slots, c.settings
     if get!(() -> type_value_declared(key[1] === :elem ? key[2] : fieldtype(key[2], key[3])), s.holds_types, key)
         T = stored_in_type_slot(T)
         # (a type that a method is given, that is stored: a method is made for the types of its arguments, which for a type that is an argument is `DataType` (`Base.__safe_setindex!(::Vector{Type}, ::DataType, ::Int)`), and the type is what the
         # caller has: the stores of the callers, which are of the types that they have, are those that are looked at. A store that is missed is found when the program runs, by the check of what is read)
-        param && !closed_type(T) && return
+        # A store of a type that is not known (`Type`, `DataType`, `Type{<:AbstractFunction}` of a method that is made for any of them, a tuple with one): what is stored in a slot of types is a type, whatever it is, and
+        # the read of the slot is checked (a type that is not one of those that were found stops the program, with a message that says so). So it says nothing of the types that the slot holds, which are those of the
+        # stores that are known. Of an argument of the method, what the callers give it is what is stored: kept as a fact of the method, see `resolve_argument_stores!`.
+        if !closed_type(T)
+            param && arg !== nothing && s.facts_sink !== nothing && s.fact_mi !== nothing && push!(s.facts_sink, ((:argstore, (s.fact_mi, arg), nothing), key))
+            return
+        end
     else
         T = stored_type(widen_tuple_type_values(T))
     end
@@ -309,10 +329,10 @@ end
 const_field_name(x) = x isa QuoteNode ? x.value : (x isa Symbol || x isa Integer) ? x : nothing
 
 # What a statement stores in the slots: `called(x)` is the function (or the type) that the operand `x` is, and `optype(x)` the type of an operand
-function learn_statement!(c::Compilation, call::Expr, called, optype; precise::Bool = true)
+function learn_statement!(c::Compilation, call::Expr, called, optype; precise::Bool = true, argof = x -> x isa Core.Argument ? x.n : nothing)
     s = c.slots
     # (`precise` is whether the types of the operands are those that inference had: the types of the statements of the optimized code are not, for a tuple that has types in it, which the facts that were kept from before the optimizer are: see `record_slot_facts!`)
-    store!(key, operand) = (s.store_operand = operand; note_slot_store!(c, key, optype(operand); param = operand isa Core.Argument || !precise))
+    store!(key, operand) = (s.store_operand = operand; a = argof(operand); note_slot_store!(c, key, optype(operand); param = a !== nothing || !precise, arg = a))
     # `x.name = v` that is a call of `setproperty!` (not inlined, or before the inliner): a store of `v` in the field `name`, where that is known. (The method itself, which sets the field that its argument names, is not looked at: see
     # `learn_slots!`: this is how the stores that are made by it are known, with the name and the value of each call.)
     if (call.head === :call && length(call.args) == 4 && called(call.args[1]) === Base.setproperty!) ||
@@ -355,7 +375,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
                     for i in 1:fieldcount(S); needs_slot_type(fieldtype(S, i)) && note_slot_store!(c, (:field, S, fieldname(S, i)), Any); end
             else
                 key = field_slot_key(S, name)
-                key === nothing || (s.store_operand = operand; note_slot_store!(c, key, T; param = operand isa Core.Argument || !precise))
+                key === nothing || (s.store_operand = operand; a = operand === nothing ? nothing : argof(operand); note_slot_store!(c, key, T; param = a !== nothing || !precise, arg = a))
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
@@ -432,25 +452,115 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     s = c.slots
     facts = Tuple{SlotKey,Any}[]
     s.facts_sink = facts
+    s.fact_mi = mi
     try
         called = x -> CC.singleton_type(CC.argextype(x, ir))
         optype = x -> value_type_of(CC.argextype(x, ir))
+        argof = x -> argument_index(ir, x)
         for pc in 1:length(ir.stmts)
             st = ir.stmts[pc][:stmt]
             if c.settings.why
                 s.store_operand = nothing
                 s.store_context = string(mi, " #", pc, ": ", first(string(st), 120))
             end
-            st isa Expr && learn_statement!(c, st, called, optype)
+            st isa Expr && learn_statement!(c, st, called, optype; argof)
         end
+        record_call_arguments!(facts, ir, mi)
         note_universe_statements!(c, (ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
         note_slots_in_constants!(c, ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
     finally
         s.facts_sink = nothing
+        s.fact_mi = nothing
     end
     result = s.current_result
     if result isa CC.InferenceResult && result.overridden_by_const === nothing
         CC.stack_analysis_result!(result, SlotFactsResult(c.key, facts, mi in c.dispatch.used_in))
+    end
+    return
+end
+
+## Types that reach a slot of types through the arguments of methods
+#
+# `push!(set, (MOI.VariableIndex, MOI.LessThan{Float64}))` stores the tuple in the keys of the `Dict` of the set in a method that is not inlined, which is given it as an argument of the type `Tuple{DataType,DataType}` (what the
+# method is made for): what it stores is what its callers give it. So what is kept of a method is what it stores of its arguments (`(:argstore, (mi, n))`, the slot), which of its arguments it gives on to which argument
+# of a call (`(:argpass, (callee, m))`, its own), and the types that are known that it gives to calls (`(:callarg, (callee, m))`, the type); and the stores are what the calls give, followed through the methods that give
+# them on. A type that a caller gives that is not known (`DataType`) is not found: the read of the slot is checked, and the program stops if it has another type.
+
+# the number of the argument of the method that `x` is (an argument, or what `convert`, a `typeassert` or a `π` makes of one: `key = convert(K, key0)` in `setindex!` of a `Dict`), or `nothing`
+function argument_index(ir::CC.IRCode, @nospecialize(x))
+    for _ in 1:8
+        x isa Core.Argument && return x.n
+        (x isa Core.SSAValue && x.id <= length(ir.stmts)) || return nothing
+        st = ir.stmts[x.id][:stmt]
+        if st isa Core.PiNode
+            x = st.val
+        elseif st isa Expr && st.head === :call && length(st.args) == 3
+            f = CC.singleton_type(CC.argextype(st.args[1], ir))
+            f === Base.convert ? (x = st.args[3]) : f === Core.typeassert ? (x = st.args[2]) : return nothing
+        else
+            return nothing
+        end
+    end
+    return nothing
+end
+
+# whether an argument of this type can be a type or a tuple of types (the type of the specialization of a method: `DataType`, `Tuple{DataType,DataType}`)
+can_hold_types(@nospecialize(P)) = P isa Type && P !== Union{} && (P <: Type || (P isa DataType && P <: Tuple && any(p -> p isa Type && can_hold_types(p), P.parameters)))
+
+# the calls of a method (before it is inlined: a call and what inference found it to be), and what they give to the arguments of the methods that they call: see above
+function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr || continue
+        callee = nothing
+        first_arg = 0 # (the index in `st.args` of the argument 1 of the callee, its function)
+        if st.head === :invoke
+            target = st.args[1]
+            callee = target isa Core.CodeInstance ? target.def : target
+            first_arg = 2
+        elseif st.head === :call
+            info = ir.stmts[pc][:info]
+            info isa CC.MethodMatchInfo && length(info.results.matches) == 1 || continue
+            callee = CC.specialize_method(only(info.results.matches))
+            first_arg = 1
+        end
+        callee isa Core.MethodInstance || continue
+        sig = Base.unwrap_unionall(callee.specTypes)
+        sig isa DataType || continue
+        nargs = length(st.args) - first_arg + 1
+        nargs == length(sig.parameters) || continue
+        for n in 2:nargs
+            can_hold_types(sig.parameters[n]) || continue
+            a = st.args[first_arg + n - 1]
+            k = argument_index(ir, a)
+            if k !== nothing
+                push!(facts, ((:argpass, (callee, n), nothing), (mi, k)))
+            else
+                T = value_type_of(CC.argextype(a, ir))
+                mentions_type_value(T) && push!(facts, ((:callarg, (callee, n), nothing), T))
+            end
+        end
+    end
+    return
+end
+
+# the stores of the types that calls give to arguments that are stored in a slot of types, through the methods that give them on
+function resolve_argument_stores!(c::Compilation)
+    s = c.slots
+    isempty(s.argstores) && return
+    stores = Dict{Any,Set{Any}}(k => copy(v) for (k, v) in s.argstores)
+    changed = true
+    while changed
+        changed = false
+        for (site, keys) in collect(stores), from in get(s.argpasses, site, ())
+            target = get!(Set{Any}, stores, from)
+            for key in keys
+                key in target || (push!(target, key); changed = true)
+            end
+        end
+    end
+    for (site, keys) in stores, T in get(s.callargs, site, ()), key in keys
+        note_slot_store!(c, key, T)
     end
     return
 end
@@ -461,7 +571,22 @@ function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
     r = slot_facts_of(ci)
     (r === nothing || r.key != c.key) && return
     for (key, T) in r.facts
-        key[1] === :raw ? push!(s.raw_store_types, key[2]) : key[1] === :universe ? push!(s.universe_seen, key[2]) : key[1] === :truncated ? (s.scan_truncated = true) : note_slot_store!(c, key, T)
+        k = key[1]
+        if k === :raw
+            push!(s.raw_store_types, key[2])
+        elseif k === :universe
+            push!(s.universe_seen, key[2])
+        elseif k === :truncated
+            s.scan_truncated = true
+        elseif k === :argstore
+            push!(get!(Set{Any}, s.argstores, key[2]), T)
+        elseif k === :argpass
+            push!(get!(Set{Any}, s.argpasses, key[2]), T)
+        elseif k === :callarg
+            push!(get!(Vector{Any}, s.callargs, key[2]), T)
+        else
+            note_slot_store!(c, key, T)
+        end
     end
     return
 end
@@ -601,6 +726,7 @@ function analyze_slots!(c::Compilation, interp, root)
     for ci in reachable_code_instances(interp, root)
         replay_slot_facts!(c, ci)
     end
+    resolve_argument_stores!(c)
     if s.scan_truncated
         # (a constant is too large to be looked at all of: what the slots hold is not known, and the program is compiled as if there were no slots)
         @debug "A constant that the program refers to is too large to find what it holds: slots are not used" _id = :static_slots_truncated
@@ -719,6 +845,13 @@ function update_slot_types!(c::Compilation)
         end
     end
     s.type_slots = any(k -> get!(() -> type_value_declared(k[1] === :elem ? k[2] : fieldtype(k[2], k[3])), s.holds_types, k), keys(s.types))
+    empty!(s.type_values)
+    if s.type_slots
+        for (k, U) in s.types
+            get(s.holds_types, k, false) && collect_type_values!(s.type_values, U)
+        end
+        unique!(s.type_values)
+    end
     return changed
 end
 

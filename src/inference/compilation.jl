@@ -134,11 +134,17 @@ mutable struct SlotState
     current_result::Any                      # the `InferenceResult` that is being optimized: what is found of its code is kept with it (see `record_slot_facts!`)
     type_slots::Bool                         # whether some of `types` are of slots of types (`Vector{Type}`, see slots.jl): only then are the calls on a union of types looked at further
     holds_types::Dict{SlotKey,Bool}          # (whether each slot is one of types, once asked: `note_slot_store!`, which is called for each store)
+    type_values::Vector{Any}                 # the types that the slots of types hold in this pass (as their elements, and the elements of the tuples that they hold): what a call on a type that is not known is made over
+    # the flow of types into slots of types through the arguments of methods, found in this pass (see `resolve_argument_stores!`): what argument `n` of a method instance is stored in, what it is given on to, and what the calls give it
+    fact_mi::Any                             # (the method whose facts are recorded)
+    argstores::Dict{Any,Set{Any}}            # (method instance, n) => the slots that it is stored in
+    argpasses::Dict{Any,Set{Any}}            # (method instance, n) => the (method instance, n) that give theirs to it
+    callargs::Dict{Any,Vector{Any}}          # (method instance, n) => the types that calls give it
 end
 SlotState(mode::Symbol) = SlotState(mode, false, 0, Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{Any,Vector{Any}}(),
                                     Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{SlotKey,Set{Any}}(), Set{Any}(), false,
                                     IdDict{Any,Vector{Tuple{SlotKey,Any}}}(), nothing,
-                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing, false, Dict{SlotKey,Bool}())
+                                    Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing, false, Dict{SlotKey,Bool}(), Any[], nothing, Dict{Any,Set{Any}}(), Dict{Any,Set{Any}}(), Dict{Any,Vector{Any}}())
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
@@ -298,6 +304,7 @@ function begin_pass!(c::Compilation)
     s = c.slots
     empty!(s.universe_seen); empty!(s.stored_by_slot); empty!(s.raw_store_types); s.scan_truncated = false
     empty!(s.seen); empty!(s.seen_unknown); empty!(s.unknown_stores)
+    empty!(s.argstores); empty!(s.argpasses); empty!(s.callargs)
     c.dispatch.registered_used = false
     empty!(c.dispatch.unions)
     c.key = inference_key(c)

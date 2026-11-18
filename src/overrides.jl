@@ -104,7 +104,7 @@ end
 
 # StaticCompiler's entry points, with our method table as the default, and the runtime of this
 # package installed in the code that they generate (`llvm_postprocess`)
-# The check that an entry point infers to a concrete type is made before the code is: when a call over the types that the program makes was seen and what the slots of the program hold is not analyzed yet (the first pass),
+# The check that an entry point infers to a concrete type is made before the code is: when a call over the types that the program makes was seen and what the slots of the program hold is not analyzed yet, or not settled,
 # an entry that is `Union{}` may be so because the types of what is read from the slots are not known (`attr.inputs[key]` is an `Input` that is not known to be an `Input{ComputeGraph}`, and what is called on its fields has no
 # method for the types that are tried). The analysis is made where the code that is compiled is inferred (`drive_inference!`, not the inference that the check is made of), so that is done for it, of the entry that is compiled
 # (`rooted`: the one that has the targets of the `@cfunction`s), without making its code: if the types of the slots are others then, the pass is made again with them (`SlotsChanged`, which is thrown from there), and if
@@ -114,7 +114,9 @@ function early_entry_check(c, args, rooted; method_table, params, target)
         check_entry(args[1], args[2]; method_table, params, target)
         return
     catch e
-        (e isa InferenceError && c.slots.mode === :on && c.slots.passes == 0 && isempty(c.slots.types)) || rethrow()
+        # (in any pass that the slots are still analyzed in: what one pass finds of them can make what is read from others be known in the next, `model.moi_backend` of JuMP, a `CachingOptimizer` that is made
+        # of what is read from the one that was there)
+        (e isa InferenceError && c.slots.mode === :on && c.slots.passes < SLOT_PASS_LIMIT) || rethrow()
     end
     job, _ = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
     Base.invokelatest(precompile, job)

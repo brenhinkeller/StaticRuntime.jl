@@ -171,6 +171,17 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
     for i in 2:length(argtypes)
         argtypes[i] isa Core.TypeofVararg && continue # (a call with the arguments that are the rest of a splat: not known)
         T = CC.widenconst(argtypes[i]) # (a constant is of a concrete type; the rest of what is known of an argument is lost)
+        # (a type that is not known (`Type`, `DataType`) in a program that has slots of types: one of the types that they hold, where what was read from one went through what does not keep its type, a tuple that a
+        # function returns (`iterate`). The call is made over them, as over the registered types: a type of another kind is a `MethodError`)
+        if c.slots.type_slots && (T === DataType || T === UnionAll || type_value_slot(T))
+            u = type_values_union(c, T)
+            if u !== nothing
+                argtypes[i] = with_methods(c, interp, arginfo, i, u, max_methods)
+                registered = true
+                changed = true
+                continue
+            end
+        end
         u = listed_union(c, T)
         reg = false
         if u === nothing
@@ -194,6 +205,13 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
     end
     changed || return nothing
     return CC.ArgInfo(arginfo.fargs, argtypes), CC.argtypes_to_type(argtypes), registered
+end
+
+# the union of `Type{X}` for the types `X` that the slots of types hold, that are of the type `T` (`DataType`, `Type{<:AbstractFunction}`), or `nothing` if there are none, or too many
+function type_values_union(c::Compilation, @nospecialize(T))
+    found = Any[Core.TypeEgal{X} for X in c.slots.type_values if X isa T]
+    (isempty(found) || length(found) > c.settings.split_limit) && return nothing
+    return Union{found...}
 end
 
 # The members of the union `u` of the types that argument `i` of the call can be that a method fits, with the other arguments as they are (the most that they can be: if no method fits the
@@ -889,6 +907,28 @@ end
 # A tuple that has types as elements (`(Int, Float64)` of a union of them that is read from a slot) has the type of its elements, which are all `DataType`: `Tuple{DataType,DataType}`, which is a type that has a size, and is made
 # in the code. (The type that is known is `Tuple{Type,Type}`, which is not the type of any tuple: a tuple of it is made with a call of the runtime, which finds the type of each element.) Where each element is a type or
 # one of a few, whose types are all the same, the tuple is made as `Tuple{DataType,...}`.
+# The types of the types that an operand can be (`DataType` for `Int`, `UnionAll` for `Vector`), if it is a type that is known, a union of them, or a `φ` of such (where inference merged the constants that come
+# into it to `Any`, as it does for more than a few); or `nothing`
+function type_kinds(ir::CC.IRCode, @nospecialize(a), depth::Int = 0)
+    depth > 8 && return nothing
+    t = CC.argextype(a, ir)
+    t isa CC.Const && return t.val isa Type ? Any[typeof(t.val)] : nothing
+    members = Base.uniontypes(CC.widenconst(t))
+    !isempty(members) && all(exact_type_value, members) && return unique!(Any[typeof(type_value_parameter(m)) for m in members])
+    a isa Core.SSAValue && a.id <= length(ir.stmts) || return nothing
+    st = ir.stmts[a.id][:stmt]
+    st isa Core.PiNode && return type_kinds(ir, st.val, depth + 1)
+    st isa Core.PhiNode || return nothing
+    kinds = Any[]
+    for i in eachindex(st.values)
+        isassigned(st.values, i) || continue
+        k = type_kinds(ir, st.values[i], depth + 1)
+        k === nothing && return nothing
+        append!(kinds, k)
+    end
+    return isempty(kinds) ? nothing : unique!(kinds)
+end
+
 function concretize_type_tuples!(ir::CC.IRCode)
     changed = false
     for pc in 1:length(ir.stmts)
@@ -913,21 +953,14 @@ function concretize_type_tuples!(ir::CC.IRCode)
         elements = Any[]
         any_type = false
         for a in st.args[2:end]
-            t = CC.argextype(a, ir)
-            if t isa CC.Const && t.val isa Type
-                push!(elements, typeof(t.val)); any_type = true
+            kinds = type_kinds(ir, a)
+            if kinds !== nothing
+                length(kinds) == 1 || (elements = nothing; break)
+                push!(elements, kinds[1]); any_type = true
             else
-                W = CC.widenconst(t)
-                members = Base.uniontypes(W)
-                if !isempty(members) && all(exact_type_value, members)
-                    kinds = unique(typeof(type_value_parameter(m)) for m in members)
-                    length(kinds) == 1 || (elements = nothing; break)
-                    push!(elements, kinds[1]); any_type = true
-                elseif isconcretetype(W)
-                    push!(elements, W)
-                else
-                    elements = nothing; break
-                end
+                W = CC.widenconst(CC.argextype(a, ir))
+                isconcretetype(W) || (elements = nothing; break)
+                push!(elements, W)
             end
         end
         (elements === nothing || !any_type) && continue
