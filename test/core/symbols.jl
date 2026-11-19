@@ -123,3 +123,15 @@ symbol_name(x::Vector{Symbol}) = x[1]
         "printed"                       => () -> (v = Base.inferencebarrier([:abcd])::Vector{Symbol}; print(symbol_name(v)); 0),
     ])
 end
+
+# `get(f, nt, name)` (the form with a function for the default, `get(nt, name) do ... end`) and `haskey(nt, name)` of a `NamedTuple`, with a name that is not known when compiling, are `isdefined(nt, name)`: a comparison with each
+# of the names too (`struct_isdefined`)
+@testset "isdefined of a NamedTuple with a name that is made" begin
+    check_cases([
+        "get with a function"           => () -> get(() -> -1, SY_NT2, sy_nt_name("b")) + 10 * get(() -> -1, SY_NT2, sy_nt_name("zz")),
+        "get with a function, two types" => () -> Int(round(10 * get(() -> -1.0, SY_NT_MIXED, sy_nt_name("beta")))),
+        "get do"                        => () -> get(SY_NT2, sy_nt_name("c")) do; 100; end + get(SY_NT2, sy_nt_name("zz")) do; 100; end,
+        "haskey"                        => () -> Int(haskey(SY_NT2, sy_nt_name("a"))) + 10 * Int(haskey(SY_NT2, sy_nt_name("zz"))),
+        "isdefined of a struct"         => () -> Int(isdefined(SyM("x", 1), sy_nt_name("y"))) + 10 * Int(isdefined(SyM("x", 1), sy_nt_name("zz"))),
+    ])
+end

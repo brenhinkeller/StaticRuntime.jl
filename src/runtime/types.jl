@@ -294,3 +294,65 @@ function define_subtype_table!(e)
     end
     return
 end
+
+# `static_type_name(T)`, the text of a type that a program prints when it runs (`runtime_type_text` in overrides/show.jl): a table of the types that are in the binary, each with what Julia's `show` gives it in this
+# process (`host_string`, as for a type that is a constant), and a search of it; null for a type that is not in it. Made only for a program that asks for it.
+function define_type_name_table!(e)
+    mod = e.mod
+    haskey(LLVM.functions(mod), "static_type_name") && LLVM.isdeclaration(LLVM.functions(mod)["static_type_name"]) || return
+    fn = LLVM.functions(mod)["static_type_name"]
+    host_string = getfield(parentmodule(@__MODULE__), :host_string)
+    found = Tuple{UInt,String}[]
+    for (addr, g) in e.globals
+        g === nothing && continue
+        object_type(addr) === DataType || continue
+        T = unsafe_pointer_to_objref(Ptr{Cvoid}(addr))
+        text = try Base.invokelatest(host_string, show, T)::String catch; continue end
+        push!(found, (addr, text))
+    end
+    sort!(found; by = first)
+    ptrT, i64, i8 = LLVM.PointerType(), LLVM.Int64Type(), LLVM.Int8Type()
+    n = length(found)
+    names = LLVM.Constant[]
+    for (k, (_, text)) in enumerate(found)
+        bytes = Vector{UInt8}(codeunits(text)); push!(bytes, 0x00)
+        g = LLVM.GlobalVariable(mod, LLVM.ArrayType(i8, length(bytes)), "static_type_name_$k")
+        LLVM.initializer!(g, LLVM.ConstantDataArray(i8, bytes))
+        LLVM.constant!(g, true); LLVM.linkage!(g, LLVM.API.LLVMPrivateLinkage)
+        push!(names, g)
+    end
+    types_t, names_t = LLVM.ArrayType(ptrT, n), LLVM.ArrayType(ptrT, n)
+    types_g = LLVM.GlobalVariable(mod, types_t, "static_type_name_types")
+    LLVM.initializer!(types_g, LLVM.ConstantArray(ptrT, LLVM.Constant[embed_ref!(e, addr) for (addr, _) in found]))
+    LLVM.constant!(types_g, true); LLVM.linkage!(types_g, LLVM.API.LLVMPrivateLinkage)
+    names_g = LLVM.GlobalVariable(mod, names_t, "static_type_name_texts")
+    LLVM.initializer!(names_g, LLVM.ConstantArray(ptrT, names))
+    LLVM.constant!(names_g, true); LLVM.linkage!(names_g, LLVM.API.LLVMPrivateLinkage)
+    LLVM.linkage!(fn, LLVM.API.LLVMLinkOnceODRLinkage)
+    N = LLVM.ConstantInt(Int64(n))
+    # (the call is declared by `@symbolcall`, with the argument and the result as pointers or as integers)
+    rt = LLVM.return_type(LLVM.function_type(fn))
+    @dispose builder = LLVM.IRBuilder() begin
+        entry, loop, body, next, hit, miss = (LLVM.BasicBlock(fn, s) for s in ("entry", "loop", "body", "next", "hit", "miss"))
+        LLVM.position!(builder, LLVM.at_end(entry))
+        t = only(LLVM.parameters(fn))
+        LLVM.value_type(t) isa LLVM.IntegerType && (t = LLVM.inttoptr!(builder, t, ptrT))
+        LLVM.br!(builder, loop)
+        LLVM.position!(builder, LLVM.at_end(loop))
+        i = LLVM.phi!(builder, i64, "i")
+        LLVM.br!(builder, LLVM.icmp!(builder, LLVM.API.LLVMIntEQ, i, N), miss, body)
+        LLVM.position!(builder, LLVM.at_end(body))
+        v = LLVM.load!(builder, ptrT, LLVM.gep!(builder, types_t, types_g, [LLVM.ConstantInt(Int64(0)), i]))
+        LLVM.br!(builder, LLVM.icmp!(builder, LLVM.API.LLVMIntEQ, v, t), hit, next)
+        LLVM.position!(builder, LLVM.at_end(next))
+        i_next = LLVM.add!(builder, i, LLVM.ConstantInt(Int64(1)))
+        LLVM.br!(builder, loop)
+        append!(LLVM.incoming(i), [(LLVM.ConstantInt(Int64(0)), entry), (i_next, next)])
+        LLVM.position!(builder, LLVM.at_end(hit))
+        text = LLVM.load!(builder, ptrT, LLVM.gep!(builder, names_t, names_g, [LLVM.ConstantInt(Int64(0)), i]))
+        LLVM.ret!(builder, rt isa LLVM.IntegerType ? LLVM.ptrtoint!(builder, text, rt) : text)
+        LLVM.position!(builder, LLVM.at_end(miss))
+        LLVM.ret!(builder, rt isa LLVM.IntegerType ? LLVM.ConstantInt(rt, 0) : LLVM.null(ptrT))
+    end
+    return true
+end

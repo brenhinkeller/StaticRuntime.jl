@@ -439,6 +439,14 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
     changed = fold_small_typeof_loads!(e) || define_small_typeof!(e)
     changed |= define_boxed_caches!(e)
     consts = inttoptr_constants(mod)
+    # (an object that the code refers to by its address and that is larger than what a look before an address goes back (`MAX_INTERIOR`): the code reads its fields at their addresses, as for the objects with a key. A
+    # large immutable constant, a `typed_drawing` of a figure, is one)
+    for (addr, _) in consts
+        T = object_type(addr)
+        T isa DataType || continue
+        n = definite_size(T) # (a struct: the data of a large `Memory` may be elsewhere)
+        n > MAX_INTERIOR && push!(known, (addr, n))
+    end
     for (addr, ops) in consts
         replacement = nothing
         candidates = find_objects(addr)

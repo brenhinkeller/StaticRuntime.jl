@@ -365,11 +365,12 @@ that it has now. The methods are in the extensions of the packages. Call it afte
 function prepare! end
 
 """
-    StaticRuntime.typed_node(graph, key)
+    StaticRuntime.typed_node(graph, key; inputs = nothing)
 
 A node of `graph` (a `ComputePipeline.ComputeGraph`, which `prepare!` was called on, and the graphs that it is connected with) that the program reads as `node[]`, with the types of what it depends on: what the package reads to
 resolve it (the edges and inputs that it comes from, and the references of their values) is of types that are not known where it is read, those of all the nodes of all the graphs. Call it before compiling, and keep it as a
-constant (`const POSITIONS = StaticRuntime.typed_node(plot.attributes, :positions)`). The method is in the extension for Makie.
+constant (`const POSITIONS = StaticRuntime.typed_node(plot.attributes, :positions)`). With `inputs`, the inputs that the program changes (`typed_input`s), only what depends on them is resolved when the node is read, and only that
+is compiled; a change of another input that the node depends on stops the program with an error that names it. The method is in the extension for Makie.
 """
 function typed_node end
 
@@ -380,6 +381,16 @@ An input of `graph` (see `typed_node`) that the program sets as `input[] = value
 their changes) found before compiling. The value is of the type that the input has then. The method is in the extension for Makie.
 """
 function typed_input end
+
+"""
+    drawing = StaticRuntime.typed_drawing(scene; inputs = (), screen_config...)
+
+A drawing of `scene` (a `Makie.Scene`, or a `Makie.Figure`, which is made ready as saving it does: the limits of its axes are those of what they show) with CairoMakie, that the program makes as `drawing(path)` (an image of the size of the scene, written to `path` as a PNG) or `drawing(screen)` (on a
+`CairoMakie.Screen` of the scene). The scene is drawn once when this is called, which adds to the graphs of its plots what drawing them needs, and they are then prepared (`prepare!`, which this calls: call it before
+this, or not at all); each plot is drawn with the types that it has. Call it before compiling, after the plots are made, and keep it as a constant. `inputs` are the inputs of the plots that the program changes (`typed_input`s,
+made before this): what is drawn is what the plots are when it is called, with those changes (see `typed_node`). Plots that are added afterwards are not drawn. The method is in the extension for CairoMakie.
+"""
+function typed_drawing end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_callback), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))

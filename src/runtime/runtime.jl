@@ -103,6 +103,7 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     embed_constants!(e; known_objects)
     clamp_embedded_alignment!(mod) # (the alignment of the accesses was found from the addresses of the objects in this process: see there)
     queries === nothing ? define_subtype_table!(e) : define_subtype!(e, queries)
+    define_type_name_table!(e)
     finalizers = uses_finalizers(mod) # (before they are linked: see `link_finalizers!`)
     link_finalizers!(mod)
     resolve_lazy_lookups!(mod)

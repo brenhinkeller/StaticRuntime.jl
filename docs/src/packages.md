@@ -195,8 +195,9 @@ the objective, `optimize!`, `termination_status`, `objective_value` and `value`.
 ### Makie plots
 
 A scene, and the plots of a figure, made before compiling and prepared for the program (`StaticRuntime.prepare!`, `StaticRuntime.typed_node`, `StaticRuntime.typed_input`: see [Makie](@ref)) are read and changed by it (tests in
-`test/packages/makie.jl`): the size and viewport of a scene, the inputs and nodes of its graph, its camera, and the data and attributes of a plot. Changing the axis or the layout when the program runs is not yet supported, and
-there is no backend (nothing is drawn).
+`test/packages/makie.jl`): the size and viewport of a scene, the inputs and nodes of its graph, its camera, and the data and attributes of a plot. Changing the axis or the layout when the program runs is not yet supported.
+With CairoMakie, a scene or a figure (an axis with its ticks, grid and labels, lines, scatter) is drawn to a PNG by the program (`StaticRuntime.typed_drawing`), the same image as Julia's: a figure with an axis is a program of about
+2.5 minutes to compile.
 
 ## Code from packages
 

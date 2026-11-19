@@ -149,3 +149,27 @@ nested_custom_deepcopy() = length(deepcopy([CustomCopy([1, 2, 3])])[1].v)
     end
     @test static_status(plain_deepcopy)[1] == :ok
 end
+
+# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`): the number of elements is known when the program runs (`splat_vector`)
+abstract type CoCmd end
+struct CoLine <: CoCmd; x::Float64; end
+struct CoCurve <: CoCmd; x::Float64; y::Float64; end
+co_cmd_value(c::CoLine) = c.x
+co_cmd_value(c::CoCurve) = c.x + c.y
+@testset "Vector literals with a splat" begin
+    check_cases([
+        "a Vector in the middle"         => () -> (v = [Float64(i) for i in 1:opaque(3)]; w = [0.5, v..., 2.5]; Int(10 * sum(w)) + 1000 * Int(eltype(w) === Float64)),
+        "only a Vector"                  => () -> (v = [i for i in 1:opaque(4)]; w = [v...]; sum(w) + 100 * length(w)),
+        "elements of two types"          => () -> (v = [i for i in 1:opaque(3)]; w = [v..., 0.5]; Int(10 * sum(w)) + 1000 * Int(eltype(w) === Float64)),
+        "two Vectors"                    => () -> (v = [i for i in 1:opaque(3)]; u = [10 * i for i in 1:opaque(2)]; w = [v..., u..., 7]; sum(w) + 1000 * length(w)),
+        "a range"                        => () -> (w = [0, (1:opaque(4))...]; sum(w) + 100 * length(w)),
+        "typed, abstract"                => () -> (v = [i for i in 1:opaque(3)]; w = Real[1, v..., 3.5]; length(w) + 10 * Int(eltype(w) === Real) + 100 * Int(w[end] == 3.5)),
+        "typed, converted"               => () -> (v = [i for i in 1:opaque(3)]; w = Float64[1, v..., 3]; Int(sum(w)) + 100 * Int(eltype(w) === Float64)),
+        "typed, structs of two types"    => () -> (cs = [CoCurve(i, 2i) for i in 1:opaque(2)]; w = CoCmd[CoLine(1.0), cs..., CoLine(9.0)]; length(w) + Int(sum(co_cmd_value, w))),
+        "empty"                          => () -> (v = Int[]; w = [v...]; length(w) + 10 * length([1, v..., 2])),
+        # (the type of the elements is that of the elements that there are: `Any` for none, and the strings only when there are some)
+        "empty, of the type Any"         => () -> (v = Int[]; for i in 1:opaque(0); push!(v, i); end; w = [v...]; length(w) + 10 * Int(eltype(w) === Any)),
+        "promoted when not empty"        => () -> (v = String[]; for i in 1:opaque(0); push!(v, "a"); end; w = [0.5, v...]; u = [0.5, ["a" for i in 1:opaque(1)]...]; Int(eltype(w) === Float64) + 10 * Int(eltype(u) === Any) + 100 * length(u)),
+        "a tuple"                        => () -> (t = (1, opaque(2)); v = [i for i in 1:opaque(2)]; w = [t..., v...]; sum(w) + 100 * Int(eltype(w) === Int)),
+    ])
+end

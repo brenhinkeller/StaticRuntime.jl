@@ -126,8 +126,8 @@ function stage_onchange!(graph::CP.ComputeGraph)
     listeners = graph.onchange.listeners
     for i in eachindex(listeners)
         p = listeners[i]
-        # (the one that `ComputeGraph()` makes is a closure of the module of the package, that has the graph)
-        if parentmodule(typeof(p.second)) === CP && occursin("ComputeGraph", string(nameof(typeof(p.second))))
+        # (the one that `ComputeGraph()` makes is a closure of the module of the package, that has the graph; or the one that was made here before, by a `prepare!` before nodes were added: `typed_drawing`)
+        if p.second isa StagedOnChange || parentmodule(typeof(p.second)) === CP && occursin("ComputeGraph", string(nameof(typeof(p.second))))
             listeners[i] = Pair{Int,Any}(p.first, StagedOnChange(graph, table))
         end
     end
@@ -208,10 +208,13 @@ struct EdgeStep{TE<:CP.TypedEdge,IT<:Tuple}
     typed::TE # (`IT`: the types of the values of its inputs when the program was compiled, see `typed_inputs`)
 end
 
-struct TypedNode{R<:Base.RefValue,S<:Tuple}
+# (`fixed`: the inputs that the node depends on and that are not steps, when the inputs that the program changes were given: see `typed_node`. `V`: the type of the value, which is that of the reference, or the type of what
+# it had when the program was compiled for a reference of an abstract type, `RefValue{Any}`: one of another type stops the program, as for the inputs of an edge)
+struct TypedNode{V,R<:Base.RefValue,S<:Tuple}
     node::CP.Computed
     ref::R
     steps::S
+    fixed::Vector{CP.Input{CP.ComputeGraph}}
 end
 
 @noinline function run_step!(s::InputStep{F,V}) where {F,V}
@@ -284,34 +287,61 @@ resolve_step!(edge::CP.TypedEdge{<:Any,<:NamedTuple,typeof(CP.compute_identity)}
     return Expr(:block, (:(run_step!(steps[$i])) for i in 1:fieldcount(S))..., :(return nothing))
 end
 
-Base.getindex(t::TypedNode) = (run_steps!(t.steps); t.ref[])
+@noinline fixed_input_changed(input::CP.Input) = error("the input `", input.name, "` of a compute graph was changed, and the node that is read was made (`typed_node`, `typed_drawing`) for changes of other inputs: give it in `inputs`")
 
-function collect_steps!(steps::Vector{Any}, seen::Base.IdSet{Any}, node::CP.Computed)
-    CP.hasparent(node) || return
-    p = node.parent
-    p in seen && return
-    push!(seen, p)
-    if p isa CP.Input
-        p.f isa StagedInputFunction || error("a node depends on the input `", p.name, "` of a graph that `StaticRuntime.prepare!` was not called on")
-        push!(steps, InputStep{typeof(p.f),typeof(p.value)}(p, p.f))
-    else
-        for n in p.inputs
-            collect_steps!(steps, seen, n)
-        end
-        isassigned(p.typed_edge) && p.typed_edge[].outputs isa NamedTuple || error("a node depends on an edge of a graph that `StaticRuntime.prepare!` was not called on")
-        te = p.typed_edge[]
-        IT = Tuple{(isconcretetype(eltype(r)) ? eltype(r) : typeof(r[]) for r in values(te.inputs))...}
-        push!(steps, EdgeStep{typeof(te),IT}(p, te))
+function check_fixed(fixed::Vector{CP.Input{CP.ComputeGraph}})
+    for input in fixed
+        input.dirty && fixed_input_changed(input)
     end
-    return
+    return nothing
 end
 
-function StaticRuntime.typed_node(graph::CP.ComputeGraph, key::Symbol)
+function Base.getindex(t::TypedNode{V}) where {V}
+    check_fixed(t.fixed)
+    run_steps!(t.steps)
+    v = t.ref[]
+    v isa V || input_type_error(t.node.name, V)
+    return v::V
+end
+# (what the package reads a node or an observable with, when it can be either: `to_value(plot.alpha)`)
+Makie.to_value(t::TypedNode) = t[]
+
+# The steps of what `node` comes from, in the order that they are resolved. With `changing` (the inputs that the program changes), only those inputs and the edges that depend on one of them are steps: nothing else can need
+# to be resolved again (what an edge depends on can only change if an input that it comes from does), and the other inputs are `fixed`. Whether it depends on one of the inputs that change is what this gives.
+function collect_steps!(steps::Vector{Any}, fixed::Vector{CP.Input{CP.ComputeGraph}}, seen::Base.IdDict{Any,Bool}, node::CP.Computed, changing)
+    CP.hasparent(node) || return false
+    p = node.parent
+    haskey(seen, p) && return seen[p]
+    if p isa CP.Input
+        p.f isa StagedInputFunction || error("a node depends on the input `", p.name, "` of a graph that `StaticRuntime.prepare!` was not called on")
+        live = changing === nothing || p in changing
+        live ? push!(steps, InputStep{typeof(p.f),typeof(p.value)}(p, p.f)) : push!(fixed, p)
+    else
+        live = false
+        for n in p.inputs
+            live |= collect_steps!(steps, fixed, seen, n, changing)
+        end
+        isassigned(p.typed_edge) && p.typed_edge[].outputs isa NamedTuple || error("a node depends on an edge of a graph that `StaticRuntime.prepare!` was not called on")
+        if live
+            te = p.typed_edge[]
+            IT = Tuple{(isconcretetype(eltype(r)) ? eltype(r) : typeof(r[]) for r in values(te.inputs))...}
+            push!(steps, EdgeStep{typeof(te),IT}(p, te))
+        end
+    end
+    seen[p] = live
+    return live
+end
+
+function StaticRuntime.typed_node(graph::CP.ComputeGraph, key::Symbol; inputs = nothing)
     node = graph.outputs[key]
     node[]
     steps = Any[]
-    collect_steps!(steps, Base.IdSet{Any}(), node)
-    return TypedNode(node, node.value, Tuple(steps))
+    fixed = CP.Input{CP.ComputeGraph}[]
+    changing = inputs === nothing ? nothing : Base.IdSet{Any}(i.input for i in inputs)
+    collect_steps!(steps, fixed, Base.IdDict{Any,Bool}(), node, changing)
+    ref = node.value
+    V = isconcretetype(eltype(ref)) ? eltype(ref) : typeof(ref[])
+    return TypedNode{V,typeof(ref),typeof(Tuple(steps))}(node, ref, Tuple(steps), fixed)
 end
 
 # An input that the program sets (`input[] = value`, as `update!(graph; key = value)` does). The package then notifies the observables in `graph.obs_to_update` (a `Vector{Observable}`, of the `onchange` of each graph that the change
@@ -522,5 +552,148 @@ end
 # The observable of a node of the graph is made when it is first asked for, of the type of the value that the node has then (`Observable{eltype(val.value)}`): a type that is made when the program runs.
 # The observables of a program are the ones that were asked for when it was compiled (`get_observable!(graph, name)`, or `on(f, graph[name])`), and what is asked for later is one of these.
 @device_override CP.get_observable!(attr::CP.ComputeGraph, key::Symbol; use_deepcopy = true) = attr.observables[key]
+
+# What CairoMakie draws lines with (and scatter, for the attributes of each point). The package's message for arguments of lengths that do not fit says their types (`map(typeof, args)`), which are values in a tuple
+# there, known only when the program runs, and a type is not something that a program can print then. The same, with the lengths only.
+@device_override @generated function Makie.broadcast_foreach_index(f, indices, args...)
+    N = length(args)
+    return quote
+        lengths = Base.Cartesian.@ntuple $N i -> Makie.attr_broadcast_length(args[i])
+        maxlen = maximum(lengths)
+        any_wrong_length = Base.Cartesian.@nany $N i -> lengths[i] ∉ (0, 1, maxlen)
+        if any_wrong_length
+            error("All non scalars need same length, Found lengths for each argument: $lengths")
+        end
+        isempty(indices) && return
+        if (maxlen > 1) && (last(indices) > maxlen) # assuming indices sorted
+            error("Indices must be in range. Found $(last(indices)) > $maxlen.")
+        end
+        0 in lengths && return
+        for i in indices
+            Base.Cartesian.@ncall $N f (j -> Makie.attr_broadcast_getindex(args[j], i))
+        end
+        return
+    end
+end
+
+# The bounding box of a segment of a path (what a `BezierPath` is made with, and what drawing a shape that is clipped makes): the package makes its corners as `Point(mi...)` of a `Vector`, a point of as many dimensions as the
+# vector has elements, which is known when the program runs. The segments are 2-dimensional (`Point2d`): the same, with the two.
+@device_override function Makie.bbox(b::Makie.BezierSegment)
+    p0 = b.from
+    p1 = b.c1
+    p2 = b.c2
+    p3 = b.to
+    mi = [min.(p0, p3)...]
+    ma = [max.(p0, p3)...]
+    c = -p0 + p1
+    b = p0 - 2p1 + p2
+    a = -p0 + 3p1 - 3p2 + 1p3
+    for dim in 1:2
+        if abs(a[dim]) < 1.0e-12
+            if abs(b[dim]) > 1.0e-12
+                t = -c[dim] / (2 * b[dim])
+                if t > 0 && t < 1
+                    s = 1.0 - t
+                    q = s * s * s * p0[dim] + 3.0 * s * s * t * p1[dim] + 3.0 * s * t * t * p2[dim] + t * t * t * p3[dim]
+                    mi[dim] = min(mi[dim], q)
+                    ma[dim] = max(ma[dim], q)
+                end
+            end
+        else
+            h = b[dim] * b[dim] - a[dim] * c[dim]
+            if h > 0
+                h = sqrt(h)
+                for sign in (-1, 1)
+                    t = (-b[dim] + sign * h) / a[dim]
+                    if t > 0 && t < 1
+                        s = 1.0 - t
+                        q = s * s * s * p0[dim] + 3.0 * s * s * t * p1[dim] + 3.0 * s * t * t * p2[dim] + t * t * t * p3[dim]
+                        mi[dim] = min(mi[dim], q)
+                        ma[dim] = max(ma[dim], q)
+                    end
+                end
+            end
+        end
+    end
+    lo = Makie.Point2d(mi[1], mi[2])
+    return Makie.Rect2d(lo, Makie.Point2d(ma[1], ma[2]) - lo)
+end
+
+# The curves of an arc: the package makes them a `Vector{Any}` (`[LineTo(p), curves...]`, of two types of commands, which `vect` promotes to `Any`), which the path converts to its `Vector{PathCommand}` element by element, each of
+# any type. The same, as the vector of the path.
+@device_override function Makie.elliptical_arc_to_beziers(arc::Makie.EllipticalArc)
+    delta_a = abs(arc.a2 - arc.a1)
+    n_beziers = ceil(Int, delta_a / 0.5pi)
+    angles = range(arc.a1, arc.a2; length = n_beziers + 1)
+    startpoint = Makie.Point2d(cos(arc.a1), sin(arc.a1))
+    commands = Makie.PathCommand[Makie.LineTo(startpoint)]
+    for i in 1:n_beziers
+        start, stop = angles[i], angles[i + 1]
+        theta = stop - start
+        kappa = 4 / 3 * tan(theta / 4)
+        c1 = Makie.Point2d(cos(start) - kappa * sin(start), sin(start) + kappa * cos(start))
+        c2 = Makie.Point2d(cos(stop) + kappa * sin(stop), sin(stop) - kappa * cos(stop))
+        b = Makie.Point2d(cos(stop), sin(stop))
+        push!(commands, Makie.CurveTo(c1, c2, b))
+    end
+    path = Makie.BezierPath(commands)
+    path = Makie.scale(path, Makie.Vec2d(arc.r1, arc.r2))
+    path = Makie.rotate(path, arc.angle)
+    return Makie.translate(path, arc.c)
+end
+
+# (the commands of a path that is scaled or moved: the package collects them with the type of what it finds, which `collect` widens as it goes, a type that is made when the program runs; they are converted to `PathCommand`
+# by the path, which is what they are made as here, as `rotate` of the package does)
+@device_override Makie.scale(bp::Makie.BezierPath, s::Real) = Makie.BezierPath(Makie.PathCommand[Makie.scale(x::Makie.PathCommand, Makie.Vec2d(s, s)) for x in bp.commands])
+@device_override Makie.scale(bp::Makie.BezierPath, v::Makie.VecTypes{2}) = Makie.BezierPath(Makie.PathCommand[Makie.scale(x::Makie.PathCommand, v) for x in bp.commands])
+@device_override Makie.translate(bp::Makie.BezierPath, v::Makie.VecTypes{2}) = Makie.BezierPath(Makie.PathCommand[Makie.translate(x::Makie.PathCommand, v) for x in bp.commands])
+
+## Fonts
+#
+# A font of the program (`FreeTypeAbstraction.FTFont`) is a face of FreeType, a pointer of the process that compiles it, which is null in the program; what the face was read from is in the font (`mmapped`, the bytes of the file,
+# which are in the program as its other constants are). The face is made again from them the first time that the program uses the font (as `FTFont(path)` makes it), with a library of FreeType that the program starts
+# itself (the package's is a pointer of this process too). This is only in the program: in Julia nothing calls it, and the library is null when it is compiled.
+const FTA = Makie.FreeTypeAbstraction
+const FT = FTA.FreeType
+const PROGRAM_FT_LIBRARY = Ref{FT.FT_Library}(C_NULL)
+
+function program_ft_library()
+    lib = PROGRAM_FT_LIBRARY[]
+    if lib == C_NULL
+        r = Ref{FT.FT_Library}(C_NULL)
+        FT.FT_Init_FreeType(r) == 0 || error("FreeType could not be started")
+        lib = r[]
+        PROGRAM_FT_LIBRARY[] = lib
+    end
+    return lib
+end
+
+function program_face(font::FTA.FTFont)
+    face = getfield(font, :ft_ptr)
+    face == C_NULL || return face
+    data = getfield(font, :mmapped)
+    data === nothing && error("the font `", getfield(font, :fontname), "` was not read from a file when the program was compiled, and is not in the program")
+    r = Ref{FT.FT_Face}(C_NULL)
+    FT.FT_New_Memory_Face(program_ft_library(), data, length(data), Int32(0), r) == 0 || error("the font `", getfield(font, :fontname), "` could not be read")
+    setfield!(font, :ft_ptr, r[])
+    return r[]
+end
+
+@device_override Base.unsafe_convert(::Type{FT.FT_Face}, font::FTA.FTFont) = program_face(font)
+
+# (the package's, with the face of the program)
+@device_override function Base.getproperty(font::FTA.FTFont, fieldname::Symbol)
+    fieldname in fieldnames(FTA.FTFont) && return getfield(font, fieldname)
+    face = program_face(font)
+    @lock font.lock begin
+        field = getfield(unsafe_load(face), fieldname)
+        if field isa Ptr{FT.FT_String}
+            field == C_NULL && return ""
+            return unsafe_string(field)
+        else
+            return field
+        end
+    end
+end
 
 end # module

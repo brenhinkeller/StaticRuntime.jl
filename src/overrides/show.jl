@@ -24,9 +24,23 @@ host_string(f, x) = replace(sprint(f, x; context = :module => Main), r"(?<![\w.]
 host_text(f, x) = host_string(f, x)
 
 type_name(::Type{T}) where {T} = host_text(show, T)
-Base.show(io::ShowStream, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
+# (not inlined: where the type is not a constant, the call is replaced, see `expand_type_show!`, and a call that was inlined is not one)
+@noinline Base.show(io::ShowStream, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
 # (an `IOBuffer` is a stream that a program makes itself, as `summary` does: the name of the type is the same)
-Base.show(io::Base.GenericIOBuffer, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
+@noinline Base.show(io::Base.GenericIOBuffer, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)
+
+# A type that is a value when the program runs, and not a constant where it is printed (`string(typeof(x))` of an `x` of a union, the elements of a tuple of types, `map(typeof, args)` in a message): the methods above
+# are compiled for any `T` there, which is found when the program runs (a call of the runtime). The text of each type that is in the binary is in a table that the linker makes (`define_type_name_table!` in
+# runtime/types.jl), with what Julia's `show` gives it, as `host_text` does for a constant: `static_type_name` finds it. The compiler calls this in place of those methods for such a type (`expand_type_show!`).
+function runtime_type_text(T::DataType)
+    p = @symbolcall static_type_name(pointer_from_objref(T)::Ptr{Cvoid})::Ptr{UInt8}
+    p == C_NULL && return String(T.name.name) # (a type that is not in the binary: no program has one)
+    return unsafe_string(p)
+end
+show_type_value(io::IO, T::DataType) = (print(io, runtime_type_text(T)); nothing)
+
+# (the methods above, for a type that is not a constant)
+const TYPE_SHOW_METHODS = (which(Base.show, Tuple{StaticIO,Type{Int}}), which(Base.show, Tuple{IOBuffer,Type{Int}}))
 
 ## Singletons: functions, `Colon()`, ...
 ##

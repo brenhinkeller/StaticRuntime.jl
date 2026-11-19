@@ -59,7 +59,8 @@ looking at a compilation that takes long, or ends in "did not settle":
 - `STATIC_RUNTIME_TRACE=1` writes a line for each pass on the error output: how long it took, whether it was cut short by a change of the types of the slots or completed or failed, the candidates of the calls of
   unknown functions that it has and found (and why they were taken, or not), the number of methods that were optimized (and how many of them were different: a pass that optimizes the same methods again and again is
   where the time goes), and whether there is another pass. `STATIC_RUNTIME_TRACE=methoderrors` also lists the calls that have no method for the types that reach them (most are on paths that are never taken: they are what
-  union splitting leaves; one that is reached is the `MethodError` that the program stops with).
+  union splitting leaves; one that is reached is the `MethodError` that the program stops with), and the calls that give no value because an argument has a type that no value has (`Type{Union{}}`), which is
+  where inference got a type wrong.
 - `STATIC_RUNTIME_SLOTS_WHY=1` says why slots are given up, and what each pass found in them.
 
 The passes have two budgets: the passes that are cut short because the types of the slots changed (`SLOT_PASS_LIMIT`: the program is compiled without the types when they do not settle), and the others

@@ -43,3 +43,42 @@ const MK_SET_LINEWIDTH = StaticRuntime.typed_input(MK_PLOT.attributes, :linewidt
         ])
     end
 end
+
+# CairoMakie: scenes drawn by the program to a PNG (`StaticRuntime.typed_drawing`, made before compiling). What the program writes is the same as what Julia writes (the case prints a checksum of the file), and that is the same as
+# what CairoMakie draws itself.
+using CairoMakie, CRC32c
+const MK_DRAW_DIR = mktempdir()
+const MK_LINES_SCENE = Scene(size = (200, 100), camera = campixel!)
+lines!(MK_LINES_SCENE, Float64[10, 100, 190], Float64[90, 10, 80]; color = :red, linewidth = 3)
+const MK_LINES_DRAWING = StaticRuntime.typed_drawing(MK_LINES_SCENE)
+const MK_SCATTER_SCENE = Scene(size = (200, 100), camera = campixel!)
+lines!(MK_SCATTER_SCENE, Float64[10, 100, 190], Float64[90, 10, 80]; color = :red, linewidth = 3)
+scatter!(MK_SCATTER_SCENE, Float64[10, 100, 190], Float64[90, 10, 80]; color = :blue, markersize = 12)
+const MK_SCATTER_DRAWING = StaticRuntime.typed_drawing(MK_SCATTER_SCENE)
+# (a figure with an axis: its frame, ticks, grid and the text of its labels, which is drawn with the fonts of the figure)
+const MK_DRAWN_FIG = Figure(size = (300, 200))
+lines!(Axis(MK_DRAWN_FIG[1, 1]), 1:10, Float64.(1:10) .^ 2)
+const MK_FIG_DRAWING = StaticRuntime.typed_drawing(MK_DRAWN_FIG)
+mk_png_checksum(drawing, name) = (path = joinpath(MK_DRAW_DIR, name); drawing(path); crc32c(read(path)))
+# (what CairoMakie writes for the scene, with the same settings as the drawing)
+function mk_cairomakie_png(drawing, name)
+    path = joinpath(MK_DRAW_DIR, name)
+    screen = CairoMakie.Screen(drawing.scene, drawing.config, nothing, CairoMakie.IMAGE)
+    CairoMakie.cairo_draw(screen, drawing.scene)
+    CairoMakie.Cairo.write_to_png(screen.surface, path)
+    return read(path)
+end
+
+@testset "CairoMakie" begin
+    @testset "the drawing is CairoMakie's" begin
+        for (drawing, name) in ((MK_LINES_DRAWING, "lines"), (MK_SCATTER_DRAWING, "scatter"), (MK_FIG_DRAWING, "figure"))
+            drawing(joinpath(MK_DRAW_DIR, name * "_typed.png"))
+            @test read(joinpath(MK_DRAW_DIR, name * "_typed.png")) == mk_cairomakie_png(drawing, name * "_cairomakie.png")
+        end
+    end
+    check_cases([
+        "lines in a scene"  => () -> (println(mk_png_checksum(MK_LINES_DRAWING, "lines.png")); 0),
+        "lines and scatter" => () -> (println(mk_png_checksum(MK_SCATTER_DRAWING, "scatter.png")); 0),
+    ])
+    check_cases(["a figure with an axis" => () -> (println(mk_png_checksum(MK_FIG_DRAWING, "figure.png")); 0)]) # (a program of its own: it is large)
+end

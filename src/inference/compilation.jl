@@ -68,7 +68,8 @@ Base.hash(s::Settings, h::UInt) = foldl((h, name) -> hash(getfield(s, name), h),
 ## Tracing
 #
 # `STATIC_RUNTIME_TRACE=1` says on the error output what each pass of a compilation found and spent its time on: nothing is written otherwise. `STATIC_RUNTIME_TRACE=methoderrors` says the same, and
-# lists the calls that have no method for the types that reach them too (most of them are on paths that are never taken: they are what union splitting leaves). (It is not in the `Settings`: it does not
+# lists the calls that have no method for the types that reach them too (most of them are on paths that are never taken: they are what union splitting leaves), and the calls that give no value because an argument
+# has a type that no value has. (It is not in the `Settings`: it does not
 # change what is compiled.)
 trace_on() = (v = get(ENV, "STATIC_RUNTIME_TRACE", "0"); v != "0" && v != "")
 trace_method_errors_on() = get(ENV, "STATIC_RUNTIME_TRACE", "") == "methoderrors"
@@ -205,11 +206,11 @@ ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbo
 mutable struct DispatchState
     registered_used::Bool
     used_in::Set{Any}                        # the methods (inferred for all that they are called with) whose code made a call over the registered types, in this compilation
-    registered_calls::Dict{String,Int}
+    registered_calls::Dict{Tuple{Any,Vector{Any}},Int}
     unions::Dict{Any,Any}                    # `registered_union` of a type: the same for a whole pass
     signatures::Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}} # the signatures of the methods of a function (it depends on the method table that this compilation looks them up in)
 end
-DispatchState() = DispatchState(false, Set{Any}(), Dict{String,Int}(), Dict{Any,Any}(), Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}())
+DispatchState() = DispatchState(false, Set{Any}(), Dict{Tuple{Any,Vector{Any}},Int}(), Dict{Any,Any}(), Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}())
 
 ## The compilation
 

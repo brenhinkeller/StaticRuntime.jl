@@ -198,6 +198,63 @@ end
 # compiler replaces that call with a call of this (see `expand_dynamic_getfield!`), which is also what `nt[name]` and `nt.name` are.
 @generated struct_field(x, name::Symbol) = field_chain(x, :(throw(FieldError($x, name))))
 
+# `isdefined(x, name)` with a name that is not known when compiling (`get(f, nt, name)` and `haskey(nt, name)` of a `NamedTuple` are that) is a call of the runtime too: the same comparisons, each with the `isdefined` of its field
+# (which is folded for a field that is always defined), and `false` for a name that is not a field. (`expand_dynamic_getfield!`)
+function isdefined_chain(T::DataType)
+    chain = false
+    for k in fieldcount(T):-1:1
+        chain = :(name === $(QuoteNode(fieldname(T, k))) ? isdefined(x, $k) : $chain)
+    end
+    return chain
+end
+@generated struct_isdefined(x, name::Symbol) = isdefined_chain(x)
+
+# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`) is `Core._apply_iterate(iterate, Base.vect, Core.svec(a), v)`, or of `getindex` with the type first, a call of the runtime: the number
+# of arguments is known when the program runs. The vector is made here: `items` are the elements, and the collections that are splatted, which are appended (`spread`), with the conversion of each element to the element type
+# that both do. For `T[...]` that is `T`. For `[...]` it is what `vect` promotes the types of the elements that there are to (`Any` for none): it depends on which of the collections are empty, so there is one for each
+# combination of them (`splat_types`), and the vector is made with the one that the program has. (See `expand_splat_literals!`; `items` is one tuple and the type a `Val`, since a method with a varargs argument, or one of
+# `::Type{T}` that the compiler makes an instance of itself, is called by the runtime's convention, `jl_invoke`.)
+const SPLAT_MAX_COLLECTIONS = 4
+
+# (the element type of `[...]` for each combination of the collections that are empty: the `m`th has the collections whose bit is set in `m - 1`, in order. `nothing` if an element type is not concrete, for which the type of
+# the vector depends on the values)
+function splat_types(types, spread)
+    collections = findall(spread)
+    length(collections) <= SPLAT_MAX_COLLECTIONS || return nothing
+    all(isconcretetype, types) || return nothing
+    result = Any[]
+    for m in 0:(2^length(collections) - 1)
+        present = Any[types[i] for i in eachindex(types) if !spread[i] || (m >> (findfirst(==(i), collections) - 1)) & 1 == 1]
+        push!(result, isempty(present) ? Any : Base.promote_type(present...))
+    end
+    return result
+end
+
+# (the statements that make the vector of the element type `T`)
+function splat_fill(T, spread)
+    body = Any[:(v = Vector{$T}())]
+    for i in 1:length(spread)
+        push!(body, spread[i] ? :(append!(v, items[$i])) : :(push!(v, items[$i])))
+    end
+    push!(body, :v)
+    return Expr(:block, body...)
+end
+
+@generated function splat_vector(::Val{T}, ::Val{spread}, items::Tuple) where {T,spread}
+    T isa Type && return splat_fill(T, spread)
+    # (`[...]`, `T === :promote`: the types of the elements, the element type of each collection)
+    types = Any[spread[i] ? eltype(fieldtype(items, i)) : fieldtype(items, i) for i in 1:length(spread)]
+    choices = splat_types(types, spread)
+    allequal(choices) && return splat_fill(choices[1], spread)
+    collections = findall(spread)
+    m = foldl((acc, (j, i)) -> :($acc + ($(1 << (j - 1)) * !isempty(items[$i]))), enumerate(collections); init = 0)
+    chain = splat_fill(choices[end], spread)
+    for k in (length(choices) - 1):-1:1
+        chain = :(m == $(k - 1) ? $(splat_fill(choices[k], spread)) : $chain)
+    end
+    return :(m = $m; $chain)
+end
+
 # `getfield(x, i)` with an `i::Int` that is not known when compiling (`getfield(nt, i)` in a loop over the fields of a `NamedTuple`, as `Makie`'s `node_pairs` does) is the same: a comparison with each index.
 @generated function index_field(x, i::Int)
     chain = :(throw(BoundsError(x, i)))

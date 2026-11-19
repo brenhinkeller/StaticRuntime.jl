@@ -318,7 +318,8 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
         max_methods = max(max_methods, c.settings.split_limit) # (one method for each type, at most)
         if registered
             fname = f isa Function ? nameof(f) : f isa Type ? f : nameof(typeof(f))
-            key = string(fname, "(", join(("::" * (T isa Core.TypeofVararg ? string(T) : string(CC.widenconst(T))) for T in original[2:end]), ", "), ")")
+            # (the function and the types: made into text only for the message, as this is each call that is made over them)
+            key = (fname, Any[T isa Core.TypeofVararg ? T : CC.widenconst(T) for T in original[2:end]])
             calls = c.dispatch.registered_calls
             calls[key] = get(calls, key, 0) + 1
             note_dispatch_used!(c, sv)
@@ -407,7 +408,7 @@ end
 function report_registered_dispatch(c::Compilation)
     registered = c.dispatch.registered_calls
     isempty(registered) && return
-    calls = sort!(collect(keys(registered)))
+    calls = sort!(unique!([string(f, "(", join(("::" * string(T) for T in types), ", "), ")") for (f, types) in keys(registered)]))
     empty!(registered)
     shown = join(("`$c`" for c in first(calls, 5)), ", ") * (length(calls) > 5 ? ", and $(length(calls) - 5) more" : "")
     @debug "Dispatch on `Any` or on an abstract type with unlisted subtypes was resolved over registered types: a value of another type that reaches such a call aborts the program with a MethodError. Add types with `add_dispatch_candidates!`." calls = shown candidates = join(string.(c.registered.dispatch), ", ") _id = :static_dispatch_candidates
@@ -835,9 +836,11 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     ir = expand_type_value_tests!(ir)
     ir = concretize_type_tuples!(ir)
     expand_dynamic_getfield!(ir)
+    ir = expand_splat_literals!(ir)
+    ir = expand_type_show!(ir)
     ir = expand_setproperty!(ir)
     trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
-    trace_on() && trace_noreturn(ir, opt.linfo)
+    trace_method_errors_on() && trace_noreturn(ir, opt.linfo) # (not with `STATIC_RUNTIME_TRACE=1`: in a large program there are thousands, and writing their types took a quarter of the time)
     ir = concretize_namedtuples!(ir)
     ir = remove_unused_type_construction!(ir)
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
@@ -1102,12 +1105,23 @@ function assert_field_receivers!(ir::CC.IRCode)
 end
 
 # `getfield(x, name)` of a struct, with a `name` that is not a constant, is `jl_f_getfield` too, and the type of what it gives depends on `name` (see `struct_field`, which is a comparison with each name):
-# the call is replaced by an `invoke` of it.
+# the call is replaced by an `invoke` of it. `isdefined(x, name)` is the same, with `struct_isdefined`.
 function expand_dynamic_getfield!(ir::CC.IRCode)
     for pc in 1:length(ir.stmts)
         st = ir.stmts[pc][:stmt]
         st isa Expr && st.head === :call && 3 <= length(st.args) <= 4 || continue
-        CC.singleton_type(CC.argextype(st.args[1], ir)) === Core.getfield || continue
+        f = CC.singleton_type(CC.argextype(st.args[1], ir))
+        if f === Core.isdefined && length(st.args) == 3
+            name = CC.argextype(st.args[3], ir)
+            (!(name isa Core.Const) && CC.widenconst(name) === Symbol) || continue
+            T = CC.widenconst(CC.argextype(st.args[2], ir))
+            (T isa DataType && isconcretetype(T) && isstructtype(T) && !(T <: Type) && !(T <: Tuple) && T !== Module &&
+             Base.datatype_fieldcount(T) isa Int && Base.datatype_fieldcount(T) <= 64) || continue
+            mi = CC.specialize_method(only(methods(struct_isdefined)), Tuple{typeof(struct_isdefined),T,Symbol}, Core.svec())
+            ir.stmts[pc][:stmt] = Expr(:invoke, mi, struct_isdefined, st.args[2], st.args[3])
+            continue
+        end
+        f === Core.getfield || continue
         name = CC.argextype(st.args[3], ir)
         name isa Core.Const && continue
         kind = CC.widenconst(name)
@@ -1126,6 +1140,182 @@ function expand_dynamic_getfield!(ir::CC.IRCode)
             types = types_of_constant_tuple(Any[nothing, CC.argextype(st.args[2], ir), CC.argextype(st.args[3], ir)])
             types === nothing || (ir.stmts[pc][:type] = types)
         end
+    end
+    return ir
+end
+
+# (the statement that makes `x`, if it is a call of `f`)
+function made_by(ir::CC.IRCode, @nospecialize(x), @nospecialize(f))
+    x isa Core.SSAValue || return nothing
+    st = ir.stmts[x.id][:stmt]
+    st isa Expr && st.head === :call && CC.singleton_type(CC.argextype(st.args[1], ir)) === f || return nothing
+    return st
+end
+
+# (the value of `x` if it is a constant: one that inference has as one, or an element of a tuple that is a constant, which the lowering of a splat reads as `Core.getfield((T, a), 1)` and inference types as `DataType`;
+# `nothing` otherwise)
+function constant_value(ir::CC.IRCode, @nospecialize(x))
+    t = CC.argextype(x, ir)
+    t isa Core.Const && return t.val
+    st = made_by(ir, x, Core.getfield)
+    (st !== nothing && length(st.args) == 3) || return nothing
+    tup, i = CC.argextype(st.args[2], ir), CC.argextype(st.args[3], ir)
+    (tup isa Core.Const && tup.val isa Tuple && i isa Core.Const && i.val isa Int && 1 <= i.val <= length(tup.val)) || return nothing
+    return tup.val[i.val]
+end
+
+function uses_of(ir::CC.IRCode, x::Core.SSAValue)
+    n = 0
+    for i in 1:length(ir.stmts)
+        st = ir.stmts[i][:stmt]
+        st isa Expr || continue
+        for a in st.args
+            a === x && (n += 1)
+        end
+    end
+    return n
+end
+
+# A vector literal with a splat of a vector or another collection (see `splat_vector`): the call of `Core._apply_iterate` is replaced by an `invoke` of it, with the type of the vector. The parts that are lists of arguments
+# (`Core.svec` of them, or a tuple) are given as their elements; the others are appended, and their element type has to be concrete for the type that `vect` promotes them to to be the one that it has when the program runs.
+function expand_splat_literals!(ir::CC.IRCode)
+    changed = false
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr && st.head === :call && length(st.args) >= 4 || continue
+        CC.singleton_type(CC.argextype(st.args[1], ir)) === Core._apply_iterate || continue
+        CC.singleton_type(CC.argextype(st.args[2], ir)) === Base.iterate || continue
+        g = CC.singleton_type(CC.argextype(st.args[3], ir))
+        (g === Base.vect || g === Base.getindex) || continue
+        items, spread, types, lists, itypes = Any[], Bool[], Any[], Any[], Any[]
+        for part in st.args[4:end]
+            list = made_by(ir, part, Core.svec)
+            list === nothing && (list = made_by(ir, part, Core.tuple))
+            if list !== nothing
+                push!(lists, part)
+                for a in list.args[2:end]
+                    T = CC.widenconst(CC.argextype(a, ir))
+                    push!(items, a); push!(spread, false); push!(types, T); push!(itypes, T)
+                end
+            else
+                t = CC.widenconst(CC.argextype(part, ir))
+                (isconcretetype(t) && !(t <: Core.SimpleVector)) || @goto next
+                if t <: Tuple
+                    # (a tuple that is a value: its elements, read here)
+                    for j in 1:fieldcount(t)
+                        e = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.getfield, part, j), fieldtype(t, j)))
+                        push!(items, e); push!(spread, false); push!(types, fieldtype(t, j)); push!(itypes, fieldtype(t, j))
+                    end
+                    changed = true
+                else
+                    push!(items, part); push!(spread, true); push!(types, eltype(t)); push!(itypes, t)
+                end
+            end
+        end
+        any(spread) || continue # (only lists: inference has the call with the elements)
+        if g === Base.getindex
+            # (`T[...]`: the type is the first element, a constant)
+            !isempty(items) && !spread[1] || continue
+            T = constant_value(ir, items[1])
+            T isa Type || continue
+            popfirst!(items); popfirst!(spread); popfirst!(types); popfirst!(itypes)
+            result = Vector{T}
+        else
+            # (`[...]`: the element type is that of the elements that there are, see `splat_types`)
+            choices = splat_types(types, spread)
+            choices === nothing && continue
+            T = :promote
+            result = Union{(Vector{C} for C in choices)...}
+        end
+        # (what follows was inferred with the type that the call had: the vector is one of those)
+        result <: CC.widenconst(ir.stmts[pc][:type]) || continue
+        IT = Tuple{itypes...}
+        isconcretetype(IT) || continue
+        # (from the match, which has the values of `T` and `spread`: an instance without them is called through `jl_invoke`)
+        mi = CC.specialize_method(Base._which(Tuple{typeof(splat_vector),Val{T},Val{Tuple(spread)},IT}))
+        tup = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.tuple, items...), IT))
+        ir.stmts[pc][:stmt] = Expr(:invoke, mi, splat_vector, Val(T), Val(Tuple(spread)), tup)
+        ir.stmts[pc][:type] = result
+        changed = true
+        # (the lists that only this used: `Core.svec` is a call of the runtime)
+        for l in lists
+            uses_of(ir, l) == 0 && (ir.stmts[l.id][:stmt] = nothing)
+        end
+        @label next
+    end
+    return changed ? CC.compact!(ir) : ir
+end
+
+# (during inference, the parts of a splat are tuples: the types of their elements)
+function splat_tuple_types(@nospecialize(t))
+    t isa Core.Const && t.val isa Tuple && return Any[typeof(x) for x in t.val]
+    t isa CC.PartialStruct && CC.widenconst(t) <: Tuple && return Any[CC.widenconst(f) for f in t.fields]
+    T = CC.widenconst(t)
+    (T isa DataType && T <: Tuple && !any(Base.isvarargtype, T.parameters)) || return nothing
+    return Any[T.parameters...]
+end
+
+# The type of `[a, v...]`, which Julia infers as a `Vector` of no element type known (`vect(X...)` promotes the types of the elements, and which there are depends on which collections are empty): the union of the vectors of
+# each combination (`splat_types`), the same as what the call is replaced with (`expand_splat_literals!`). The call has no information about the method, so that it is not inlined (what Julia has for it is the method for
+# elements of any types, which gives a `Vector`).
+# (only where what Julia infers is not a concrete type: of a collection of a length that is known, a static vector, it is the vector of the elements, and right)
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core._apply_iterate), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+    precise = splat_literal_type(arginfo.argtypes)
+    precise === nothing && return call
+    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+        isconcretetype(CC.widenconst(result.rt)) && return result
+        return CC.CallMeta(precise, Any, CC.Effects(), CC.NoCallInfo())
+    end
+end
+
+function splat_literal_type(argtypes::Vector{Any})
+    length(argtypes) >= 4 || return nothing
+    CC.singleton_type(argtypes[2]) === Base.iterate && CC.singleton_type(argtypes[3]) === Base.vect || return nothing
+    types, spread = Any[], Bool[]
+    for t in argtypes[4:end]
+        e = splat_tuple_types(t)
+        if e !== nothing
+            append!(types, e); append!(spread, fill(false, length(e)))
+        else
+            T = CC.widenconst(t)
+            (isconcretetype(T) && !(T <: Core.SimpleVector)) || return nothing
+            push!(types, eltype(T)); push!(spread, true)
+        end
+    end
+    any(spread) || return nothing
+    choices = splat_types(types, spread)
+    choices === nothing && return nothing
+    return Union{(Vector{C} for C in choices)...}
+end
+
+# `show(io, T)` of a type that is a value (`DataType`), not a constant, is the method for any `T` (see `TYPE_SHOW_METHODS`), which finds `T` when the program runs: it is replaced by an `invoke` of `show_type_value`, which prints
+# the text of the type from the table that the linker makes.
+# (and a call of `show` that is left as a call, with such a type, on one of the streams of the program, for which that is the method: Julia does not choose one for a `DataType`, which may be any `Type{T}`)
+function expand_type_show!(ir::CC.IRCode)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr || continue
+        if st.head === :invoke && length(st.args) == 4
+            mi = st.args[1]
+            mi isa Core.CodeInstance && (mi = mi.def)
+            mi isa Core.MethodInstance && mi.def isa Method && mi.def in TYPE_SHOW_METHODS || continue
+            io, x = st.args[3], st.args[4]
+        elseif st.head === :call && length(st.args) == 3 && CC.singleton_type(CC.argextype(st.args[1], ir)) === Base.show
+            io, x = st.args[2], st.args[3]
+            IOT = CC.widenconst(CC.argextype(io, ir))
+            (IOT <: ShowStream || IOT <: Base.GenericIOBuffer) || continue
+        else
+            continue
+        end
+        t = CC.argextype(x, ir)
+        (!(t isa Core.Const) && CC.widenconst(t) === DataType) || continue
+        IOT = CC.widenconst(CC.argextype(io, ir))
+        isconcretetype(IOT) || continue
+        target = CC.specialize_method(Base._which(Tuple{typeof(show_type_value),IOT,DataType}))
+        ir.stmts[pc][:stmt] = Expr(:invoke, target, show_type_value, io, x)
     end
     return ir
 end

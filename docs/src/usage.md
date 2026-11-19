@@ -185,7 +185,23 @@ end
 A read of `graph[key][]` resolves what the node comes from with the types of all the nodes of all the graphs of the figure (the functions of the inputs, the edges, the references of the values: a few hundred types of each), which is
 too large a program; a typed node has what it comes from as a list of steps of their own types (each edge and input that it depends on, in order). A typed input has the graphs that its changes reach, and their listeners.
 The values have the types that they had when they were made: a value of another type (an input that was a `Vector{Float64}` set to a `Vector{Int}`) stops the program with a message. Changing the axis or the layout
-when the program runs (a resize, the limits of an axis) is not yet supported.
+when the program runs (a resize, the limits of an axis) is not yet supported. `typed_node(graph, key; inputs = (YS,))` resolves only what depends on the inputs that are given (the rest is fixed: a change of it stops the program
+with a message that names it), which is a smaller program.
+
+With CairoMakie loaded, a scene or a figure is drawn to a PNG by the program with `StaticRuntime.typed_drawing`, made before compiling and kept as a constant:
+
+```julia
+using CairoMakie
+const fig = Figure(size = (300, 200))
+lines!(Axis(fig[1, 1]), 1:10, Float64.(1:10) .^ 2)
+const DRAWING = StaticRuntime.typed_drawing(fig) # (it prepares the graphs itself)
+main(argv) = (DRAWING("plot.png"); 0)            # (or `DRAWING(screen)`, on a `CairoMakie.Screen` of the scene)
+```
+
+The scene is drawn once when the drawing is made (which adds to the graphs of the plots what drawing them needs), and a figure is made ready as saving it does (the limits of its axes). Each plot is then a step with its own types,
+in the order that CairoMakie draws them. The image is what CairoMakie draws (the PNG is RGB, where `save` writes RGBA). The fonts of the text are in the program (FreeType reads them from the bytes that the figure has).
+`inputs` are the `typed_input`s that the program changes before drawing; what else changes is not drawn (it stops the program, as for `typed_node`), and plots that are added afterwards are not. Lines, line segments,
+scatter, text and polygons are supported; images, heatmaps and shown meshes are not yet.
 
 Limits: containers that contain themselves are not detected (they recurse until the program crashes); the keyword `context` of `sprint` with a pair that is written in the call
 (`sprint(show, v; context = :compact => true)`) works for what is not an array, and is not yet supported for the show of an array (give `IOContext` the stream instead, or a context that is
