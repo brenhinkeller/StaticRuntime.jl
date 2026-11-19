@@ -263,6 +263,18 @@ specific than it.** So an override `print(x1, x2) = print(STDOUT, x1, x2)` would
 they should not: with the same signature as the method that they replace, with restricted argument
 types, or by doing for those calls what the method of Base does (see `src/io.jl`).
 
+### Fields that are made again when the program runs
+
+A field of a pointer of a constant (the face of FreeType of a font, a surface of a library) is an address of the process that compiled the program, and is null in the program. A package's extension says how the
+program makes it again with a method of `StaticRuntime.remade_by`, which gives a function of the object:
+
+```julia
+StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) = font -> open_face(font)   # (from what the font has)
+```
+
+A read of the field (`getfield(font, :ft_ptr)`, wherever the package's code makes it) then makes it, and stores it, the first time that the program finds it null; the warning that the field is null in the program is
+not given for it. Only fields of a `Ptr` type. (The extension for Makie does this for the fonts of a figure.)
+
 ### Stating a type instead of copying code
 
 Many overrides of code from a package are a copy of a function with a type put in it, because the compiler finds a wide type (a `Union`, `Any`) where the code knows what it is. A copy drifts when the package changes. `@assume` states the

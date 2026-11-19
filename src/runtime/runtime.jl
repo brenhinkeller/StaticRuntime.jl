@@ -114,8 +114,10 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     end
     if strict
         dynamic = dynamic_runtime_calls(mod; allow)
-        pointers = unresolved_pointer_uses(mod)
-        isempty(dynamic) && isempty(pointers) || throw(UnsupportedCodeError(dynamic, pointers, isempty(dynamic) ? String[] : nonconst_globals(mod), dynamic_call_sites(mod, dynamic)))
+        addresses = UInt[]
+        pointers = unresolved_pointer_uses(mod; addresses)
+        isempty(dynamic) && isempty(pointers) || throw(UnsupportedCodeError(dynamic, pointers, isempty(dynamic) ? String[] : nonconst_globals(mod), dynamic_call_sites(mod, dynamic),
+                                                                            describe_unresolved(e.failures, addresses)))
     end
     say_dangling_pointers(e)
     strip && LLVM.strip_debuginfo!(mod) # (what refusing the code needed it for is done: see the entry points in `overrides.jl`)

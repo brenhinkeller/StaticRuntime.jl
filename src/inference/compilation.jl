@@ -67,12 +67,27 @@ Base.hash(s::Settings, h::UInt) = foldl((h, name) -> hash(getfield(s, name), h),
 
 ## Tracing
 #
-# `STATIC_RUNTIME_TRACE=1` says on the error output what each pass of a compilation found and spent its time on: nothing is written otherwise. `STATIC_RUNTIME_TRACE=methoderrors` says the same, and
-# lists the calls that have no method for the types that reach them too (most of them are on paths that are never taken: they are what union splitting leaves), and the calls that give no value because an argument
-# has a type that no value has. (It is not in the `Settings`: it does not
-# change what is compiled.)
-trace_on() = (v = get(ENV, "STATIC_RUNTIME_TRACE", "0"); v != "0" && v != "")
-trace_method_errors_on() = get(ENV, "STATIC_RUNTIME_TRACE", "") == "methoderrors"
+# `STATIC_RUNTIME_TRACE=1` says on the error output what each pass of a compilation found and spent its time on: nothing is written otherwise. The other values say the same, and:
+# - `methoderrors`: the calls that have no method for the types that reach them (most of them are on paths that are never taken: they are what union splitting leaves), and the calls that give no value because an
+#   argument has a type that no value has;
+# - `embed`: why each object that can not be in the binary can not, with the path from it to the constant that the program refers to;
+# - `ir:<text>`: the code of each method whose name (as `MethodInstance for f(::T)` is written) has the text in it, as it is optimized, after the changes of this package.
+# It is read once when a compilation starts (`Trace`), so that what is not traced costs a read of a field. (It is not in the `Settings`: it does not change what is compiled.)
+struct Trace
+    on::Bool
+    methoderrors::Bool
+    embed::Bool
+    ir::String # (`""`: none)
+end
+function Trace(v::AbstractString = get(ENV, "STATIC_RUNTIME_TRACE", "0"))
+    on = !(v == "0" || isempty(v))
+    return Trace(on, v == "methoderrors", v == "embed", startswith(v, "ir:") ? String(v[4:end]) : "")
+end
+# (that of the compilation that is running, or of the environment, outside of one: the linker of the runtime is also used on its own)
+current_trace() = (c = CURRENT_COMPILATION[]; c === nothing ? Trace() : c.trace)
+trace_on() = current_trace().on
+trace_method_errors_on() = current_trace().methoderrors
+trace_embed_on() = current_trace().embed
 trace(args...) = (println(stderr, "[static-runtime] ", args...); nothing)
 
 ## The state of each concern
@@ -195,12 +210,12 @@ mutable struct ObjectState
     # (for the whole compilation, not each pass: the objects that have a key, `ObjectKey{N}`, which code that is made for each of them is specialized on, see "Code for each object" in objects.jl)
     keyed_objects::Vector{Any}
     key_index::IdDict{Any,Int}
-    keyed_functions::Set{Any}                # the functions that calls were made `g(key, args...)` of
+    remakers::Dict{Tuple{Any,Symbol},Any}     # (for the whole compilation) `remade_by` of each field of a pointer that was read, once asked: the function, or `nothing` (see "Fields that are made again" in boxes.jl)
 end
 ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbol}}(), false, false, false, 0,
                             Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Any,Symbol,Any}}}(),
                             Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Set{Any}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), IdDict{Any,Bool}(), IdDict{Any,Bool}(),
-                            false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Set{Any}())
+                            false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Dict{Tuple{Any,Symbol},Any}())
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
@@ -232,10 +247,11 @@ mutable struct Compilation
     user_modules::Dict{Module,Bool}          # whether a module is the program's (see `user_module`)
     julia_owned::Dict{Module,Bool}           # whether a module is one of Julia's own (see `julia_owned_module`)
     warnings::Vector{Pair{Any,String}}       # what inference has to say to the user (each once, by its key): said when the compilation ends, and not where it is found (see `compile_warning!`)
+    trace::Trace                             # what `STATIC_RUNTIME_TRACE` says to write, when the compilation started
 end
 
 function Compilation(settings::Settings = Settings(), registered::Registered = Registered())
-    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), ObjectState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[])
+    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), ObjectState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[], Trace())
     append!(c.closures.callbacks, registered.callbacks) # (those that exist before the program: see `add_callback!`)
     c.key = inference_key(c)
     return c

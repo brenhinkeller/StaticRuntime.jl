@@ -60,7 +60,11 @@ looking at a compilation that takes long, or ends in "did not settle":
   unknown functions that it has and found (and why they were taken, or not), the number of methods that were optimized (and how many of them were different: a pass that optimizes the same methods again and again is
   where the time goes), and whether there is another pass. `STATIC_RUNTIME_TRACE=methoderrors` also lists the calls that have no method for the types that reach them (most are on paths that are never taken: they are what
   union splitting leaves; one that is reached is the `MethodError` that the program stops with), and the calls that give no value because an argument has a type that no value has (`Type{Union{}}`), which is
-  where inference got a type wrong.
+  where inference got a type wrong. `STATIC_RUNTIME_TRACE=embed` says why each object that can not be in the binary can not, with the way from it to the constant that the program refers to.
+  `STATIC_RUNTIME_TRACE=ir:<text>` writes the code of each method whose name has the text in it (`ir:elliptical_arc_to_beziers(`), as it is optimized, after the changes of this package. The setting is read
+  when a compilation starts: what is not traced costs nothing.
+- When strict mode refuses a program for references to objects of the process that compiled it, the message says what each object is (its type) and why it could not be copied into the binary. A part of a program that
+  needs the Julia runtime and is only on the way to an error stops the program with a message that says where in the Julia code it is (the file and line, and what that was inlined into).
 - `STATIC_RUNTIME_SLOTS_WHY=1` says why slots are given up, and what each pass found in them.
 
 The passes have two budgets: the passes that are cut short because the types of the slots changed (`SLOT_PASS_LIMIT`: the program is compiled without the types when they do not settle), and the others

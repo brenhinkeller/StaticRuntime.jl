@@ -651,8 +651,8 @@ end
 ## Fonts
 #
 # A font of the program (`FreeTypeAbstraction.FTFont`) is a face of FreeType, a pointer of the process that compiles it, which is null in the program; what the face was read from is in the font (`mmapped`, the bytes of the file,
-# which are in the program as its other constants are). The face is made again from them the first time that the program uses the font (as `FTFont(path)` makes it), with a library of FreeType that the program starts
-# itself (the package's is a pointer of this process too). This is only in the program: in Julia nothing calls it, and the library is null when it is compiled.
+# which are in the program as its other constants are). The face is made again from them the first time that the program reads it (as `FTFont(path)` makes it: see "Fields that are made again" in boxes.jl), with a
+# library of FreeType that the program starts itself (the package's is a pointer of this process too). This is only in the program: in Julia nothing calls it, and the library is null when it is compiled.
 const FTA = Makie.FreeTypeAbstraction
 const FT = FTA.FreeType
 const PROGRAM_FT_LIBRARY = Ref{FT.FT_Library}(C_NULL)
@@ -669,31 +669,13 @@ function program_ft_library()
 end
 
 function program_face(font::FTA.FTFont)
-    face = getfield(font, :ft_ptr)
-    face == C_NULL || return face
     data = getfield(font, :mmapped)
     data === nothing && error("the font `", getfield(font, :fontname), "` was not read from a file when the program was compiled, and is not in the program")
     r = Ref{FT.FT_Face}(C_NULL)
     FT.FT_New_Memory_Face(program_ft_library(), data, length(data), Int32(0), r) == 0 || error("the font `", getfield(font, :fontname), "` could not be read")
-    setfield!(font, :ft_ptr, r[])
     return r[]
 end
 
-@device_override Base.unsafe_convert(::Type{FT.FT_Face}, font::FTA.FTFont) = program_face(font)
-
-# (the package's, with the face of the program)
-@device_override function Base.getproperty(font::FTA.FTFont, fieldname::Symbol)
-    fieldname in fieldnames(FTA.FTFont) && return getfield(font, fieldname)
-    face = program_face(font)
-    @lock font.lock begin
-        field = getfield(unsafe_load(face), fieldname)
-        if field isa Ptr{FT.FT_String}
-            field == C_NULL && return ""
-            return unsafe_string(field)
-        else
-            return field
-        end
-    end
-end
+StaticRuntime.remade_by(::Type{FTA.FTFont}, ::Val{:ft_ptr}) = program_face
 
 end # module

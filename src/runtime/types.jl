@@ -66,7 +66,7 @@ end
 # of its fields are, and the answer is a comparison with each of them (as the symbols of the same name are the same object).
 #
 # `getfield(x, name)` itself with a name that is only known at run time, of fields of different types, is `jl_f_getfield` in Julia, whose result has a type that the program does not know:
-# for a struct the compiler makes it a comparison with each name (`expand_dynamic_getfield!`, `struct_field`). OPEN: it is not done for the fields of a type object (`getproperty(T, name)`),
+# for a struct the compiler makes it a comparison with each name (`dynamic_field_plan`, `struct_field`). OPEN: it is not done for the fields of a type object (`getproperty(T, name)`),
 # which is what fails for `MvNormal` in `test/packages/distributions.jl` under `--code-coverage` (that disables the inlining and the folding that avoid it).
 function define_field_index!(mod::LLVM.Module)
     fns = LLVM.functions(mod)

@@ -579,8 +579,8 @@ function keyed_call(interp::OverridesInterpreter, @nospecialize(f), arginfo::CC.
     x = argtypes[2].val
     g = try Base.invokelatest(keyed_method, f, x) catch; nothing end
     g === nothing && return nothing
-    push!(c.objects.keyed_functions, g)
-    return CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(g), CC.Const(object_key!(c, x)), argtypes[3:end]...]), si, vtypes, sv)
+    # (the call `g(key, args...)` in its place: see "Calls that are replaced" in dispatch.jl)
+    return redirect(interp, g, Any[object_key!(c, x)], 3, arginfo, si, vtypes, sv)
 end
 
 for F in (typeof(Base.setindex!), typeof(Base.notify))
@@ -625,25 +625,11 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(known_ob
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
-# (in the code before it is optimized: what replaces the call, if it is one of those above, or `nothing`)
+# (in the code before it is optimized: the constant that a call of `object_for` or `known_object_keys` gives, which the statement is, or `nothing`. The calls of `setindex!` and `notify` that are made for an object are replaced
+# as the others that are: see "Calls that are replaced" in dispatch.jl)
 function keyed_replacement(c::Compilation, @nospecialize(called), call::Expr, @nospecialize(info), @nospecialize(t))
-    if called === object_for || called === known_object_keys
-        return t isa CC.Const ? QuoteNode(t.val) : nothing
-    end
-    (called === Base.setindex! || called === Base.notify) || return nothing
-    isempty(c.objects.keyed_functions) && return nothing
-    # (the methods of the call: one, or those of a split over the types of the value, `obs[] = cond ? a : b`, which are all of the same function and key)
-    matches = info isa CC.MethodMatchInfo ? info.results.matches :
-              info isa CC.UnionSplitInfo ? [m for i in info.split for m in i.results.matches] : nothing
-    (matches === nothing || isempty(matches)) && return nothing
-    keyed(m) = (sig = Base.unwrap_unionall(m.spec_types); sig isa DataType && length(sig.parameters) >= 2 && Base.issingletontype(sig.parameters[1]) && sig.parameters[1].instance in c.objects.keyed_functions &&
-                (K = sig.parameters[2]; K isa DataType && K <: ObjectKey && isconcretetype(K)) ? (sig.parameters[1], sig.parameters[2]) : nothing)
-    gks = map(keyed, matches)
-    all(isnothing, gks) && return nothing
-    # (a call that inference made of the keyed function is to be that call: what is inlined for it is its code, and the call of `f` that was left would be a call that never matches it)
-    (any(isnothing, gks) || !allequal(gks)) && error("a call that is made for an object (see \"Code for each object\" in objects.jl) could not be replaced: ", call)
-    G, K = gks[1]
-    return Expr(:call, G.instance, K.instance, call.args[3:end]...)
+    (called === object_for || called === known_object_keys) || return nothing
+    return t isa CC.Const ? QuoteNode(t.val) : nothing
 end
 
 # (whether the signature of a call has a key in it: one of a method that is compiled for an object, see above, whose recursion is not limited)

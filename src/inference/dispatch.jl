@@ -452,7 +452,7 @@ end
 # `invokelatest(f, args...)` calls `f` in the newest world, and so the compiler can't know what it calls: the call is an `Any`, made
 # by the runtime. In a program that is compiled there are no newer methods, so it is the call `f(args...)`. Packages use it in the
 # macros of logging (`@warn`), and sometimes to avoid a recursion that inference gives up on. So (for what is compiled with our method
-# table) inference takes it for the call of `f`, and the statement is made that call before it is optimized.
+# table) inference takes it for the call of `f`, and the statement is made that call before it is optimized (see `optimize`).
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.invokelatest), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
@@ -468,7 +468,7 @@ end
 
 # `ObjectiveFunction{F}()`, where `F` is the type of the objective that a solver of MathOptInterface has (`MOI.get(model, ObjectiveFunctionType())`: one of a few, of which inference knows the union of
 # `Type{X}`s) is the builtin `Core.apply_type`, made when the program runs: an executable can't make types. The answer is one of a few types too: the call is inferred as the call of
-# `split_apply_type`, which is made over the union (as a call of a function on a union is), with a constant type in each case, and the statement is made that call before it is optimized.
+# `split_apply_type`, which is made over the union (as a call of a function on a union is), with a constant type in each case, and the statement is made that call before it is optimized (see "Calls that are replaced").
 split_apply_type(::Type{F}, ::Type{A}) where {F,A} = F{A}
 split_apply_type(::Type{F}, ::Type{A}, ::Type{B}) where {F,A,B} = F{A,B}
 split_apply_type(::Type{F}, ::Type{A}, ::Type{B}, ::Type{C}) where {F,A,B,C} = F{A,B,C}
@@ -512,13 +512,10 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.app
     argtypes = arginfo.argtypes
     if 3 <= length(argtypes) <= 5 && exact_type_argument(argtypes[2]) && any(few_types_argument, argtypes[3:end]) &&
        all(t -> exact_type_argument(t) || few_types_argument(t), argtypes[3:end])
-        split = CC.ArgInfo(nothing, Any[CC.Const(split_apply_type), argtypes[2:end]...])
-        call = CC.abstract_call(interp, split, si, vtypes, sv)
-        T = applied_types(argtypes)
-        T === nothing && return call
         # (what the call gives is one of the types that it makes, each a type that is known: what inference makes of the cases is a merge of constants, which is a union of at most three of them, and then
         # `Type{<:Vector}`, which a call on it is not made over the cases of)
-        return after_call(result_of_type, call, interp, sv, T)
+        T = applied_types(argtypes)
+        return redirect(interp, split_apply_type, Any[], 2, arginfo, si, vtypes, sv; then = T === nothing ? nothing : result_of_type, with = T)
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
@@ -527,7 +524,7 @@ end
 # A tuple with an element that is one of a few types (`Tuple{Union{A,B},C}`, the pair of what two observables hold) is not a type that a value has: a value of it is one of the tuples that it is made of (`Tuple{A,C}` or
 # `Tuple{B,C}`), and Julia makes and reads it with the runtime (`jl_f_tuple`, `jl_get_nth_field_checked`), as it does not know which. `Core.tuple` of an argument of a few types, and `getfield` of such a tuple, are inferred
 # as calls of `split_tuple` and `split_getfield` (as a call of a function on a union is made over its cases: the tuple is made, or read, as one of a type that is known in each), and the statement is made that call before it
-# is optimized (see `optimize`), as `split_apply_type` is.
+# is optimized (see "Calls that are replaced"), as `split_apply_type` is.
 for n in 1:16 # (a method for each number of elements: a method of any number of them has a `Vararg` in its signature, which the code that looks at the calls of methods takes as a type)
     xs = [Symbol(:x, i) for i in 1:n]
     @eval split_tuple($(xs...)) = ($(xs...),)
@@ -576,11 +573,10 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.tup
         T = Tuple{(CC.widenconst(a) for a in argtypes[2:end])...}
         cases = tuple_cases(T, compilation().settings.split_limit)
         if !(cases === nothing || length(argtypes) > 17)
-            call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(split_tuple), argtypes[2:end]...]), si, vtypes, sv)
             # (what the call gives is the tuple that `Core.tuple` gives, `Tuple{Union{A,B},C}` or one made of what is known of the arguments: what inference makes of the cases is a merge of them, which is
             # `Tuple{Any,C}` for more than a few, where Julia has the union)
             rt = CC.tuple_tfunc(CC.typeinf_lattice(interp), argtypes[2:end])
-            return after_call(result_split, call, interp, sv, rt)
+            return redirect(interp, split_tuple, Any[], 2, arginfo, si, vtypes, sv; then = result_split, with = rt)
         end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -596,10 +592,9 @@ function split_tuple_read(interp, arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, 
     (T isa Union || (T isa DataType && T <: Tuple)) && !isconcretetype(T) || return nothing
     cases = tuple_cases(T, compilation().settings.split_limit)
     (cases === nothing || length(cases) < 2) && return nothing
-    call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(split_getfield), Union{cases...}, argtypes[3]]), si, vtypes, sv)
     # (what is read is what `getfield` gives, as for `split_tuple` above: the union of what the cases give, which inference merges)
     rt = CC.getfield_tfunc(CC.typeinf_lattice(interp), argtypes[2], argtypes[3])
-    return after_call(result_split, call, interp, sv, rt)
+    return redirect(interp, split_getfield, Any[], 2, arginfo, si, vtypes, sv; argtypes = Any[Union{cases...}, argtypes[3]], then = result_split, with = rt)
 end
 
 result_split(result::CC.CallMeta, @nospecialize(rt)) = result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
@@ -611,14 +606,6 @@ function split_result(@nospecialize(merged), @nospecialize(builtin))
     return (T isa Union && all(isconcretetype, Base.uniontypes(T))) || isconcretetype(T) ? merged : builtin
 end
 
-# whether what inference found of a call is that of a call of a function of this module that is named `name` (each of the methods that it may be)
-function calls_helper(@nospecialize(info), name::Symbol)
-    info isa CC.UnionSplitInfo && return !isempty(info.split) && all(i -> calls_helper(i, name), info.split)
-    info isa CC.MethodMatchInfo || return false
-    matches = info.results.matches
-    return !isempty(matches) && all(m -> m.method.name === name && m.method.module === @__MODULE__, matches)
-end
-
 # Whether the type `atype` meets one of `sigs`. (A loop, and not `any` with a closure: in the closures here a type that a closure takes makes it a method of its own, which Julia compiles for each type, when the
 # program is compiled: here, and in the others of the package that take a type, as `holds_object_slots` does.)
 function meets_any(@nospecialize(atype), sigs)
@@ -626,14 +613,6 @@ function meets_any(@nospecialize(atype), sigs)
         typeintersect(atype, sig) !== Union{} && return true
     end
     return false
-end
-
-# whether what inference found of a call is that of a call of `split_apply_type` (see above)
-function calls_split_apply_type(@nospecialize(info))
-    info isa CC.UnionSplitInfo && return !isempty(info.split) && all(calls_split_apply_type, info.split)
-    info isa CC.MethodMatchInfo || return false
-    matches = info.results.matches
-    return !isempty(matches) && all(m -> m.method.name === :split_apply_type && m.method.module === @__MODULE__, matches)
 end
 
 # The function that a statement of the code before it is optimized calls (what a callee refers to, if that is a variable that a
@@ -657,6 +636,80 @@ function called_function(code, x)
     # (optimized code refers to a global through its binding partition: a constant binding holds the value)
     x isa Core.BindingPartition && return is_const_partition(x) ? x.restriction : nothing
     return x isa Expr ? nothing : x
+end
+
+## Calls that are replaced
+#
+# A call that a program can not make as it is (a builtin that is a call of the runtime, `getfield(x, name)` with a `name` that is not a constant; a method that finds what it needs when the program runs, `show` of a type that is a
+# value) is replaced with a call of a function of this package that does the same with the types known. It is replaced in inference: the call of the replacement is what is inferred (`redirect`, in a hook of
+# `abstract_call_known`), so that what it gives is what the code after it is inferred with, and what is inlined or invoked is its code, as for any call. A `RedirectInfo` says what the call is made; the statement is made
+# that call before the code is optimized (`CC.optimize` below), with the information of the call of the replacement.
+struct RedirectInfo <: CC.CallInfo
+    f::Any              # the function that is called in its place
+    prefix::Vector{Any} # the constants that it is given before the arguments of the call
+    from::Int           # the first and the last of the arguments of the call that it is given (`call.args[from:to]`, with `call.args[1]` the function; `to == 0` is the last)
+    to::Int
+    info::CC.CallInfo   # what inference has of the call of `f`
+end
+CC.add_edges_impl(edges::Vector{Any}, info::RedirectInfo) = CC.add_edges!(edges, info.info)
+
+# The call `f(prefix..., args[from:to]...)` in place of the call of `arginfo`, as inference has it. `argtypes`, if they are given, are what the replacement is inferred with (the types of the arguments that it is given, which may be
+# narrower than those of the call: the cases of a split); `then(result, with)`, if it is given, makes what inference has of the call of the replacement what the call gives (what it gives in Julia, which may be more than
+# inference finds of the replacement: a merge of its cases).
+function redirect(interp::CC.AbstractInterpreter, @nospecialize(f), prefix::Vector{Any}, from::Int, arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, sv::CC.AbsIntState;
+                  to::Int = 0, argtypes = nothing, then = nothing, with = nothing)
+    if argtypes === nothing
+        argtypes = Any[]
+        for p in prefix
+            push!(argtypes, CC.Const(p))
+        end
+        append!(argtypes, arginfo.argtypes[from:(to == 0 ? end : to)])
+    end
+    call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(f), argtypes...]), si, vtypes, sv)
+    held = Held(RedirectSpec(f, prefix, from, to, then, with))
+    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+        spec = held.x::RedirectSpec
+        adjusted = spec.then === nothing ? result : spec.then(result, spec.with)::CC.CallMeta
+        return CC.CallMeta(adjusted.rt, adjusted.exct, adjusted.effects, RedirectInfo(spec.f, spec.prefix, spec.from, spec.to, result.info), adjusted.refinements)
+    end
+end
+struct RedirectSpec
+    f::Any
+    prefix::Vector{Any}
+    from::Int
+    to::Int
+    then::Any
+    with::Any
+end
+
+# The same, decided by what Julia infers of the call: `decide(result)` gives the arguments of `redirect` (`(f, prefix, from)`), or `nothing` for the call as Julia has it. (Julia's call is inferred in a task of inference, and so
+# is the replacement, after it: see `doworkloop` in Julia's compiler.)
+function redirect_after(decide, interp::CC.AbstractInterpreter, @nospecialize(f), arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, sv::CC.AbsIntState, max_methods::Int)
+    result = CC.Future{CC.CallMeta}()
+    state = Ref{Any}(nothing)
+    stage = Ref(0)
+    function step(interp, sv)
+        if stage[] == 0
+            state[] = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                                     vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+            stage[] = 1
+        end
+        if stage[] == 1
+            isready(state[]) || return false
+            r = decide(state[][])
+            if r === nothing
+                result[] = state[][]
+                return true
+            end
+            state[] = redirect(interp, r[1], r[2], r[3], arginfo, si, vtypes, sv)
+            stage[] = 2
+        end
+        isready(state[]) || return false
+        result[] = state[][]
+        return true
+    end
+    step(interp, sv) || push!(sv.tasks, step)
+    return result
 end
 
 # (before optimizing: the statements of `invokelatest` are the calls that inference took them for)
@@ -697,17 +750,19 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
             t = kw isa Core.SSAValue ? opt.src.ssavaluetypes[kw.id] : kw isa NamedTuple ? CC.Const(kw) : nothing
             t isa CC.Const && has_type_values(t.val) && (call.args[2] = typed_constant(t.val))
         end
+        info = opt.stmt_info[pc]
+        if info isa RedirectInfo
+            # (a call that is replaced, see "Calls that are replaced": the call of the replacement, with what inference has of it)
+            replacement = Expr(:call, info.f, info.prefix..., call.args[info.from:(info.to == 0 ? end : info.to)]...)
+            opt.stmt_info[pc] = info.info
+            assigned ? (st.args[2] = replacement) : (code[pc] = replacement)
+            continue
+        end
         replacement = if called === host_text && opt.src.ssavaluetypes[pc] isa CC.Const
             # (the text that was made when compiling, see `host_text` in show.jl: the statement is the text, which Julia does not put in the place of a call that it is the value of, as it is not a value of bits)
             opt.src.ssavaluetypes[pc].val
         elseif called === Core.invokelatest
             Expr(:call, call.args[2:end]...)
-        elseif called === Core.apply_type && calls_split_apply_type(opt.stmt_info[pc])
-            Expr(:call, split_apply_type, call.args[2:end]...)
-        elseif called === Core.tuple && calls_helper(opt.stmt_info[pc], :split_tuple)
-            Expr(:call, split_tuple, call.args[2:end]...)
-        elseif called === Core.getfield && length(call.args) == 3 && calls_helper(opt.stmt_info[pc], :split_getfield)
-            Expr(:call, split_getfield, call.args[2:end]...)
         elseif (called === Core.memoryrefget || called === Core.getfield) && (slot_call = type_slot_call(opt.stmt_info[pc])) !== nothing
             slot_call[1] === type_slot_get ? Expr(:call, type_slot_get, call.args[2], slot_call[2]) : Expr(:call, type_slot_field, call.args[2], Val(call.args[3] isa QuoteNode ? call.args[3].value : call.args[3]), slot_call[2])
         elseif (keyed = keyed_replacement(c, called, call, opt.stmt_info[pc], opt.src.ssavaluetypes[pc])) !== nothing
@@ -725,7 +780,7 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
     previous = c.slots.current_result
     c.slots.current_result = caller
     try
-        if trace_on()
+        if c.trace.on
             c.closures.optimized += 1
             push!(c.closures.optimized_unique, caller.linfo)
             started = time_ns()
@@ -835,14 +890,15 @@ function CC.finishopt!(interp::OverridesInterpreter, opt::CC.OptimizationState, 
     ir = assert_field_receivers!(ir)
     ir = expand_type_value_tests!(ir)
     ir = concretize_type_tuples!(ir)
-    expand_dynamic_getfield!(ir)
-    ir = expand_splat_literals!(ir)
-    ir = expand_type_show!(ir)
+    ir = expand_tuple_reads!(ir)
     ir = expand_setproperty!(ir)
-    trace_method_errors_on() && trace_method_errors(ir, opt.linfo)
-    trace_method_errors_on() && trace_noreturn(ir, opt.linfo) # (not with `STATIC_RUNTIME_TRACE=1`: in a large program there are thousands, and writing their types took a quarter of the time)
+    t = c.trace
+    t.methoderrors && trace_method_errors(ir, opt.linfo)
+    t.methoderrors && trace_noreturn(ir, opt.linfo) # (not with `STATIC_RUNTIME_TRACE=1`: in a large program there are thousands, and writing their types took a quarter of the time)
     ir = concretize_namedtuples!(ir)
     ir = remove_unused_type_construction!(ir)
+    # (`STATIC_RUNTIME_TRACE=ir:<text>`: the code of the methods whose name has the text in it, as it is now)
+    isempty(t.ir) || (name = string(opt.linfo); occursin(t.ir, name) && trace("the code of ", name, ", optimized:\n", ir))
     return @invoke CC.finishopt!(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
 end
 
@@ -1104,220 +1160,117 @@ function assert_field_receivers!(ir::CC.IRCode)
     return changed ? CC.compact!(ir) : ir
 end
 
-# `getfield(x, name)` of a struct, with a `name` that is not a constant, is `jl_f_getfield` too, and the type of what it gives depends on `name` (see `struct_field`, which is a comparison with each name):
-# the call is replaced by an `invoke` of it. `isdefined(x, name)` is the same, with `struct_isdefined`.
-function expand_dynamic_getfield!(ir::CC.IRCode)
+# `getfield(x, name)` of a struct, with a `name` that is not a constant, is `jl_f_getfield` too, and the type of what it gives depends on `name`: it is the call of `struct_field`, which is a comparison with each name (or
+# `index_field`, for an index), in its place (see "Calls that are replaced"); `nothing` where it is not. (`abstract_call_known` for `getfield` in boxes.jl.)
+function dynamic_field_plan(argtypes::Vector{Any})
+    3 <= length(argtypes) <= 4 || return nothing
+    name = argtypes[3]
+    name isa Core.Const && return nothing
+    kind = CC.widenconst(name)
+    (kind === Symbol || kind === Int) || return nothing
+    T = CC.widenconst(argtypes[2])
+    (T isa DataType && isconcretetype(T) && !(T <: Type) && T !== DataType && T !== Module &&
+     Base.datatype_fieldcount(T) isa Int && 0 < Base.datatype_fieldcount(T) <= 64) || return nothing
+    # (not a tuple: see `expand_tuple_reads!`)
+    T <: Tuple && return nothing
+    return kind === Symbol ? struct_field : index_field
+end
+
+# `getfield(t, i)` of a tuple by an index that is not a constant (`t[i]` in a loop over its elements): what Julia infers it to give is the union of the types of the elements, which is narrower than what the code of
+# `index_field` gives where they are constants (a tuple of types: what inference makes of more than three constants is the `DataType` that they are all of), and the analysis of the slots reads the type of what is stored
+# from the call (`Type[A, B, C, D]`). So it is left as Julia's call through optimization, and made a call of `index_field` after, with that type. (A field of another struct is replaced in inference: see
+# `dynamic_field_plan`.)
+function expand_tuple_reads!(ir::CC.IRCode)
     for pc in 1:length(ir.stmts)
         st = ir.stmts[pc][:stmt]
         st isa Expr && st.head === :call && 3 <= length(st.args) <= 4 || continue
-        f = CC.singleton_type(CC.argextype(st.args[1], ir))
-        if f === Core.isdefined && length(st.args) == 3
-            name = CC.argextype(st.args[3], ir)
-            (!(name isa Core.Const) && CC.widenconst(name) === Symbol) || continue
-            T = CC.widenconst(CC.argextype(st.args[2], ir))
-            (T isa DataType && isconcretetype(T) && isstructtype(T) && !(T <: Type) && !(T <: Tuple) && T !== Module &&
-             Base.datatype_fieldcount(T) isa Int && Base.datatype_fieldcount(T) <= 64) || continue
-            mi = CC.specialize_method(only(methods(struct_isdefined)), Tuple{typeof(struct_isdefined),T,Symbol}, Core.svec())
-            ir.stmts[pc][:stmt] = Expr(:invoke, mi, struct_isdefined, st.args[2], st.args[3])
-            continue
-        end
-        f === Core.getfield || continue
-        name = CC.argextype(st.args[3], ir)
-        name isa Core.Const && continue
-        kind = CC.widenconst(name)
-        (kind === Symbol || kind === Int) || continue
+        CC.singleton_type(CC.argextype(st.args[1], ir)) === Core.getfield || continue
+        i = CC.argextype(st.args[3], ir)
+        (!(i isa Core.Const) && CC.widenconst(i) === Int) || continue
         T = CC.widenconst(CC.argextype(st.args[2], ir))
-        (T isa DataType && isconcretetype(T) && !(T <: Type) && T !== DataType && T !== Module &&
-         Base.datatype_fieldcount(T) isa Int && 0 < Base.datatype_fieldcount(T) <= 64) || continue
-        if kind === Symbol
-            T <: Tuple && continue
-            mi = CC.specialize_method(only(methods(struct_field)), Tuple{typeof(struct_field),T,Symbol}, Core.svec())
-            ir.stmts[pc][:stmt] = Expr(:invoke, mi, struct_field, st.args[2], st.args[3])
-        else
-            mi = CC.specialize_method(only(methods(index_field)), Tuple{typeof(index_field),T,Int}, Core.svec())
-            ir.stmts[pc][:stmt] = Expr(:invoke, mi, index_field, st.args[2], st.args[3])
-            # (the elements of a tuple that is a constant, and has types in it: each is a type that is known, see `types_of_constant_tuple`; what the callee gives is the `DataType` that they are all of)
-            types = types_of_constant_tuple(Any[nothing, CC.argextype(st.args[2], ir), CC.argextype(st.args[3], ir)])
-            types === nothing || (ir.stmts[pc][:type] = types)
-        end
+        (T isa DataType && T <: Tuple && isconcretetype(T) && Base.datatype_fieldcount(T) isa Int && 0 < Base.datatype_fieldcount(T) <= 64) || continue
+        mi = CC.specialize_method(only(methods(index_field)), Tuple{typeof(index_field),T,Int}, Core.svec())
+        ir.stmts[pc][:stmt] = Expr(:invoke, mi, index_field, st.args[2], st.args[3])
+        # (the elements of a tuple of types that is a constant: each is a type that is known, see `types_of_constant_tuple`, where the callee gives the `DataType` that they are all of)
+        types = types_of_constant_tuple(Any[nothing, CC.argextype(st.args[2], ir), i])
+        types === nothing || (ir.stmts[pc][:type] = types)
     end
     return ir
 end
 
-# (the statement that makes `x`, if it is a call of `f`)
-function made_by(ir::CC.IRCode, @nospecialize(x), @nospecialize(f))
-    x isa Core.SSAValue || return nothing
-    st = ir.stmts[x.id][:stmt]
-    st isa Expr && st.head === :call && CC.singleton_type(CC.argextype(st.args[1], ir)) === f || return nothing
-    return st
-end
-
-# (the value of `x` if it is a constant: one that inference has as one, or an element of a tuple that is a constant, which the lowering of a splat reads as `Core.getfield((T, a), 1)` and inference types as `DataType`;
-# `nothing` otherwise)
-function constant_value(ir::CC.IRCode, @nospecialize(x))
-    t = CC.argextype(x, ir)
-    t isa Core.Const && return t.val
-    st = made_by(ir, x, Core.getfield)
-    (st !== nothing && length(st.args) == 3) || return nothing
-    tup, i = CC.argextype(st.args[2], ir), CC.argextype(st.args[3], ir)
-    (tup isa Core.Const && tup.val isa Tuple && i isa Core.Const && i.val isa Int && 1 <= i.val <= length(tup.val)) || return nothing
-    return tup.val[i.val]
-end
-
-function uses_of(ir::CC.IRCode, x::Core.SSAValue)
-    n = 0
-    for i in 1:length(ir.stmts)
-        st = ir.stmts[i][:stmt]
-        st isa Expr || continue
-        for a in st.args
-            a === x && (n += 1)
+# `isdefined(x, name)` with a `name` that is not a constant: the call of `struct_isdefined`, the same comparisons (`get(f, nt, name)` and `haskey(nt, name)` of a `NamedTuple` are that)
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.isdefined), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if length(argtypes) == 3 && !(argtypes[3] isa Core.Const) && CC.widenconst(argtypes[3]) === Symbol
+        T = CC.widenconst(argtypes[2])
+        if T isa DataType && isconcretetype(T) && isstructtype(T) && !(T <: Type) && !(T <: Tuple) && T !== Module && Base.datatype_fieldcount(T) isa Int && Base.datatype_fieldcount(T) <= 64
+            return redirect(interp, struct_isdefined, Any[], 2, arginfo, si, vtypes, sv)
         end
     end
-    return n
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
-# A vector literal with a splat of a vector or another collection (see `splat_vector`): the call of `Core._apply_iterate` is replaced by an `invoke` of it, with the type of the vector. The parts that are lists of arguments
-# (`Core.svec` of them, or a tuple) are given as their elements; the others are appended, and their element type has to be concrete for the type that `vect` promotes them to to be the one that it has when the program runs.
-function expand_splat_literals!(ir::CC.IRCode)
-    changed = false
-    for pc in 1:length(ir.stmts)
-        st = ir.stmts[pc][:stmt]
-        st isa Expr && st.head === :call && length(st.args) >= 4 || continue
-        CC.singleton_type(CC.argextype(st.args[1], ir)) === Core._apply_iterate || continue
-        CC.singleton_type(CC.argextype(st.args[2], ir)) === Base.iterate || continue
-        g = CC.singleton_type(CC.argextype(st.args[3], ir))
-        (g === Base.vect || g === Base.getindex) || continue
-        items, spread, types, lists, itypes = Any[], Bool[], Any[], Any[], Any[]
-        for part in st.args[4:end]
-            list = made_by(ir, part, Core.svec)
-            list === nothing && (list = made_by(ir, part, Core.tuple))
-            if list !== nothing
-                push!(lists, part)
-                for a in list.args[2:end]
-                    T = CC.widenconst(CC.argextype(a, ir))
-                    push!(items, a); push!(spread, false); push!(types, T); push!(itypes, T)
-                end
-            else
-                t = CC.widenconst(CC.argextype(part, ir))
-                (isconcretetype(t) && !(t <: Core.SimpleVector)) || @goto next
-                if t <: Tuple
-                    # (a tuple that is a value: its elements, read here)
-                    for j in 1:fieldcount(t)
-                        e = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.getfield, part, j), fieldtype(t, j)))
-                        push!(items, e); push!(spread, false); push!(types, fieldtype(t, j)); push!(itypes, fieldtype(t, j))
-                    end
-                    changed = true
-                else
-                    push!(items, part); push!(spread, true); push!(types, eltype(t)); push!(itypes, t)
-                end
-            end
-        end
-        any(spread) || continue # (only lists: inference has the call with the elements)
-        if g === Base.getindex
-            # (`T[...]`: the type is the first element, a constant)
-            !isempty(items) && !spread[1] || continue
-            T = constant_value(ir, items[1])
-            T isa Type || continue
-            popfirst!(items); popfirst!(spread); popfirst!(types); popfirst!(itypes)
-            result = Vector{T}
-        else
-            # (`[...]`: the element type is that of the elements that there are, see `splat_types`)
-            choices = splat_types(types, spread)
-            choices === nothing && continue
-            T = :promote
-            result = Union{(Vector{C} for C in choices)...}
-        end
-        # (what follows was inferred with the type that the call had: the vector is one of those)
-        result <: CC.widenconst(ir.stmts[pc][:type]) || continue
-        IT = Tuple{itypes...}
-        isconcretetype(IT) || continue
-        # (from the match, which has the values of `T` and `spread`: an instance without them is called through `jl_invoke`)
-        mi = CC.specialize_method(Base._which(Tuple{typeof(splat_vector),Val{T},Val{Tuple(spread)},IT}))
-        tup = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.tuple, items...), IT))
-        ir.stmts[pc][:stmt] = Expr(:invoke, mi, splat_vector, Val(T), Val(Tuple(spread)), tup)
-        ir.stmts[pc][:type] = result
-        changed = true
-        # (the lists that only this used: `Core.svec` is a call of the runtime)
-        for l in lists
-            uses_of(ir, l) == 0 && (ir.stmts[l.id][:stmt] = nothing)
-        end
-        @label next
-    end
-    return changed ? CC.compact!(ir) : ir
-end
-
-# (during inference, the parts of a splat are tuples: the types of their elements)
-function splat_tuple_types(@nospecialize(t))
-    t isa Core.Const && t.val isa Tuple && return Any[typeof(x) for x in t.val]
-    t isa CC.PartialStruct && CC.widenconst(t) <: Tuple && return Any[CC.widenconst(f) for f in t.fields]
-    T = CC.widenconst(t)
-    (T isa DataType && T <: Tuple && !any(Base.isvarargtype, T.parameters)) || return nothing
-    return Any[T.parameters...]
-end
-
-# The type of `[a, v...]`, which Julia infers as a `Vector` of no element type known (`vect(X...)` promotes the types of the elements, and which there are depends on which collections are empty): the union of the vectors of
-# each combination (`splat_types`), the same as what the call is replaced with (`expand_splat_literals!`). The call has no information about the method, so that it is not inlined (what Julia has for it is the method for
-# elements of any types, which gives a `Vector`).
-# (only where what Julia infers is not a concrete type: of a collection of a length that is known, a static vector, it is the vector of the elements, and right)
+# A vector literal with a splat of something that is not a tuple (see `splat_vector`): the call of `splat_vector` with the parts of the splat, where Julia's call is one of the runtime. It is Julia's where Julia knows the
+# number of the elements of each part (tuples, a static vector, whose elements it iterates: it makes the call with them), which it says in what it has of the call (an `ApplyCallInfo` with the iteration of each part
+# that is not a tuple).
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core._apply_iterate), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
-    call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
-                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
-    precise = splat_literal_type(arginfo.argtypes)
-    precise === nothing && return call
-    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        isconcretetype(CC.widenconst(result.rt)) && return result
-        return CC.CallMeta(precise, Any, CC.Effects(), CC.NoCallInfo())
+    plan = splat_plan(arginfo.argtypes)
+    plan === nothing && return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                                               vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+    parts = Any[CC.widenconst(t) for t in arginfo.argtypes[4:end]]
+    return redirect_after(interp, f, arginfo, si, vtypes, sv, max_methods) do result
+        julia_iterates_all(result.info, parts) ? nothing : plan
     end
 end
 
-function splat_literal_type(argtypes::Vector{Any})
+fixed_tuple(@nospecialize(P)) = P isa DataType && P <: Tuple && !any(Base.isvarargtype, P.parameters)
+
+function julia_iterates_all(@nospecialize(info), parts::Vector{Any})
+    info isa CC.ApplyCallInfo && length(info.arginfo) == length(parts) || return false
+    for k in eachindex(parts)
+        fixed_tuple(parts[k]) || info.arginfo[k] !== nothing || return false
+    end
+    return true
+end
+
+# (the arguments of `redirect` for the splat: `splat_vector(Val(T), Val(skip), parts...)`, or `nothing` for a call that is not a vector literal, has only tuples, or whose type depends on more than the types)
+function splat_plan(argtypes::Vector{Any})
     length(argtypes) >= 4 || return nothing
-    CC.singleton_type(argtypes[2]) === Base.iterate && CC.singleton_type(argtypes[3]) === Base.vect || return nothing
-    types, spread = Any[], Bool[]
-    for t in argtypes[4:end]
-        e = splat_tuple_types(t)
-        if e !== nothing
-            append!(types, e); append!(spread, fill(false, length(e)))
-        else
-            T = CC.widenconst(t)
-            (isconcretetype(T) && !(T <: Core.SimpleVector)) || return nothing
-            push!(types, eltype(T)); push!(spread, true)
-        end
+    CC.singleton_type(argtypes[2]) === Base.iterate || return nothing
+    g = CC.singleton_type(argtypes[3])
+    (g === Base.vect || g === Base.getindex) || return nothing
+    parts = Any[CC.widenconst(t) for t in argtypes[4:end]]
+    length(parts) <= SPLAT_MAX_PARTS || return nothing
+    all(fixed_tuple, parts) && return nothing
+    all(isconcretetype, parts) || return nothing
+    if g === Base.getindex
+        # (`T[...]`: the type is the first element of the first part, a constant)
+        first_part = argtypes[4]
+        fixed_tuple(parts[1]) && fieldcount(parts[1]) >= 1 || return nothing
+        T = first_part isa Core.Const ? first_part.val[1] :
+            first_part isa CC.PartialStruct && first_part.fields[1] isa Core.Const ? first_part.fields[1].val : nothing
+        T isa Type || return nothing
+        return (splat_vector, Any[Val(T), Val(true)], 4)
     end
-    any(spread) || return nothing
-    choices = splat_types(types, spread)
-    choices === nothing && return nothing
-    return Union{(Vector{C} for C in choices)...}
+    _, spread, types = splat_items(parts, false)
+    splat_types(types, spread) === nothing && return nothing
+    return (splat_vector, Any[Val(:promote), Val(false)], 4)
 end
 
-# `show(io, T)` of a type that is a value (`DataType`), not a constant, is the method for any `T` (see `TYPE_SHOW_METHODS`), which finds `T` when the program runs: it is replaced by an `invoke` of `show_type_value`, which prints
-# the text of the type from the table that the linker makes.
-# (and a call of `show` that is left as a call, with such a type, on one of the streams of the program, for which that is the method: Julia does not choose one for a `DataType`, which may be any `Type{T}`)
-function expand_type_show!(ir::CC.IRCode)
-    for pc in 1:length(ir.stmts)
-        st = ir.stmts[pc][:stmt]
-        st isa Expr || continue
-        if st.head === :invoke && length(st.args) == 4
-            mi = st.args[1]
-            mi isa Core.CodeInstance && (mi = mi.def)
-            mi isa Core.MethodInstance && mi.def isa Method && mi.def in TYPE_SHOW_METHODS || continue
-            io, x = st.args[3], st.args[4]
-        elseif st.head === :call && length(st.args) == 3 && CC.singleton_type(CC.argextype(st.args[1], ir)) === Base.show
-            io, x = st.args[2], st.args[3]
-            IOT = CC.widenconst(CC.argextype(io, ir))
-            (IOT <: ShowStream || IOT <: Base.GenericIOBuffer) || continue
-        else
-            continue
-        end
-        t = CC.argextype(x, ir)
-        (!(t isa Core.Const) && CC.widenconst(t) === DataType) || continue
-        IOT = CC.widenconst(CC.argextype(io, ir))
-        isconcretetype(IOT) || continue
-        target = CC.specialize_method(Base._which(Tuple{typeof(show_type_value),IOT,DataType}))
-        ir.stmts[pc][:stmt] = Expr(:invoke, target, show_type_value, io, x)
+# `show(io, T)` of a type that is a value (`DataType`), not a constant, on one of the streams of the program: the call of `show_type_value`, which prints the text of the type from the table that the linker makes. (The
+# method of `show` for any `T` finds `T` when the program runs, and Julia does not choose a method for a `DataType`, which may be any `Type{T}`.)
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Base.show), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if length(argtypes) == 3 && !(argtypes[3] isa Core.Const) && CC.widenconst(argtypes[3]) === DataType
+        IOT = CC.widenconst(argtypes[2])
+        (IOT <: ShowStream || IOT <: Base.GenericIOBuffer) && return redirect(interp, show_type_value, Any[], 2, arginfo, si, vtypes, sv)
     end
-    return ir
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
 end
 
 # `x.name = v` that Julia did not inline (`setproperty!(x, :name, v)`: a combination of a receiver and a value that the program does not make, but that a union of both has, where the conversion of `v` to the type of the

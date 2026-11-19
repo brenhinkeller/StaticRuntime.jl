@@ -195,11 +195,11 @@ function field_chain(T::DataType, fallback)
 end
 
 # `getfield(x, name)` of any struct (or `NamedTuple`) with a name that is not known when compiling is that chain over the fields of its type. Julia compiles it as `jl_f_getfield`; the
-# compiler replaces that call with a call of this (see `expand_dynamic_getfield!`), which is also what `nt[name]` and `nt.name` are.
+# compiler replaces that call with a call of this (see `dynamic_field_plan`), which is also what `nt[name]` and `nt.name` are.
 @generated struct_field(x, name::Symbol) = field_chain(x, :(throw(FieldError($x, name))))
 
 # `isdefined(x, name)` with a name that is not known when compiling (`get(f, nt, name)` and `haskey(nt, name)` of a `NamedTuple` are that) is a call of the runtime too: the same comparisons, each with the `isdefined` of its field
-# (which is folded for a field that is always defined), and `false` for a name that is not a field. (`expand_dynamic_getfield!`)
+# (which is folded for a field that is always defined), and `false` for a name that is not a field. (See `abstract_call_known` for `isdefined` in dispatch.jl.)
 function isdefined_chain(T::DataType)
     chain = false
     for k in fieldcount(T):-1:1
@@ -209,11 +209,11 @@ function isdefined_chain(T::DataType)
 end
 @generated struct_isdefined(x, name::Symbol) = isdefined_chain(x)
 
-# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`) is `Core._apply_iterate(iterate, Base.vect, Core.svec(a), v)`, or of `getindex` with the type first, a call of the runtime: the number
-# of arguments is known when the program runs. The vector is made here: `items` are the elements, and the collections that are splatted, which are appended (`spread`), with the conversion of each element to the element type
-# that both do. For `T[...]` that is `T`. For `[...]` it is what `vect` promotes the types of the elements that there are to (`Any` for none): it depends on which of the collections are empty, so there is one for each
-# combination of them (`splat_types`), and the vector is made with the one that the program has. (See `expand_splat_literals!`; `items` is one tuple and the type a `Val`, since a method with a varargs argument, or one of
-# `::Type{T}` that the compiler makes an instance of itself, is called by the runtime's convention, `jl_invoke`.)
+# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`) is `Core._apply_iterate(iterate, Base.vect, (a,), v)`, or of `getindex` with the type first, a call of the runtime: the number
+# of arguments is known when the program runs. It is made here with the parts of the splat (`parts`: the tuples, whose elements are pushed, and the collections, which are appended), with the conversion of each element
+# to the element type that both do. For `T[...]` that is `T` (`skip`: the type is the first element of the first part). For `[...]`, `T === :promote`, it is what `vect` promotes the types of the elements that there are
+# to (`Any` for none): it depends on which of the collections are empty, so there is one for each combination of them (`splat_types`), and the vector is made with the one that the program has. (The call is replaced
+# with this in inference: see `abstract_call_known` for `Core._apply_iterate` in dispatch.jl.)
 const SPLAT_MAX_COLLECTIONS = 4
 
 # (the element type of `[...]` for each combination of the collections that are empty: the `m`th has the collections whose bit is set in `m - 1`, in order. `nothing` if an element type is not concrete, for which the type of
@@ -230,29 +230,52 @@ function splat_types(types, spread)
     return result
 end
 
-# (the statements that make the vector of the element type `T`)
-function splat_fill(T, spread)
+# (the elements and collections of the parts of a splat: their expressions, whether each is a collection, and the type of each element; a tuple of an unknown length is a collection)
+function splat_items(parts, skip::Bool)
+    items, spread, types = Any[], Bool[], Any[]
+    for (k, P) in enumerate(parts)
+        if P isa DataType && P <: Tuple && !any(Base.isvarargtype, P.parameters)
+            for j in (k == 1 && skip ? 2 : 1):fieldcount(P)
+                push!(items, :(getfield(parts[$k], $j))); push!(spread, false); push!(types, fieldtype(P, j))
+            end
+        else
+            push!(items, :(parts[$k])); push!(spread, true); push!(types, eltype(P))
+        end
+    end
+    return items, spread, types
+end
+
+function splat_fill(T, items, spread)
     body = Any[:(v = Vector{$T}())]
-    for i in 1:length(spread)
-        push!(body, spread[i] ? :(append!(v, items[$i])) : :(push!(v, items[$i])))
+    for i in eachindex(items)
+        push!(body, spread[i] ? :(append!(v, $(items[i]))) : :(push!(v, $(items[i]))))
     end
     push!(body, :v)
     return Expr(:block, body...)
 end
 
-@generated function splat_vector(::Val{T}, ::Val{spread}, items::Tuple) where {T,spread}
-    T isa Type && return splat_fill(T, spread)
-    # (`[...]`, `T === :promote`: the types of the elements, the element type of each collection)
-    types = Any[spread[i] ? eltype(fieldtype(items, i)) : fieldtype(items, i) for i in 1:length(spread)]
+# (a method for each number of parts, up to `SPLAT_MAX_PARTS`, and not one with a varargs argument: Julia does not specialize those for arguments of different types, and calls them by the runtime's convention)
+const SPLAT_MAX_PARTS = 8
+function splat_vector_body(T, skip, parts)
+    items, spread, types = splat_items(parts, skip)
+    T isa Type && return splat_fill(T, items, spread)
     choices = splat_types(types, spread)
-    allequal(choices) && return splat_fill(choices[1], spread)
+    choices === nothing && return :(error("a vector literal with a splat of elements whose types are not known"))
+    allequal(choices) && return splat_fill(choices[1], items, spread)
     collections = findall(spread)
-    m = foldl((acc, (j, i)) -> :($acc + ($(1 << (j - 1)) * !isempty(items[$i]))), enumerate(collections); init = 0)
-    chain = splat_fill(choices[end], spread)
+    m = foldl((acc, (j, i)) -> :($acc + ($(1 << (j - 1)) * !isempty($(items[i])))), enumerate(collections); init = 0)
+    chain = splat_fill(choices[end], items, spread)
     for k in (length(choices) - 1):-1:1
-        chain = :(m == $(k - 1) ? $(splat_fill(choices[k], spread)) : $chain)
+        chain = :(m == $(k - 1) ? $(splat_fill(choices[k], items, spread)) : $chain)
     end
     return :(m = $m; $chain)
+end
+for n in 1:SPLAT_MAX_PARTS
+    args = [Symbol(:p, k) for k in 1:n]
+    @eval @generated function splat_vector(::Val{T}, ::Val{skip}, $(args...)) where {T,skip}
+        # (`parts`, the tuple of the arguments, which the code that is made reads; the types of the arguments are what it is made for)
+        return Expr(:block, Expr(:(=), :parts, Expr(:tuple, $(QuoteNode.(args)...))), splat_vector_body(T, skip, ($(args...),)))
+    end
 end
 
 # `getfield(x, i)` with an `i::Int` that is not known when compiling (`getfield(nt, i)` in a loop over the fields of a `NamedTuple`, as `Makie`'s `node_pairs` does) is the same: a comparison with each index.

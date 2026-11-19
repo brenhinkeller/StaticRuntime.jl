@@ -216,10 +216,30 @@ struct UnsupportedCodeError <: Exception
     pointers::Vector{Tuple{String,String}}       # (function, instruction) that use an address
     globals::Vector{String}                      # the global variables that are not `const` that the code uses (a likely cause of types that are not known)
     sites::Vector{Pair{String,Vector{DynamicSite}}} # runtime function => the places in the Julia code that call it (source lines and the way there from the entry point)
+    objects::Vector{String}                      # what the objects of those addresses are, and why each is not in the binary (`describe_unresolved`)
 end
 
-UnsupportedCodeError(dynamic, pointers) = UnsupportedCodeError(dynamic, pointers, String[], Pair{String,Vector{DynamicSite}}[])
-UnsupportedCodeError(dynamic, pointers, globals) = UnsupportedCodeError(dynamic, pointers, globals, Pair{String,Vector{DynamicSite}}[])
+UnsupportedCodeError(dynamic, pointers) = UnsupportedCodeError(dynamic, pointers, String[], Pair{String,Vector{DynamicSite}}[], String[])
+UnsupportedCodeError(dynamic, pointers, globals) = UnsupportedCodeError(dynamic, pointers, globals, Pair{String,Vector{DynamicSite}}[], String[])
+UnsupportedCodeError(dynamic, pointers, globals, sites) = UnsupportedCodeError(dynamic, pointers, globals, sites, String[])
+
+# (for the message: the object that each address is in, its type, and why the embedder could not copy it, which it said when it tried: `failures`, by the address of the object)
+function describe_unresolved(failures::Dict{UInt,String}, addresses)
+    found = String[]
+    bases = Set{UInt}() # (each object once, for all the addresses in it)
+    for addr in unique(addresses)
+        for (base, _) in find_objects(addr)
+            T = object_type(base)
+            T === nothing && continue
+            base in bases && break
+            push!(bases, base)
+            reason = get(failures, base, "")
+            push!(found, string("an object of the type ", first(string(T), 200), isempty(reason) ? "" : string(": ", first(replace(reason, '\n' => ' '), 400))))
+            break
+        end
+    end
+    return found
+end
 
 ## Code that is only on the way to an error
 #
@@ -344,7 +364,17 @@ function stub_error_paths!(mod::LLVM.Module; allow = ())
         fn = LLVM.parent(bb)
         fn in error_fns || bb in get!(() -> error_blocks(fn), cache, fn) || continue
         where_ = readable_name(LLVM.name(fn))
-        msg = string("This part of the program needs the Julia runtime, which it does not have: ", why, " (in ", where_, "). It is on the way to an error, and the error is not shown.")
+        # (where in the Julia code: the debug information is there until the program is accepted, see `strip` in `link_runtime!`. An instruction in a function that has none, as the thunk of a `ccall` that Julia makes,
+        # is where that function is called)
+        frames = debug_frames(inst)
+        if isempty(frames)
+            for call in something(call_sites(fn), LLVM.Instruction[])
+                frames = debug_frames(call)
+                isempty(frames) || break
+            end
+        end
+        at = isempty(frames) ? "" : string(", at ", join(first(frames, 3), ", inlined into "))
+        msg = string("This part of the program needs the Julia runtime, which it does not have: ", why, " (in ", where_, at, "). It is on the way to an error, and the error is not shown.")
         @dispose builder = LLVM.IRBuilder() begin
             LLVM.position!(builder, LLVM.before(inst))
             abort_message!(builder, mod, msg)
@@ -386,6 +416,13 @@ function Base.showerror(io::IO, e::UnsupportedCodeError)
             print(io, "\n  in ", fn, ": ", strip(inst))
         end
         length(e.pointers) > 5 && print(io, "\n  ... and ", length(e.pointers) - 5, " more")
+        if !isempty(e.objects)
+            print(io, "\n\nThe objects (`STATIC_RUNTIME_TRACE=embed` says the whole way from what can not be copied to them):")
+            for text in first(e.objects, 5)
+                print(io, "\n  ", text)
+            end
+            length(e.objects) > 5 && print(io, "\n  ... and ", length(e.objects) - 5, " more")
+        end
     end
     # hints for what is likely to be the cause
     if any(((_, inst),) -> occursin(r"%(stdout|stderr|stdin)\b", inst), e.pointers) ||
@@ -487,7 +524,7 @@ const POINTER_ARGUMENTS_NOT_USED = Set([
 # The places where code reads, writes or calls through a pointer to a Julia object that is not
 # in the binary (an address from this process): these are certain to crash. Comparing such a
 # pointer is common (type tags) and fine; passing it as an argument is too only to a few functions.
-function unresolved_pointer_uses(mod::LLVM.Module; instructions = nothing)
+function unresolved_pointer_uses(mod::LLVM.Module; instructions = nothing, addresses = nothing)
     found = Tuple{String,String}[]
     seen = Set{Tuple{String,UInt}}()
     for fn in LLVM.functions(mod), bb in LLVM.blocks(fn), inst in LLVM.instructions(bb)
@@ -529,6 +566,7 @@ function unresolved_pointer_uses(mod::LLVM.Module; instructions = nothing)
             push!(seen, key)
             push!(found, (function_of(inst), string(inst)))
             instructions === nothing || push!(instructions, inst)
+            addresses === nothing || push!(addresses, UInt(addr))
         end
     end
     return found

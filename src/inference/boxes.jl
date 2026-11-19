@@ -293,8 +293,51 @@ result_refined(result::CC.CallMeta, @nospecialize(T)) = CC.CallMeta(refined_read
 # the type of a read that is checked (see `type_slot_get`) is the union of the types that the slot holds: what inference makes of the checks is a union of at most three of them, as a merge of constants is
 typed_read(call, @nospecialize(T), interp, sv) = after_call(result_of_type, call, interp, sv, T)
 
+## Fields that are made again
+#
+# A field of a pointer of an object that the program has as a constant (a face of FreeType in a font, a surface of Cairo) is an address of the process that compiles it, and null in the program (the embedder writes it so). A package
+# says how such a field is made again with a method of `remade_by` (in its extension): a read of the field is then `remade_field`, which makes it (and stores it) when it is null, the first time that the program reads it.
+
+"""
+    StaticRuntime.remade_by(::Type{T}, ::Val{name})
+
+The function that makes the field `name` of an object of the type `T` again when the program reads it and it is null, given the object (a field of a pointer of a constant, which is null in the program), or `nothing`
+(the default). An extension of a package says it for its types with a method: `StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) = program_face`. Only for fields of a `Ptr` type.
+"""
+remade_by(@nospecialize(T), @nospecialize(name)) = nothing
+
+function remade_field(make, ::Val{name}, x) where {name}
+    v = getfield(x, name)
+    v == C_NULL || return v
+    v = make(x)
+    setfield!(x, name, v)
+    return v
+end
+
+# (the function that a read of `getfield(x, name)` is made with, for its types, or `nothing`; not in `remade_field` itself, whose read is the field's)
+function field_remaker(c::Compilation, @nospecialize(sv), argtypes::Vector{Any})
+    length(argtypes) == 3 || return nothing
+    name = argtypes[3]
+    (name isa Core.Const && name.val isa Symbol) || return nothing
+    T = CC.widenconst(argtypes[2])
+    (T isa DataType && isconcretetype(T) && ismutabletype(T) && hasfield(T, name.val) && fieldtype(T, name.val) <: Ptr) || return nothing
+    sv isa CC.InferenceState && (m = sv.linfo.def; m isa Method && m.name === :remade_field && m.module === @__MODULE__) && return nothing
+    key = (T, name.val)
+    haskey(c.objects.remakers, key) && return c.objects.remakers[key]
+    make = try Base.invokelatest(remade_by, T, Val(name.val)) catch; nothing end
+    c.objects.remakers[key] = make
+    return make
+end
+
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.getfield), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    # (a field of a struct by a name or an index that is not a constant: a comparison with each, see `dynamic_field_plan`. The elements of a tuple that is a constant, and has types in it, are each a type that is known,
+    # see `types_of_constant_tuple`, where the callee gives the `DataType` that they are all of)
+    dynamic = dynamic_field_plan(arginfo.argtypes)
+    dynamic === nothing || return redirect(interp, dynamic, Any[], 2, arginfo, si, vtypes, sv; to = 3)
+    # (a field that is made again where it is null: see above)
+    make = field_remaker(compilation(), sv, arginfo.argtypes)
+    make === nothing || return redirect(interp, remade_field, Any[make, Val(arginfo.argtypes[3].val)], 2, arginfo, si, vtypes, sv; to = 2)
     call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
     # (an element of a tuple that is a constant, that has types in it, by an index that is not known: `Type[Int, Float64][i]`: the types that it has, each a type that is known, and not the `DataType` that the field of the tuple is)

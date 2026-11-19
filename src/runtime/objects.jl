@@ -266,12 +266,13 @@ end
 # addresses of memory are not small numbers, and not above the 48 bits of the address space
 is_process_address(p::UInt) = UInt(0x10000) <= p < (UInt(1) << 48)
 
-# (a `Regex`, a `LazyLibrary` and a font of FreeTypeAbstraction make theirs again when the program runs, so that those are not worth a warning.) The warning is said when the program is accepted
+# (a `Regex`, a `LazyLibrary` and the fields that a package says are made again (`remade_by`) are made again when the program runs, so that those are not worth a warning.) The warning is said when the program is accepted
 # (`say_dangling_pointers`), and not when it is found: a program that is refused is not run, so what it would have had null is of no concern
 function warn_dangling_pointer(e, T, name::Symbol)
     (T <: Regex && name === :regex) && return
     (T <: Libdl.LazyLibrary && name === :handle) && return
-    (nameof(T) === :FTFont && name === :ft_ptr) && return # (a font of FreeTypeAbstraction: the program makes its face from the bytes in it, see the extension for Makie)
+    # (a field that the program makes again where it is null, which its package says: see "Fields that are made again" in boxes.jl)
+    (try Base.invokelatest(getfield(parentmodule(@__MODULE__), :remade_by), T, Val(name)) catch; nothing end) === nothing || return
     push!(e.dangling, (T, name))
     return
 end
