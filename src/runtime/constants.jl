@@ -415,8 +415,13 @@ function embed_type_numbers!(e::ObjectEmbedder)
     return changed
 end
 
-function embed_constants!(e::ObjectEmbedder)
+# The objects that the code is known to refer to (the objects with a key, that code was made for: see "Code for each object" in src/inference/objects.jl), as (address, size): an address in one of them is in it, before
+# any object that a look at the memory before the address finds (the code of such an object reads its fields at their addresses: what a look finds there may be a number in the data that looks like the tag of a type)
+known_object_ranges(objects) = Tuple{UInt,Int}[(UInt(pointer_from_objref(x)), max(object_extent(typeof(x), UInt(pointer_from_objref(x))), 8)) for x in objects if ismutable(x) && typeof(x) isa DataType]
+
+function embed_constants!(e::ObjectEmbedder; known_objects::AbstractVector = Any[])
     mod = e.mod
+    known = known_object_ranges(known_objects)
     resolve_type_placeholders!(e)
     # as comparisons, so that the types in them can be replaced (see `type_number_constants`)
     foreach(lower_switch!, type_switches(mod))
@@ -425,7 +430,11 @@ function embed_constants!(e::ObjectEmbedder)
     consts = inttoptr_constants(mod)
     for (addr, ops) in consts
         replacement = nothing
-        for (base, delta) in find_objects(addr)
+        candidates = find_objects(addr)
+        for (base, n) in known
+            base <= addr < base + n && pushfirst!(candidates, (base, Int(addr - base)))
+        end
+        for (base, delta) in candidates
             # embedding may fail halfway, leaving globals behind that nothing refers to
             replacement = try
                 embed_ref!(e, base, delta)

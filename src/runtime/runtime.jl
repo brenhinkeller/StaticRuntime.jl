@@ -84,7 +84,7 @@ function link_runtime!(mod::LLVM.Module; kwargs...)
     end
 end
 
-function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()), strip::Bool = false)
+function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_errors::Bool = true, allow = (), gc = Sys.isapple() || Sys.islinux() ? :auto : false, libraries::Symbol = :system, bounded::Bool = false, optimize::Bool = false, cfunctions::AbstractVector{CFunctionRoot} = CFunctionRoot[], libraries_used::Base.RefValue{LibraryPlan} = Ref(LibraryPlan()), strip::Bool = false, known_objects::AbstractVector = Any[])
     link_cfunctions!(mod, cfunctions) && run!(GlobalDCEPass(), mod)
     blas = resolve_blas_lookups!(mod) # (before what they are given is embedded)
     library_plan = resolve_library_lookups!(mod; libraries)
@@ -100,7 +100,7 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     drop_invariant_root_loads!(mod) # (the slots of the frames are written after they are zeroed: see there)
     gc === false || classify_allocations!(mod)
     queries = subtype_queries(mod)
-    embed_constants!(e)
+    embed_constants!(e; known_objects)
     clamp_embedded_alignment!(mod) # (the alignment of the accesses was found from the addresses of the objects in this process: see there)
     queries === nothing ? define_subtype_table!(e) : define_subtype!(e, queries)
     finalizers = uses_finalizers(mod) # (before they are linked: see `link_finalizers!`)

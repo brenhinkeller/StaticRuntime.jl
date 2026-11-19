@@ -82,6 +82,13 @@ const BoxKey = Tuple{Any,Union{Int,Symbol}} # (the specialization of a method, t
 mutable struct ClosureState
     functions::Vector{Type}                                                # the types of functions that a call of an unknown function is made over
     callbacks::Vector{Tuple{Type,Type}}                                    # (the type of the value, the type of the function) of `note_callback`
+    listener_objects::Dict{Any,Tuple}                                      # the type of the value => the listeners that the code compares with (see "Listeners" in closures.jl): those found in a pass before
+    listener_types::Set{Any}                                               # the types of all the listeners that were found (of any type of value)
+    listeners_complete::Bool                                               # whether all were found (the scan of the constants was not cut short)
+    all_listeners::Tuple                                                   # all those that are compared with, of any type of value (for an observable whose type of value is not known), or `()` if they are too many
+    # (for the whole compilation: what is found is added to, as code that is taken from the cache is not looked at again)
+    found_listeners::Dict{Any,Vector{Any}}                                 # the listeners of the constants of the program, by the type of the value that they are called with
+    found_listener_ids::Set{Tuple{Any,UInt}}
     cfunction_roots::Vector{Runtime.CFunctionRoot}                         # the `@cfunction`s of the program, with the functions that they call (`cfunction_functions`, in the same order)
     cfunction_functions::Vector{Any}
     # found in this pass
@@ -98,7 +105,7 @@ mutable struct ClosureState
     sink::Any                                                              # where what is found of the code that is being optimized is also kept (`InferenceFindings`), while it is
     box_function_seen::Bool                                                # a function is in a `Core.Box` that a constant has (the variable of a closure that is made by code that is not compiled): its type is not known by any read of the box
 end
-ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
+ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Dict{Any,Tuple}(), Set{Any}(), true, (), Dict{Any,Vector{Any}}(), Set{Tuple{Any,UInt}}(), Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
                               Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), Tuple{Float64,Any,Int}[], nothing, false)
 
 "What the passes know of the boxes of the closures (boxes.jl): the type of what each holds, as the last pass found it."
@@ -155,39 +162,42 @@ end
 Base.:(==)(a::ObjRef, b::ObjRef) = a.x === b.x
 Base.hash(a::ObjRef, h::UInt) = hash(objectid(a.x), h)
 
-const MANY_INSTANCES = ObjRef(:many) # (a type that the constants have more than one object of)
-
 "What a compilation knows of the objects that are its constants (see objects.jl): found in a pass, and used in the next."
 mutable struct ObjectState
     # found in this pass
-    instances::Dict{DataType,ObjRef}         # the object of each type that the constants have (or `MANY_INSTANCES`)
-    made::Set{Any}                           # the types that the code makes (`new`)
-    made_any::Bool                           # the code makes objects of types that are not known (a foreign call that does)
     written::Set{Tuple{Any,Symbol}}          # the fields that the code writes: (type, name), (type, :*) for any field of it, (nothing, name) for the field of any type
     written_any::Bool                        # a field of any object (of a type that is not known, by a name that is not known)
-    # used in this pass (what the pass before found)
-    use_instances::Dict{DataType,ObjRef}
-    use_made::Set{Any}
-    use_written::Set{Tuple{Any,Symbol}}
+    use_written::Set{Tuple{Any,Symbol}}      # (what the pass before found, used in this one)
     ready::Bool                              # whether there was a pass before (that found what is used): before, nothing is known of the objects
     wanted::Bool                             # what was read in this pass could have been known with the facts of a pass before
+    consulted::Bool                          # (for the whole compilation) inference has read an object that is known, or one that could be: what it infers depends on the facts of the objects, which are then in its key
     folds::Int                               # (the reads that were known in this pass, for `STATIC_RUNTIME_TRACE`)
     # what is stored in the fields of the objects, found in this pass (see "Stores in objects" in objects.jl)
     stores::Dict{Tuple{ObjRef,Symbol},Any}   # (object, field) => the union of the types stored in it
     unattributed::Dict{Tuple{Any,Symbol},Any} # (type, field) => what was stored in that field of an object of the type that is not known
     unknown::Set{Any}                        # the (object, field) and (type, field) that something of a type that is not known was stored in
-    recvstores::Dict{Tuple{Any,Int},Vector{Tuple{Symbol,Any}}} # (method instance, n) => what its code stores in the fields of its argument `n`: (field, the argument whose value it is, or a type)
+    recvstores::Dict{Tuple{Any,Int},Vector{Tuple{Any,Symbol,Any}}} # (method instance, n) => what its code stores in the fields of its argument `n`, or of what its fields lead to: (path, field, the argument whose value it is, or a type)
     callsites::Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}} # method instance => its calls: (the caller, what each argument is: an object, an argument (method instance, n) of the caller, or `nothing`; the type of each)
+    invoked::Set{Any}                        # the method instances that a call that is left in the code calls (whatever it gives them: `callsites` has only the calls that give an object)
     use_stores::Dict{Tuple{ObjRef,Symbol},Any}
     use_unattributed::Dict{Tuple{Any,Symbol},Any}
     use_unknown::Set{Any}
-    scanned::Base.IdSet{Any}                 # (the constants whose objects were noted in this pass)
     holds::IdDict{Any,Bool}                  # (`holds_object_slots` of each type, once asked: for the whole compilation)
+    # (while the facts of the objects are recorded, from the code of a method after it is inlined, see `record_object_facts!`, and replayed)
+    recording::Bool
+    pending_facts::Any                       # the facts of the method that is optimized, which those of its objects are added to
+    pending_mi::Any
+    replaying::Any                           # the method whose facts are replayed
+    direct::Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}} # method instance => its stores in objects, which are of the program if its code is (it is called, and not only inlined)
+    # (for the whole compilation, not each pass: the objects that have a key, `ObjectKey{N}`, which code that is made for each of them is specialized on, see "Code for each object" in objects.jl)
+    keyed_objects::Vector{Any}
+    key_index::IdDict{Any,Int}
+    keyed_functions::Set{Any}                # the functions that calls were made `g(key, args...)` of
 end
-ObjectState() = ObjectState(Dict{DataType,ObjRef}(), Set{Any}(), false, Set{Tuple{Any,Symbol}}(), false,
-                            Dict{DataType,ObjRef}(), Set{Any}(), Set{Tuple{Any,Symbol}}(), false, false, 0,
-                            Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Symbol,Any}}}(),
-                            Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Base.IdSet{Any}(), IdDict{Any,Bool}())
+ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbol}}(), false, false, false, 0,
+                            Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Any,Symbol,Any}}}(),
+                            Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Set{Any}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), IdDict{Any,Bool}(),
+                            false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Set{Any}())
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
@@ -316,6 +326,9 @@ function closures_hash(cl::ClosureState)
     h = foldl((h, T) -> hash(type_hash(T), h), cl.functions; init = UInt(0))
     h = hash(length(cl.functions), h)
     h = foldl((h, (V, F)) -> hash(type_hash(F), hash(type_hash(V), h)), cl.callbacks; init = h)
+    # (the listeners that the code compares with, by their identity: of this compilation)
+    for (V, fs) in cl.listener_objects; h += hash(map(objectid, fs), type_hash(V)); end
+    h = hash(map(objectid, cl.all_listeners), h)
     return hash(length(cl.callbacks), h)
 end
 
@@ -331,7 +344,20 @@ function inference_key(c::Compilation)
     h = hash(closures_hash(c.closures), h)
     h = hash(boxes_hash(c.boxes), h)
     h = hash(slots_hash(c.slots), h)
+    h = hash(objects_hash(c.objects), h)
     return h % Int
+end
+
+# (what the pass is made with of the objects, see objects.jl: what is inferred with other facts is another inference. The objects by their identity: of this compilation. Only once inference has read an object: the code
+# of a program that has none is the same whatever the facts are, and what a pass before inferred is used again, as it was)
+function objects_hash(o::ObjectState)
+    (o.ready && o.consulted) || return UInt(0)
+    h = UInt(1)
+    for (T, name) in o.use_written; h += hash(name, T === nothing ? UInt(2) : type_hash(T)); end
+    for ((r, name), T) in o.use_stores; h += hash(type_hash(T), hash(name, objectid(r.x))); end
+    for ((S, name), T) in o.use_unattributed; h += hash(type_hash(T), hash(name, type_hash(S))); end
+    for k in o.use_unknown; h += hash(k[2], k[1] isa ObjRef ? objectid(k[1].x) : type_hash(k[1])); end
+    return hash(length(o.use_written) + length(o.use_stores) + length(o.use_unattributed) + length(o.use_unknown), h)
 end
 
 """

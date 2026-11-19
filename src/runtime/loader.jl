@@ -59,6 +59,12 @@ end
         write_text(UInt(pointer(sep)))
         write_text(path)
         write_text(UInt(pointer(nl)))
+        # (what the system's loader says of it: which library that it needs it did not find, a symbol that is missing)
+        reason = UInt(@symbolcall dlerror()::Ptr{UInt8})
+        if reason != 0
+            write_text(reason)
+            write_text(UInt(pointer(nl)))
+        end
     end
     @symbolcall exit(Int32(1)::Int32)::Int32
     return

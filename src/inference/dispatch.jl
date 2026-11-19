@@ -577,7 +577,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.tup
             # `Tuple{Any,C}` for more than a few, where Julia has the union)
             rt = CC.tuple_tfunc(CC.typeinf_lattice(interp), argtypes[2:end])
             return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-                return result.rt === Union{} ? result : CC.CallMeta(rt, result.exct, result.effects, result.info, result.refinements)
+                return result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
             end
         end
     end
@@ -598,8 +598,15 @@ function split_tuple_read(interp, arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, 
     # (what is read is what `getfield` gives, as for `split_tuple` above: the union of what the cases give, which inference merges)
     rt = CC.getfield_tfunc(CC.typeinf_lattice(interp), argtypes[2], argtypes[3])
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        return result.rt === Union{} ? result : CC.CallMeta(rt, result.exct, result.effects, result.info, result.refinements)
+        return result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
     end
+end
+
+# (what a split call gives: the merge of its cases where that is the union of them, which a call on it is made over the cases of, `Union{Tuple{A,C},Tuple{B,C}}`; else what the builtin gives, `Tuple{Union{A,B},C}`, as
+# inference merges more than a few tuples into one of `Any`)
+function split_result(@nospecialize(merged), @nospecialize(builtin))
+    T = CC.widenconst(merged)
+    return (T isa Union && all(isconcretetype, Base.uniontypes(T))) || isconcretetype(T) ? merged : builtin
 end
 
 # whether what inference found of a call is that of a call of a function of this module that is named `name` (each of the methods that it may be)
@@ -692,6 +699,9 @@ function CC.optimize(interp::OverridesInterpreter, opt::CC.OptimizationState, ca
             Expr(:call, split_getfield, call.args[2:end]...)
         elseif (called === Core.memoryrefget || called === Core.getfield) && (slot_call = type_slot_call(opt.stmt_info[pc])) !== nothing
             slot_call[1] === type_slot_get ? Expr(:call, type_slot_get, call.args[2], slot_call[2]) : Expr(:call, type_slot_field, call.args[2], Val(call.args[3] isa QuoteNode ? call.args[3].value : call.args[3]), slot_call[2])
+        elseif (keyed = keyed_replacement(c, called, call, opt.stmt_info[pc], opt.src.ssavaluetypes[pc])) !== nothing
+            # (code for each object, and the constants that it has: see "Code for each object" in objects.jl)
+            keyed
         elseif called === call_callback && length(call.args) >= 3
             # (`call_callback(T, f, args...)` is `f(args...)`, or no call at all where no function was registered for `T`: see closures.jl)
             opt.src.ssavaluetypes[pc] === Union{} ? Expr(:call, Core.throw, "a callback that was not registered") : Expr(:call, call.args[3:end]...)

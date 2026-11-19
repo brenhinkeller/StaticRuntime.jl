@@ -168,3 +168,12 @@ ot_pairs() = (opaque(1) == 1 && (OT_X.val = identity); OT_LISTENER(); t = OT_T.v
 @testset "Objects known one by one" begin
     check_cases(["a pair of the values of two objects, stored in a third" => ot_pairs])
 end
+
+# What a method that is not inlined stores in an object that is a constant, when nothing that it is called with is such an object (a finalizer, which a call of the runtime's
+# `run_finalizer(Val(id), F, T, addr)` has inlined, is one): the method is of the program as any that a call that is left in the code calls, and what it stores is in the field.
+const OT_KEEP = Ref{Any}(nothing)
+@noinline ot_store(n::Int) = (OT_KEEP[] = n * 2.5; nothing)
+ot_stored() = (ot_store(opaque(2)); v = OT_KEEP[]; println(v === nothing ? "nothing" : v); 0)
+@testset "Objects that a method stores in without being given them" begin
+    check_cases(["a store in a method that is called with a number" => ot_stored])
+end

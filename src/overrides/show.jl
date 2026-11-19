@@ -83,7 +83,9 @@ end
         return implicit ? :(isempty(X) ? ($text, false) : ("", true)) : :(($text, false))
     end
 end
-Base.typeinfo_prefix(io::ShowStream, X) = typeinfo_prefix_static(typeinfo_of(io), X)
+# (what it is, as in Base: a stream whose type is not known, as in the code of `sprint` for a context that is not a constant, has it of the type `Any` without this, and then `show` of a vector
+# to it is `Union{}`, wider than nothing, and the result of `sprint` with the context that is a constant was discarded for being wider than that: `repr(v; context = :compact => true)`)
+Base.typeinfo_prefix(io::ShowStream, X) = typeinfo_prefix_static(typeinfo_of(io), X)::Tuple{String,Bool}
 
 ## `Symbol`s
 

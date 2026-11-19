@@ -7,7 +7,7 @@
 
 module StaticRuntimeObservablesExt
 
-using StaticRuntime: StaticRuntime, @device_override, note_callback, call_callback, add_callback!
+using StaticRuntime: StaticRuntime, @device_override, note_callback, call_callback
 using Observables: Observables, Observable, AbstractObservable, ObserverFunction, to_value, appendinputs!
 
 # `observable[] = val`: the value is converted to the type of the observable (the field is of the type `T`), and the listeners are called
@@ -33,16 +33,79 @@ end
 value_type(::Observable{T}) where {T} = T
 value_type(::AbstractObservable) = Any
 
-@device_override function Base.notify(observable::Observable{T}) where {T}
-    val = observable[]
-    for (_, f) in Observables.listeners(observable)::Vector{Pair{Int,Any}}
-        result = call_callback(T, f, val)
-        if result isa Observables.Consume && result.x
-            return true # (stop calling the listeners if an event got consumed)
-        end
+# The listeners of the observables that the program has as constants (of a scene that was made before it is compiled) are known objects: the compilation finds them in the constants (`held_listeners`, see "Listeners" in
+# src/inference/closures.jl), and so are the observables. The code that updates an observable that is a constant, `obs[] = v` and `notify(obs)`, is made for it (see "Code for each object" in src/inference/objects.jl:
+# `setindex_key` and `notify_key` below, compiled for the key of the observable), with the listeners that it has: `f` is compared with each (`===`), which is called by code that is made for it (`call_object`), so that what
+# it holds (the observables of an `onany`, the result of a `map`) are constants of that code, and what it reads of them and stores in them is of those, and not of all the observables of their types. For an observable that is
+# not known, `f` is compared with all the listeners of the constants that are called with a value of its type. A listener that the program makes is called as before, over the types that it says (`note_callback`).
+StaticRuntime.keyed_method(::typeof(Base.setindex!), ::Observable) = setindex_key
+StaticRuntime.keyed_method(::typeof(Base.notify), ::Observable) = notify_key
+
+# (not those that hold a module, the ones of the mouse and the keyboard, which a program that has no events does not call, and whose module is not in the binary; nor those that are values of bits, which hold no objects,
+# and are called by their type)
+listener_functions(o::Observable) = Tuple(p.second for p in o.listeners if !holds_module(p.second) && !StaticRuntime.keyless(p.second))
+StaticRuntime.listener_holder(::Type{<:Observable}) = true
+StaticRuntime.held_listeners(o::Observable) =
+    (value_type(o), listener_functions(o), Tuple(unique!(Any[typeof(p.second) for p in o.listeners if StaticRuntime.keyless(p.second)])))
+
+function setindex_key(k::StaticRuntime.ObjectKey, val)
+    observable = StaticRuntime.object_for(k)
+    if observable.ignore_equal_values
+        isequal(observable.val, val) && return
     end
-    return false
+    observable.val = convert(value_type(observable), val)
+    return notify_key(k)
 end
+
+function notify_key(k::StaticRuntime.ObjectKey)
+    observable = StaticRuntime.object_for(k)
+    return notify_listeners(observable, getfield(observable, :val), something(StaticRuntime.known_object_keys(listener_functions, observable), ()))
+end
+
+@device_override function Base.notify(observable::Observable{T}) where {T}
+    # (where the type of the value is not known, as for an `Observable` of an abstract type, all those of the constants)
+    keys = something(StaticRuntime.known_object_keys(StaticRuntime.compared_listeners, T), StaticRuntime.known_object_keys(StaticRuntime.all_compared_listeners, nothing), ())
+    return notify_listeners(observable, observable[], keys)
+end
+
+# Each listener: compared with each of the ones that are known, in one method (`f` is of the type `Any`: what is called is decided by `===`, and not by its type); any other is of a type that the program said (`note_callback`)
+@generated function notify_listeners(observable::Observable{T}, val, keys::K) where {T,K<:Tuple}
+    call = :(call_callback(T, f, val))
+    for i in fieldcount(K):-1:1
+        call = :(f === StaticRuntime.object_for(keys[$i]) ? call_object(keys[$i], val) : $call)
+    end
+    return quote
+        for (_, f) in Observables.listeners(observable)::Vector{Pair{Int,Any}}
+            result = $call
+            if result isa Observables.Consume && result.x
+                return true # (stop calling the listeners if an event got consumed)
+            end
+        end
+        return false
+    end
+end
+
+# (the code of the listener, made for it: what it holds is constants of it, the fields of a `MapCallback` and an `OnAny` of the package too, which are of the type `Any`. The values of its arguments are read from them with
+# `getfield`, which is of each of them, where `to_value(obs)` would be a call that is given the observable, which Julia does not propagate a mutable constant into)
+function call_object(k::StaticRuntime.ObjectKey, val)
+    g = StaticRuntime.object_for(k)
+    if g isa AnyCall || g isa MapCall || g isa Observables.OnAny || g isa Observables.MapCallback
+        # (the keys of the arguments, here where they are constants)
+        keys = StaticRuntime.known_object_keys(identity, g.args)
+        result = keys === nothing ? g.f(map(to_value, g.args)...) : call_with_keys(g.f, keys)
+        (g isa AnyCall || g isa Observables.OnAny) && return result
+        g.result[] = result
+        return nothing
+    else
+        return g(val)
+    end
+end
+
+# (`f(key_value(k1), key_value(k2), ...)`: a call, and not a splat of a tuple of what they are, which is a call of `Core._apply_iterate` where an element is of a union)
+@generated function call_with_keys(f, keys::K) where {K<:Tuple}
+    return Expr(:call, :f, (:(key_value(keys[$i])) for i in 1:fieldcount(K))...)
+end
+key_value(k::StaticRuntime.ObjectKey) = (x = StaticRuntime.object_for(k); x isa Observable ? getfield(x, :val) : to_value(x))
 
 # whether a function (a closure) has a `Module` among what it took, in what it took (the closures, tuples and references that it has: three deep)
 function holds_module(@nospecialize(f), depth::Int = 3)
@@ -55,56 +118,6 @@ function holds_module(@nospecialize(f), depth::Int = 3)
         holds_module(getfield(f, i), depth - 1) && return true
     end
     return false
-end
-
-# The listeners of the observables that were made before the program is compiled (in a scene that is a constant) are not said by the code of the program: the observables that `x` refers to are looked at, and the
-# listeners of `map` that they have are replaced with the `MapCall`s that `map!` makes.
-function StaticRuntime.add_listeners!(@nospecialize(root); budget::Int = 2_000_000)
-    seen = Base.IdSet{Any}()
-    todo = Any[root]
-    while !isempty(todo) && budget > 0
-        x = pop!(todo)
-        (x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char || x === nothing) && continue
-        x in seen && continue
-        push!(seen, x)
-        budget -= 1
-        if x isa Observable
-            ls = x.listeners
-            # (a listener that has a `Module` is not one that a program can have: a module is a structure of the runtime, and has no copy in the binary, so the listeners that have one, and the observable, would not be in it. They
-            # are the ones of the interactions with the mouse and the keyboard (`addmouseevents!`), which a program that has no events does not call: they are taken out)
-            filter!(p -> !holds_module(p.second), ls)
-            for i in eachindex(ls)
-                p = ls[i]
-                f = p.second
-                if f isa Observables.MapCallback
-                    # (what `map` made: the function, the result and the arguments of the type `Any`, as `map!` makes them in a program, with their types)
-                    f = MapCall(f.f, f.result, f.args)
-                    ls[i] = Pair{Int,Any}(p.first, f)
-                elseif f isa Observables.OnAny
-                    # (what `onany` made, likewise)
-                    f = AnyCall(f.f, f.args)
-                    ls[i] = Pair{Int,Any}(p.first, f)
-                end
-                add_callback!(value_type(x), typeof(f))
-            end
-        end
-        # (the handles that a block keeps to take its listeners out again are of the same kind: they have the functions)
-        x isa Vector{ObserverFunction} && filter!(o -> !holds_module(o.f), x)
-        if x isa Array || x isa Core.GenericMemory
-            isbitstype(eltype(x)) && continue
-            for i in eachindex(x)
-                isassigned(x, i) && push!(todo, x[i])
-            end
-        elseif x isa Dict
-            for (k, v) in x; push!(todo, k); push!(todo, v); end
-        elseif x isa Function || isstructtype(typeof(x))
-            T = typeof(x)
-            for i in 1:fieldcount(T)
-                isdefined(x, i) && push!(todo, getfield(x, i))
-            end
-        end
-    end
-    return nothing
 end
 
 # `off`, without what is called when a listener is removed (`removehandler_callbacks`, for tools that watch the observables: a list of functions of the type `Function`, which nothing in a program adds to). An overlay

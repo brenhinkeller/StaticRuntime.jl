@@ -261,12 +261,87 @@ what the code of the program makes says it with `note_callback(V, f)`). Call it 
 """
 add_callback!(V::Type, F::Type) = (register_callback!(V, F); nothing)
 
+## Listeners
+##
+## The functions that a package keeps, to be called when something changes (the listeners of an `Observable`), are found in the constants of the program by the compilation, as it looks at them for the slots (`held_listeners`, a
+## method of an extension, says which a constant holds). Each is an object that the code compares with, and calls as a constant (see "Code for each object" in objects.jl). A program reaches no listeners but those of its
+## constants and those that it makes, which it says (`note_callback`), and a call of a function that is not known is made over the types of those that it makes only. What is found is the compilation's own, and nothing
+## is changed: a constant that the program does not reach is not looked at, and what one compilation finds is not kept for another.
+
+"""
+    StaticRuntime.held_listeners(x)
+
+For extensions: what `x` (an object that the constant scan of a compilation meets) holds to call, `(V, objects, types)`: the type of the value that they are called with, the listeners that the code is to compare with and call
+as constants, and the types of those that are called by their type (values of bits, which hold no objects); or `nothing`. Asked only of objects of the types of `listener_holder`.
+"""
+held_listeners(@nospecialize(x)) = nothing
+listener_holder(@nospecialize(T)) = false
+
+# The most listeners of a type of value that a call is compared with one by one: beyond, the types of those of the type are what the calls are made over (as for `add_callback!`), and the objects are not known in them. And the
+# most of all types of value, for a call where the type of value is not known (an `Observable` of an abstract type): beyond, there is no comparison, and the types of all are what such a call is made over.
+const MAX_LISTENER_OBJECTS = 64
+const MAX_ALL_LISTENERS = 256
+
+# (a listener found in a constant, `f`, called with a value of the type `V`: for the whole compilation)
+function note_listener!(c::Compilation, @nospecialize(V), @nospecialize(f))
+    cl = c.closures
+    k = (V, objectid(f))
+    (k in cl.found_listener_ids && any(g -> g === f, get(cl.found_listeners, V, ()))) && return
+    push!(cl.found_listener_ids, k)
+    push!(get!(Vector{Any}, cl.found_listeners, V), f)
+    return
+end
+
+# At the end of a pass: the listeners that the code is to compare with in the next, from all that were found; whether they are different. (A scan that was cut short may not have found all: then the types of those that were found are
+# what calls are also made over, as for a type of value that has more than `MAX_LISTENER_OBJECTS`.)
+function update_listeners!(c::Compilation)
+    cl = c.closures
+    changed = false
+    truncated = c.slots.scan_truncated
+    for (V, fs) in cl.found_listeners
+        compared = length(fs) <= MAX_LISTENER_OBJECTS ? Tuple(fs) : ()
+        if isempty(compared) || truncated
+            for f in fs
+                (V, typeof(f)) in cl.callbacks || (push!(cl.callbacks, (V, typeof(f))); changed = true)
+            end
+        end
+        old = get(cl.listener_objects, V, nothing)
+        if old === nothing || length(old) != length(compared) || any(i -> old[i] !== compared[i], eachindex(compared))
+            cl.listener_objects[V] = compared
+            changed = true
+        end
+    end
+    empty!(cl.listener_types)
+    for fs in values(cl.found_listeners), f in fs; push!(cl.listener_types, typeof(f)); end
+    cl.listeners_complete = !truncated
+    all = Any[]
+    for fs in values(cl.listener_objects), f in fs
+        any(g -> g === f, all) || push!(all, f)
+    end
+    all_compared = length(all) <= MAX_ALL_LISTENERS ? Tuple(all) : ()
+    if length(cl.all_listeners) != length(all_compared) || any(i -> cl.all_listeners[i] !== all_compared[i], eachindex(all_compared))
+        cl.all_listeners = all_compared
+        changed = true
+    end
+    trace_on() && trace("listeners: ", sum(length, values(cl.found_listeners); init = 0), " found, of ", length(cl.listener_types), " types, for ", length(cl.found_listeners), " types of value", truncated ? " (the scan was cut short: not all)" : "", "; compared: ", sum(length, values(cl.listener_objects); init = 0))
+    return changed
+end
+
+"""
+    StaticRuntime.compared_listeners(V)
+
+The listeners of the constants of the program that are called with a value of the type `V`, in a tuple (with `known_object_keys(compared_listeners, V)`, when compiling: as keys): those that a call is compared with, where the observable is not known.
+"""
+compared_listeners(@nospecialize(V)) = (c = CURRENT_COMPILATION[]; c === nothing ? () : get(c.closures.listener_objects, V, ()))
+# (all of them, of any type of value: `known_object_keys(all_compared_listeners, nothing)`, for an observable whose type of value is not known)
+all_compared_listeners(::Nothing) = (c = CURRENT_COMPILATION[]; c === nothing ? () : c.closures.all_listeners)
+
 """
     StaticRuntime.add_listeners!(x)
 
-Say what the listeners of the observables that `x` refers to are (the ones of a `Scene` that is a constant, say), with `add_callback!`. This has a method when `Observables` is loaded.
+No longer needed: the listeners of the constants of a program are found when it is compiled. (It does nothing, and gives `x`.)
 """
-function add_listeners! end
+add_listeners!(@nospecialize(x)) = x
 
 """
     StaticRuntime.prepare!(x)
@@ -327,6 +402,21 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
         inner = copy(arginfo.argtypes[3:end])
         T = CC.widenconst(inner[1])
         fargs = arginfo.fargs === nothing ? nothing : arginfo.fargs[3:end]
+        # (a function of the type of listeners of the constants: it is one of those, as the program reaches no others of the type, and makes none for `V`, as it would say (see "Listeners" above). Those that are called with a
+        # value of the type `V` were compared with before, and the others are not called with one: not reached. A type of values whose listeners are too many to compare with has its types in the callbacks. Of a union of types
+        # (what the slot of the listeners holds), the others)
+        cl = c.closures
+        uncompared(F) = !(F isa DataType && isconcretetype(F) && cl.listeners_complete && F in cl.listener_types &&
+                          (V !== nothing ? !((V, F) in cl.callbacks) : (!isempty(cl.all_listeners) && !any(cb -> cb[2] === F, cl.callbacks))))
+        if T isa Union || (T isa DataType && isconcretetype(T))
+            members = Base.uniontypes(T)
+            left = filter(uncompared, members)
+            isempty(left) && return CC.Future{CC.CallMeta}(CC.CallMeta(Union{}, Union{}, CC.EFFECTS_THROWS, CC.NoCallInfo()))
+            if length(left) < length(members)
+                inner[1] = Union{left...}
+                T = inner[1]
+            end
+        end
         if unknown_function_type(T) && V !== nothing
             candidates = Type[F for (W, F) in c.closures.callbacks if W === V]
             # (none registered for `T`: nothing is called, as far as is known; the compilation is made again if the code that is inferred registers one)
@@ -354,10 +444,15 @@ end
 # finite many types (those registered), so the inference ends without the limit.
 function CC.edge_matches_sv(interp::OverridesInterpreter, frame::CC.AbsIntState, method::Method, @nospecialize(sig), sparams::Core.SimpleVector,
                             hardlimit::Bool, sv::CC.AbsIntState)
-    callbacks = compilation().closures.callbacks
-    if !hardlimit && sig isa DataType && isconcretetype(sig) && !isempty(callbacks)
-        F = sig.parameters[1]
-        any(cb -> cb[2] === F, callbacks) && return false
+    cl = compilation().closures
+    callbacks = cl.callbacks
+    if !hardlimit && sig isa DataType && isconcretetype(sig)
+        if !(isempty(callbacks) && isempty(cl.listener_types))
+            F = sig.parameters[1]
+            (F in cl.listener_types || any(cb -> cb[2] === F, callbacks)) && return false
+        end
+        # (code for an object, see "Code for each object" in objects.jl: as finite as the objects)
+        has_object_key(sig) && return false
     end
     return @invoke CC.edge_matches_sv(interp::CC.AbstractInterpreter, frame::CC.AbsIntState, method::Method, sig::Any, sparams::Core.SimpleVector,
                                       hardlimit::Bool, sv::CC.AbsIntState)
@@ -530,13 +625,14 @@ function run_passes(c::Compilation, compile)
         more_callbacks = cl.callback_call_requested && !isempty(newcb)
         # (the types of the boxes that were found with the types that the last pass had are the ones for the next: until they are the same)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
-        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry
+        more_listeners = update_listeners!(c) # (see "Listeners" above: what the next pass compares with)
+        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners
         retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + 2 && wanted
         if trace_on()
             trace("pass ", pass, ": ", round(time() - started; digits = 1), " s, ",
                   slots_retry ? "cut short by the slots (" * string(s.passes) * " of " * string(SLOT_PASS_LIMIT) * " slot passes)" : had_failure ? "failed" : "completed",
                   "; candidates ", length(cl.functions), ", found ", length(new), (more_functions ? " (adopted: " * (failure !== nothing || had_failure ? "the pass failed" : !strict ? "not strict" : cl.union_used ? "a call was made over candidates" : "a box holds a function") * ")" : " (not adopted)"),
-                  "; callbacks ", length(newcb), ", boxes changed ", more_boxes, ", cfunctions ", length(newc),
+                  "; callbacks ", length(newcb), ", listeners changed ", more_listeners, ", boxes changed ", more_boxes, ", cfunctions ", length(newc),
                   "; methods optimized ", cl.optimized, " (", length(cl.optimized_unique), " different)",
                   isempty(cl.slowest) ? "" : string("; slowest to optimize: ", join((string(round(t; digits = 1), " s (", n, " statements) ", mi) for (t, mi, n) in cl.slowest), " | ")),
                   wanted ? (retry ? "; another pass" : "; no pass is left (" * string(function_passes) * " function passes)") : "; done")

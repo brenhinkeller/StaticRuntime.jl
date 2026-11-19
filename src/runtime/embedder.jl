@@ -475,6 +475,11 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                     add_fields!(ft, base + off)
                 end
                 pos = off + sizeof(ft)
+            elseif T <: Function && (r = unsafe_load(Ptr{UInt}(base + off)); r != 0 && object_type(r) === Module)
+                # A module that a closure took (the listeners of the mouse and the keyboard of a Makie scene, which a program that has no events does not call: they are not among the listeners that the code compares
+                # with, see "Listeners" in src/inference/closures.jl): it is null in the binary, where it would be a structure of the runtime, as the closure is kept by what has it (the observable). Elsewhere a module fails whole.
+                add!(LLVM.PointerType(), g -> nullptr())
+                pos = off + sizeof(Ptr)
             else # reference to another object
                 r = unsafe_load(Ptr{UInt}(base + off))
                 add!(LLVM.PointerType(), g -> embed_ref!(e, r))

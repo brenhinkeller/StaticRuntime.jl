@@ -139,7 +139,7 @@ end
     prepare!(scene::Scene)
 
 Make a graph (the `compute` of a scene) that was made before the program is compiled ready for it: it is resolved, the typed edges have the names of their outputs (`name_outputs!`), what it does when its outputs change has the types of the
-observables of the graph (`stage_onchange!`), and the listeners of the observables are said (`add_listeners!`). Call it once, after the observables that the program uses are asked for (`get_observable!`).
+observables of the graph (`stage_onchange!`). Call it once, after the observables that the program uses are asked for (`get_observable!`). (The listeners of the observables are found when the program is compiled.)
 """
 # Makie keeps the value of some nodes in a `RefValue{Any}` (the `shading` of a scene is `Automatic`, or a `ShadingAlgorithm`, and the reference is of the type `Any` so that either can be stored), and what is read from a reference of
 # that type is a value of any type: the slot is one that all of the references of the type `Any` of the program share, and the callbacks that get the value are compiled for all the types that anything stores in one. The
@@ -189,10 +189,9 @@ function StaticRuntime.prepare!(graph::CP.ComputeGraph)
     end
     stage_onchange!(graph)
     name_outputs!(graph)
-    StaticRuntime.add_listeners!(graph)
     return graph
 end
-StaticRuntime.prepare!(scene::Scene) = (StaticRuntime.prepare!(scene.compute); StaticRuntime.add_listeners!(scene); scene)
+StaticRuntime.prepare!(scene::Scene) = (StaticRuntime.prepare!(scene.compute); scene)
 
 # A node that is read (`graph[key][]`) is resolved by the package by reading what it comes from: `resolve!(computed.parent)`, the parent being an `AbstractEdge` (an edge or an input), `edge.typed_edge[]` (a `RefValue{TypedEdge}`),
 # `input.f` (a `Function`) and `computed.value[]` (a `RefValue`). The nodes of a figure are connected (a plot's graph with its scene's), so what these hold is what all the nodes of all the graphs hold (an input function of each of

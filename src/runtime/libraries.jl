@@ -104,12 +104,33 @@ function library_needs(lib, path::String, libraries::Symbol)
     for name in unique(names)
         name == basename(path) && continue
         found = findfirst(p -> basename(p) == name && !system_library(p), loaded)
+        # (a library that is loaded by the name of its file, `libpng16.16.59.0.dylib`, and that others ask for by the name that it says it has, `libpng16.16.dylib`: looked for among those whose file name begins
+        # as the name does)
+        if found === nothing
+            stem = first(split(name, '.'))
+            found = findfirst(p -> !system_library(p) && startswith(basename(p), stem * ".") && library_install_name(p) == name, loaded)
+        end
         found === nothing && continue
         any(n -> n[1] isa Libdl.LazyLibrary && basename(string(n[1].path)) == name, needs) && continue
         h = Libdl.dlopen(loaded[found], throw_error = false)
         h === nothing || push!(needs, (loaded[found], h))
     end
     return needs
+end
+
+# the name that a library says it has (`otool -D` of macOS, the `SONAME` of Linux), as the libraries that need it name it, or ""
+function library_install_name(path::AbstractString)
+    try
+        if Sys.isapple()
+            lines = split(read(`otool -D $path`, String), '\n')
+            return length(lines) >= 2 ? basename(strip(lines[2])) : ""
+        elseif Sys.islinux()
+            m = match(r"SONAME\s+(\S+)", read(`objdump -p $path`, String))
+            return m === nothing ? "" : String(m.captures[1])
+        end
+    catch
+    end
+    return ""
 end
 
 # the number of the library (a new one is added, with those that it needs before it)

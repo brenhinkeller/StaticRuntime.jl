@@ -154,15 +154,17 @@ code compiles, the functions that were given to `on` (and `map`, `onany`) for an
 no others. So a listener has to compile for the type of the value of the `Observable` that it is given to (as it does in Julia), and an `Observable` that has no listener has no call. A function
 is found where it is given, so it is not found if the listeners are made by something that compiled code does not go through (`register_callback` is what they all go through).
 
-An `Observable` that is made before the program is compiled (and is a constant of it) has listeners that the code of the program did not give to `on`: `StaticRuntime.add_listeners!(x)` says which they are (all of the
-`Observable`s that `x` refers to), and makes the `map`ped ones the typed callbacks that `map!` makes in a program.
+An `Observable` that is made before the program is compiled (and is a constant of it, or is reached from one, as the observables of a scene are) has listeners that the code of the program did not give to `on`: they are
+found when the program is compiled, in its constants, and nothing is changed in them. The code that sets or notifies such an `Observable` is compiled for it, with its listeners as constants, so that what one of them stores
+in another `Observable` is known of that one (a pair of the values of two, in a third). A listener of one is called as it is called in Julia, but for those that use the mouse and the keyboard (which have a module in
+them), which a program has no events for.
 
 ### Makie
 
 A `Makie.Scene` that is made before the program is compiled, and is a constant of it (`const scene = Scene(...)`), can be read and changed by the program: its size, the viewport (`scene.viewport[] = Rect2i(...)`), and the inputs of its compute graph
 (`ComputePipeline.update!(scene.compute, viewport = ...)`, or `scene.compute.viewport = ...`), whose changes reach the nodes and the observables of the graph, as the camera. Call `StaticRuntime.prepare!(scene)` once, after the scene is made
 and before compiling: the typed edges get the names of their outputs, what the graph does when its outputs change is made again with the types of its observables, the functions of the inputs get the references of their nodes, a node
-that Makie keeps in a `RefValue{Any}` of a few types of value (`shading`) gets one of the union of them, and the listeners are said (see [Observables](@ref)). The nodes of a graph are resolved when it is prepared: a node that
+that Makie keeps in a `RefValue{Any}` of a few types of value (`shading`) gets one of the union of them (the listeners of its observables are found when compiling, see [Observables](@ref)). The nodes of a graph are resolved when it is prepared: a node that
 a program resolves for the first time is an error. The observables that the program uses have to be asked for before (`get_observable!(graph, name)`, or `on(f, graph[name])`). Only the latest release of Makie is supported (0.24).
 
 The nodes of a plot in a `Figure` (`plot.attributes`, a graph of its own, which is connected with those of its scene and of the other plots) are read and set through `StaticRuntime.typed_node(graph, key)` and
