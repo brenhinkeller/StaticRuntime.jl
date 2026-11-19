@@ -23,7 +23,7 @@ end
 # (Or in a constant that is made of others: `store <2 x ptr> <ptr inttoptr (...), ptr inttoptr (...)>`, which the optimizer makes of two stores of pointers when the processor has
 # vector registers for them (x86: the SLP vectorizer; ARM did not), and a constant struct or array. An address that was only in one of those was not found, and stayed as the
 # address that it was in the process that compiled: a pointer to nothing in the program.)
-function inttoptr_nodes(op, found = LLVM.ConstantExpr[])
+function inttoptr_nodes(@nospecialize(op), found = LLVM.ConstantExpr[])
     (op isa LLVM.ConstantExpr || op isa LLVM.ConstantAggregate) || return found
     occursin("inttoptr", string(op)) || return found
     if op isa LLVM.ConstantExpr && LLVM.API.LLVMGetConstOpcode(op) == LLVM.API.LLVMIntToPtr
@@ -420,6 +420,17 @@ end
 known_object_ranges(objects) = Tuple{UInt,Int}[(UInt(pointer_from_objref(x)), max(object_extent(typeof(x), UInt(pointer_from_objref(x))), 8)) for x in objects if ismutable(x) && typeof(x) isa DataType]
 
 function embed_constants!(e::ObjectEmbedder; known_objects::AbstractVector = Any[])
+    # (the types of the tags, checked once each while the constants are embedded: see `TAG_TYPES`)
+    previous = TAG_TYPES[]
+    TAG_TYPES[] = Dict{UInt,Any}()
+    try
+        return embed_constants_with_tags!(e; known_objects)
+    finally
+        TAG_TYPES[] = previous
+    end
+end
+
+function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVector = Any[])
     mod = e.mod
     known = known_object_ranges(known_objects)
     resolve_type_placeholders!(e)

@@ -37,6 +37,7 @@ function GPUCompiler.optimize!(job::GPUCompiler.CompilerJob{<:StaticCompiler.Sta
                                relocs::GPUCompiler.Relocations; opt_level = 2)
     is_ours(job) || return invoke(GPUCompiler.optimize!, Tuple{GPUCompiler.CompilerJob, LLVM.Module, GPUCompiler.Relocations},
                                   job, mod, relocs; opt_level)
+    started = time()
     GPUCompiler.with_llvm_machine(job.config.target) do tm
         tti = GPUCompiler.llvm_targetinfo(job.config.target)
         @dispose pb = PassBuilder() begin
@@ -66,5 +67,6 @@ function GPUCompiler.optimize!(job::GPUCompiler.CompilerJob{<:StaticCompiler.Sta
         GPUCompiler.optimize_module!(job, mod)
         LLVM.run!(LLVM.DeadArgumentEliminationPass(), mod, tm)
     end
+    trace_on() && trace("LLVM optimization: ", round(time() - started; digits = 1), " s, ", count(_ -> true, LLVM.functions(mod)), " functions")
     return
 end

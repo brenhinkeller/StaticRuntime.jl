@@ -89,6 +89,7 @@ mutable struct ClosureState
     # (for the whole compilation: what is found is added to, as code that is taken from the cache is not looked at again)
     found_listeners::Dict{Any,Vector{Any}}                                 # the listeners of the constants of the program, by the type of the value that they are called with
     found_listener_ids::Set{Tuple{Any,UInt}}
+    listener_holders::IdDict{Any,Bool}                                     # (whether objects of a type hold listeners: `holds_listeners`)
     cfunction_roots::Vector{Runtime.CFunctionRoot}                         # the `@cfunction`s of the program, with the functions that they call (`cfunction_functions`, in the same order)
     cfunction_functions::Vector{Any}
     # found in this pass
@@ -105,7 +106,7 @@ mutable struct ClosureState
     sink::Any                                                              # where what is found of the code that is being optimized is also kept (`InferenceFindings`), while it is
     box_function_seen::Bool                                                # a function is in a `Core.Box` that a constant has (the variable of a closure that is made by code that is not compiled): its type is not known by any read of the box
 end
-ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Dict{Any,Tuple}(), Set{Any}(), true, (), Dict{Any,Vector{Any}}(), Set{Tuple{Any,UInt}}(), Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
+ClosureState() = ClosureState(Type[], Tuple{Type,Type}[], Dict{Any,Tuple}(), Set{Any}(), true, (), Dict{Any,Vector{Any}}(), Set{Tuple{Any,UInt}}(), IdDict{Any,Bool}(), Runtime.CFunctionRoot[], Any[], Type[], Set{Type}(), Tuple{Type,Type}[],
                               Tuple{DataType,Vector{DataType},DataType,Any}[], false, false, false, 0, Set{Any}(), Tuple{Float64,Any,Int}[], nothing, false)
 
 "What the passes know of the boxes of the closures (boxes.jl): the type of what each holds, as the last pass found it."
@@ -183,6 +184,7 @@ mutable struct ObjectState
     use_unattributed::Dict{Tuple{Any,Symbol},Any}
     use_unknown::Set{Any}
     holds::IdDict{Any,Bool}                  # (`holds_object_slots` of each type, once asked: for the whole compilation)
+    gives::IdDict{Any,Bool}                  # (`gives_object` of each signature, once asked: for the whole compilation)
     # (while the facts of the objects are recorded, from the code of a method after it is inlined, see `record_object_facts!`, and replayed)
     recording::Bool
     pending_facts::Any                       # the facts of the method that is optimized, which those of its objects are added to
@@ -196,7 +198,7 @@ mutable struct ObjectState
 end
 ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbol}}(), false, false, false, 0,
                             Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Any,Symbol,Any}}}(),
-                            Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Set{Any}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), IdDict{Any,Bool}(),
+                            Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Set{Any}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), IdDict{Any,Bool}(), IdDict{Any,Bool}(),
                             false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Set{Any}())
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."

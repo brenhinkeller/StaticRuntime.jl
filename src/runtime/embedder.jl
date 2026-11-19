@@ -422,7 +422,8 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 pos = off + sizeof(Ptr)
             elseif cut === :egalplan
                 dt = unsafe_pointer_to_objref(Ptr{Cvoid}(addr))::DataType
-                add!(LLVM.PointerType(), g -> egal_layout!(e, dt, addr))
+                held = Ref{Any}(dt) # (a closure that took the type itself would be a method of its own, compiled for each type)
+                add!(LLVM.PointerType(), g -> egal_layout!(e, held[], addr))
                 pos = off + sizeof(Ptr)
             elseif cut === :sizedsvec
                 types_addr = unsafe_load(Ptr{UInt}(base + off))

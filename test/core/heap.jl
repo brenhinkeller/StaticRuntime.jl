@@ -418,3 +418,44 @@ args_loop(args::Vector{String}) = (s = 0; for i in 1:1000 + length(args); s += l
         check_cases(["$(nameof(f)), gc = $gc" => (() -> f(opaque(1), Ptr{Ptr{UInt8}}(C_NULL))) for f in cases]; gc)
     end
 end
+
+# The frame of the roots that the collector reads is a stack array (src/runtime/heap_link.jl). The vectorizer stores and loads two roots at a time, as a vector that it says is aligned to 16
+# bytes, and on x86 that is an instruction that faults if the address is not (`vmovapd`): an access to a stack slot may not say more alignment than the slot has. (`lu` of a small matrix has
+# such an access, with the collector there; on ARM a misaligned access does not fault, so this looks at the module.)
+function misaligned_stack_accesses(mod)
+    n = 0
+    for f in LLVM.functions(mod), bb in LLVM.blocks(f), inst in LLVM.instructions(bb)
+        (inst isa LLVM.StoreInst || inst isa LLVM.LoadInst) || continue
+        a = Int(LLVM.alignment(inst))
+        p = inst isa LLVM.StoreInst ? LLVM.operands(inst)[2] : LLVM.operands(inst)[1]
+        offset = 0 # (the constant offset into the slot, from byte GEPs)
+        while p isa LLVM.GetElementPtrInst
+            ops = LLVM.operands(p)
+            (length(ops) == 2 && ops[2] isa LLVM.ConstantInt && LLVM.API.LLVMGetGEPSourceElementType(p) == LLVM.Int8Type().ref) || break
+            offset += convert(Int, ops[2])
+            p = ops[1]
+        end
+        p isa LLVM.AllocaInst || continue
+        (a > LLVM.alignment(p) || offset % a != 0) && (n += 1)
+    end
+    return n
+end
+heap_lu_value(n) = (A = [4.0 1 0; 1 4 1; 0 1 4] .+ n; F = lu(A); round(Int, 1000 * sum(F \ [1.0, 2, 3])))
+heap_solve_value(n) = (A = [1.0 2; 3 4] .+ n; round(Int, 1000 * sum(A \ [1.0, 2])))
+heap_lu(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(heap_lu_value(argc)); 0)
+heap_solve(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(heap_solve_value(argc)); 0)
+@testset "Accesses to the frame of roots are aligned" begin
+    StaticRuntime.StaticCompiler.GPUCompiler.JuliaContext() do ctx
+        for f in (heap_lu, heap_solve)
+            mod = Base.invokelatest(static_llvm_module, f, ENTRY_TYPES; gc = true)
+            try
+                @test misaligned_stack_accesses(mod) == 0
+            finally
+                LLVM.dispose(mod)
+            end
+        end
+    end
+    # (and they run: on x86, a misaligned access is a crash)
+    @test run_heap_program(heap_lu; gc = true) == string(heap_lu_value(1)) # (with no arguments, `argc` is 1)
+    @test run_heap_program(heap_solve; gc = true) == string(heap_solve_value(1))
+end

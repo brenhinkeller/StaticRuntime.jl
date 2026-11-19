@@ -2,16 +2,16 @@
 println("\n")
 @info "Core tests:"
 
-# strict mode, method tables, and the entry points that are not accepted; the functions that test a program
+# Strict mode, method tables, and the entry points that are not accepted; the functions that test a program
 @testset verbose=true "Internals" include_timed("internals.jl")
 
-# what goes into the binary: constants, objects, types and their tags
+# What goes into the binary: constants, objects, types and their tags
 @testset verbose=true "Embedding" include_timed("embedding.jl")
 @testset verbose=true "Tags" include_timed("tags.jl")
 @testset verbose=true "Subtype" include_timed("subtype.jl")
 @testset verbose=true "ObjectID" include_timed("objectid.jl")
 
-# the runtime: memory and the collector, exceptions, the executable, files and the operating system
+# The runtime: memory and the collector, exceptions, the executable, files and the operating system
 @testset verbose=true "Runtime" begin
     @testset verbose=true "Heap" include_timed("heap.jl")
     @testset verbose=true "Finalizers" include_timed("finalizers.jl")
@@ -20,15 +20,15 @@ println("\n")
     @testset verbose=true "Files and the system" include_timed("files.jl")
 end
 
-# dynamic dispatch, closures and C callbacks
+# Dynamic dispatch, closures and C callbacks
 @testset verbose=true "Inference" begin
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
     @testset verbose=true "Slots" include_timed("slots.jl")
-    @testset verbose=true "Types that are stated" include_timed("assume.jl")
+    @testset verbose=true "@assume" include_timed("assume.jl")
     @testset verbose=true "Functions" include_timed("closures.jl")
 end
 
-# the language and Base: values and globals, numbers (and random numbers), strings, collections, symbols, tasks
+# The language and Base: values and globals, numbers (and random numbers), strings, collections, symbols, tasks
 @testset verbose=true "Language" include_timed("language.jl")
 @testset verbose=true "Numbers" include_timed("numbers.jl")
 @testset verbose=true "Strings" include_timed("strings.jl")
@@ -37,22 +37,19 @@ end
 @testset verbose=true "Tuples" include_timed("tuples.jl")
 @testset verbose=true "Tasks" include_timed("tasks.jl")
 
-# printing
-@testset verbose=true "Printing, show, and display" begin
-    include_timed("printing.jl")
-    include_timed("show.jl")
-end
+# Printing
+@testset verbose=true "Print, show, and display" include_timed("printing.jl")
 
-# libraries that the program calls
+# Libraries that the program calls
 @testset verbose=true "Libraries" include_timed("libraries.jl")
 
-# what is not supported, and what happens then
+# What is not supported, and what happens then
 @testset verbose=true "Limitations" include_timed("limitations.jl")
 
-# what the others left behind: the state of the process that compiles
+# What the others left behind: the state of the process that compiles
 @testset verbose=true "State" include_timed("state.jl")
 
-# a compilation is made of the program, and of nothing that another one left
+# A compilation is made of the program, and of nothing that another one left
 @testset verbose=true "Determinism" include_timed("determinism.jl")
 
 # End of Core tests

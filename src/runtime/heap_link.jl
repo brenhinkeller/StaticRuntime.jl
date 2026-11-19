@@ -33,6 +33,9 @@ function lower_gc_frames!(mod::LLVM.Module)
             n = LLVM.operands(call)[1]
             LLVM.position!(builder, LLVM.before(call))
             frame = LLVM.array_alloca!(builder, ptrT, n, "gcframe")
+            # (aligned as Julia's frames are, 16: the optimizer has run, and the SLP vectorizer has made loads and stores of two slots at once that say so, `load <2 x ptr>, align 16`. An x86 processor faults
+            # on one of those at an address that is not a multiple of 16 (`vmovapd`), which the default alignment of an array of pointers, 8, allowed: a segfault on Linux, and not on an ARM processor, which does not check)
+            LLVM.alignment!(frame, 16)
             # zero it, as a GC frame would expect
             sz = LLVM.mul!(builder, LLVM.zext!(builder, n, LLVM.Int64Type()), LLVM.ConstantInt(Int64(sizeof(Ptr))))
             LLVM.call!(builder, LLVM.FunctionType(LLVM.VoidType(), [ptrT, LLVM.Int8Type(), LLVM.Int64Type(), LLVM.Int1Type()]),

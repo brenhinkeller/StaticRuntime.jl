@@ -81,9 +81,7 @@ function replay_findings!(c::Compilation, interp, root)
         f = findings_of(ci)
         f === nothing && continue
         for T in f.functions
-            T in cl.seen_functions_set && continue
-            push!(cl.seen_functions_set, T)
-            push!(cl.seen_functions, T)
+            add_seen_function!(cl, T)
         end
         for x in f.callbacks
             x in cl.seen_callbacks || push!(cl.seen_callbacks, x)
@@ -102,13 +100,20 @@ function replay_findings!(c::Compilation, interp, root)
     return
 end
 
+# (`T::Type`: a call with a type of the static type `Any` is dispatched on what it is, `Type{T}`, and the method is compiled for each type, in each compilation; of the static type `Type`, it is one call, compiled once)
+function add_seen_function!(cl::ClosureState, @nospecialize(T))
+    t = T::Type
+    t in cl.seen_functions_set && return
+    push!(cl.seen_functions_set, t)
+    push!(cl.seen_functions, t)
+    return
+end
+
 function note_function!(cl::ClosureState, @nospecialize(T))
     interesting_function_type(T) || return
-    cl.sink isa InferenceFindings && !(T in cl.sink.functions) && push!(cl.sink.functions, T)
-    if !(T in cl.seen_functions_set)
-        push!(cl.seen_functions_set, T)
-        push!(cl.seen_functions, T)
-    end
+    t = T::Type
+    cl.sink isa InferenceFindings && !(t in cl.sink.functions) && push!(cl.sink.functions, t)
+    add_seen_function!(cl, t)
     return
 end
 
@@ -292,6 +297,14 @@ function note_listener!(c::Compilation, @nospecialize(V), @nospecialize(f))
     return
 end
 
+# (whether the program says that it makes functions of the type `F`, for any type of value. A loop: see `meets_any`)
+function noted_for_any(cl::ClosureState, @nospecialize(F))
+    for cb in cl.callbacks
+        cb[2] === F && return true
+    end
+    return false
+end
+
 # At the end of a pass: the listeners that the code is to compare with in the next, from all that were found; whether they are different. (A scan that was cut short may not have found all: then the types of those that were found are
 # what calls are also made over, as for a type of value that has more than `MAX_LISTENER_OBJECTS`.)
 function update_listeners!(c::Compilation)
@@ -407,7 +420,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
         # (what the slot of the listeners holds), the others)
         cl = c.closures
         uncompared(F) = !(F isa DataType && isconcretetype(F) && cl.listeners_complete && F in cl.listener_types &&
-                          (V !== nothing ? !((V, F) in cl.callbacks) : (!isempty(cl.all_listeners) && !any(cb -> cb[2] === F, cl.callbacks))))
+                          (V !== nothing ? !((V, F) in cl.callbacks) : (!isempty(cl.all_listeners) && !noted_for_any(cl, F))))
         if T isa Union || (T isa DataType && isconcretetype(T))
             members = Base.uniontypes(T)
             left = filter(uncompared, members)
@@ -449,7 +462,7 @@ function CC.edge_matches_sv(interp::OverridesInterpreter, frame::CC.AbsIntState,
     if !hardlimit && sig isa DataType && isconcretetype(sig)
         if !(isempty(callbacks) && isempty(cl.listener_types))
             F = sig.parameters[1]
-            (F in cl.listener_types || any(cb -> cb[2] === F, callbacks)) && return false
+            (F in cl.listener_types || noted_for_any(cl, F)) && return false
         end
         # (code for an object, see "Code for each object" in objects.jl: as finite as the objects)
         has_object_key(sig) && return false

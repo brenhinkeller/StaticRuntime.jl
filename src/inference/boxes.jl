@@ -255,8 +255,19 @@ function types_of_constant_tuple(argtypes)
     length(argtypes) == 3 || return nothing
     t, i = argtypes[2], argtypes[3]
     (t isa Core.Const && t.val isa Tuple && !(i isa Core.Const) && CC.widenconst(i) === Int) || return nothing
-    (any(e -> e isa Type, t.val) && length(t.val) <= SLOT_LIMIT[]) || return nothing
-    return Union{(e isa Type ? Core.TypeEgal{e} : typeof(e) for e in t.val)...}
+    # (the elements by `getfield`: `any` and a generator over the tuple are methods that Julia compiles for the type of each tuple that is asked about)
+    v = t.val
+    n = nfields(v)
+    n <= SLOT_LIMIT[] || return nothing
+    types = Any[]
+    has_type = false
+    for k in 1:n
+        e = getfield(v, k)
+        e isa Type && (has_type = true)
+        push!(types, e isa Type ? Core.TypeEgal{e} : typeof(e))
+    end
+    has_type || return nothing
+    return Union{types...}
 end
 
 # A read of a slot of types (see slots.jl) has the slots of the program looked at: it is what a program that has types as values does, which may make no other call that would have them looked at (`Vector{T}`
@@ -267,10 +278,20 @@ function type_slot_read!(c::Compilation, sv, key)
     return
 end
 
-# the type of a read that is checked (see `type_slot_get`) is the union of the types that the slot holds: what inference makes of the checks is a union of at most three of them, as a merge of constants is
-typed_read(call, @nospecialize(T), interp, sv) = CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-    return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
+# What a hook gives after the call that it made, `then(result, x)` (a function of the module): the value that it takes, `x` (a type, mostly), is held in a field of the type `Any`, so that the closure is one method that Julia
+# compiles once, and not one for each type that `x` is, which it would be if it took `x` itself (a closure is of the types of what it took: a method compiled when the program is, for each type that a program reads)
+struct Held; x::Any; end
+function after_call(then, call, interp, sv, @nospecialize(x))
+    h = Held(x)
+    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
+        return then(result, h.x)
+    end
 end
+result_of_type(result::CC.CallMeta, @nospecialize(T)) = result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
+result_refined(result::CC.CallMeta, @nospecialize(T)) = CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
+
+# the type of a read that is checked (see `type_slot_get`) is the union of the types that the slot holds: what inference makes of the checks is a union of at most three of them, as a merge of constants is
+typed_read(call, @nospecialize(T), interp, sv) = after_call(result_of_type, call, interp, sv, T)
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.getfield), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
@@ -279,9 +300,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
     # (an element of a tuple that is a constant, that has types in it, by an index that is not known: `Type[Int, Float64][i]`: the types that it has, each a type that is known, and not the `DataType` that the field of the tuple is)
     T = types_of_constant_tuple(arginfo.argtypes)
     if T !== nothing && (sv isa CC.InferenceState || CC.isready(call))
-        return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-            return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
-        end
+        return after_call(result_of_type, call, interp, sv, T)
     end
     c = compilation()
     # (an element of a tuple that is one of a few tuples: read as one of them, see `split_tuple` in dispatch.jl)
@@ -291,16 +310,12 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
     if c.slots.mode === :on && (sv isa CC.InferenceState || CC.isready(call))
         folded = fold_field_read(c, arginfo.argtypes)
         if folded !== nothing
-            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-                return result.rt === Union{} ? result : CC.CallMeta(folded, result.exct, result.effects, result.info, result.refinements)
-            end
+            return after_call(result_of_type, call, interp, sv, folded)
         end
         # (a field of an object that is known, which the program writes: what it has, and what is stored in it)
         OT = object_field_type(c, arginfo.argtypes)
         if OT !== nothing
-            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-                return CC.CallMeta(refined_read(OT, result.rt), result.exct, result.effects, result.info, result.refinements)
-            end
+            return after_call(result_refined, call, interp, sv, OT)
         end
     end
     if isempty(c.slots.types) && !c.dispatch.registered_used && c.slots.mode !== :off && length(arginfo.argtypes) == 3 && arginfo.argtypes[3] isa Core.Const && (arginfo.argtypes[3].val isa Symbol || arginfo.argtypes[3].val isa Integer)
@@ -329,9 +344,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
         # (types as values: the read is the call of a check of them, see dispatch.jl)
         return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_field), argtypes[2], CC.Const(Val(t.val)), CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
     end
-    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        return CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
-    end
+    return after_call(result_refined, call, interp, sv, T)
 end
 
 # What is read from the elements of a memory of an abstract type (`Memory{Any}`) is of the types that were stored in them (see slots.jl)
@@ -355,7 +368,5 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.mem
         # (types as values: the read is the call of a check of them, see dispatch.jl)
         return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_get), arginfo.argtypes[2], CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
     end
-    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        return CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
-    end
+    return after_call(result_refined, call, interp, sv, T)
 end

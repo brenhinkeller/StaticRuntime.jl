@@ -136,7 +136,7 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             # was made without it, and made again with it when it was refused: that was twice the time of what is refused. With a postprocess of the caller's, the code is given to it as `strip` says.)
             ours = llvm_postprocess === nothing
             # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked to it, and does not change it; see `input_dependent_cases` in testing.jl)
-            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = comp.objects.keyed_objects))) : llvm_postprocess
+            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); started = time(); linked = link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = comp.objects.keyed_objects); trace_on() && trace("linking the runtime (and embedding the constants): ", round(time() - started; digits = 1), " s"); linked)) : llvm_postprocess
             result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 entry_args = rooted_arguments(c, args)

@@ -243,7 +243,7 @@ function with_methods(c::Compilation, interp, arginfo::CC.ArgInfo, i::Int, u, ma
     for M in members
         others[i] = M
         atype = Tuple{others...}
-        any(sig -> typeintersect(atype, sig) !== Union{}, sigs) && push!(kept, M)
+        meets_any(atype, sigs) && push!(kept, M)
     end
     (isempty(kept) || length(kept) == length(members)) && return u
     return Union{kept...}
@@ -275,7 +275,7 @@ method_matches(interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::I
 # whether some method fits a call with these argument types: by the signatures of the methods of the function (looked up once: see `method_signatures`) when it has few, and else as inference finds them
 function some_method_fits(c::Compilation, interp, arginfo::CC.ArgInfo, @nospecialize(atype), max_methods::Int)
     sigs = c.settings.filter_by_methods && !has_unknown_length(arginfo) ? method_signatures(c, interp, CC.widenconst(arginfo.argtypes[1]), length(arginfo.argtypes) - 1) : nothing
-    sigs === nothing || return any(sig -> typeintersect(atype, sig) !== Union{}, sigs)
+    sigs === nothing || return meets_any(atype, sigs)
     matches = method_matches(interp, arginfo, atype, max_methods)
     return matches isa CC.FailedMethodMatch || !isempty(matches.applicable) # (too many to count: some fit)
 end
@@ -517,9 +517,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.app
         T === nothing && return call
         # (what the call gives is one of the types that it makes, each a type that is known: what inference makes of the cases is a merge of constants, which is a union of at most three of them, and then
         # `Type{<:Vector}`, which a call on it is not made over the cases of)
-        return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-            return result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
-        end
+        return after_call(result_of_type, call, interp, sv, T)
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
@@ -553,7 +551,12 @@ function tuple_cases(@nospecialize(T), limit::Int)
     for p in T.parameters
         options = element_cases(p, limit)
         options === nothing && return nothing
-        found = Any[Tuple{f.parameters..., o} for f in found for o in options]
+        # (a loop, and not a comprehension: its closure would have the types that it takes, and be a method that Julia compiles for each)
+        next = Any[]
+        for f in found, o in options
+            push!(next, Tuple{(f::DataType).parameters..., o})
+        end
+        found = next
         length(found) > limit && return nothing
     end
     return found
@@ -576,9 +579,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.tup
             # (what the call gives is the tuple that `Core.tuple` gives, `Tuple{Union{A,B},C}` or one made of what is known of the arguments: what inference makes of the cases is a merge of them, which is
             # `Tuple{Any,C}` for more than a few, where Julia has the union)
             rt = CC.tuple_tfunc(CC.typeinf_lattice(interp), argtypes[2:end])
-            return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-                return result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
-            end
+            return after_call(result_split, call, interp, sv, rt)
         end
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
@@ -597,10 +598,10 @@ function split_tuple_read(interp, arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, 
     call = CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(split_getfield), Union{cases...}, argtypes[3]]), si, vtypes, sv)
     # (what is read is what `getfield` gives, as for `split_tuple` above: the union of what the cases give, which inference merges)
     rt = CC.getfield_tfunc(CC.typeinf_lattice(interp), argtypes[2], argtypes[3])
-    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        return result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
-    end
+    return after_call(result_split, call, interp, sv, rt)
 end
+
+result_split(result::CC.CallMeta, @nospecialize(rt)) = result.rt === Union{} ? result : CC.CallMeta(split_result(result.rt, rt), result.exct, result.effects, result.info, result.refinements)
 
 # (what a split call gives: the merge of its cases where that is the union of them, which a call on it is made over the cases of, `Union{Tuple{A,C},Tuple{B,C}}`; else what the builtin gives, `Tuple{Union{A,B},C}`, as
 # inference merges more than a few tuples into one of `Any`)
@@ -615,6 +616,15 @@ function calls_helper(@nospecialize(info), name::Symbol)
     info isa CC.MethodMatchInfo || return false
     matches = info.results.matches
     return !isempty(matches) && all(m -> m.method.name === name && m.method.module === @__MODULE__, matches)
+end
+
+# Whether the type `atype` meets one of `sigs`. (A loop, and not `any` with a closure: in the closures here a type that a closure takes makes it a method of its own, which Julia compiles for each type, when the
+# program is compiled: here, and in the others of the package that take a type, as `holds_object_slots` does.)
+function meets_any(@nospecialize(atype), sigs)
+    for sig in sigs
+        typeintersect(atype, sig) !== Union{} && return true
+    end
+    return false
 end
 
 # whether what inference found of a call is that of a call of `split_apply_type` (see above)

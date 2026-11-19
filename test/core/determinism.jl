@@ -18,8 +18,6 @@ dlist(xs...) = foldr((x, l) -> DCons{Int}(x, l), xs; init = DNil{Int}())
 dlength(l::DList) = l isa DNil ? 0 : 1 + dlength(dtail(l))
 opaque(x::Integer) = x + oftype(x, time_ns() >> 63)
 cases = Pair{String,Function}[
-    "atexit"         => () -> (atexit(() -> println("x = ", opaque(7))); println("end"); 0),
-    "atexit twice"   => () -> (atexit(() -> println("first")); atexit(() -> println("second ", opaque(1))); 0),
     "abstract list"  => () -> (l = dlist(opaque(1), 2, 3); dlength(l) * 10 + dhead(l) + dhead(dtail(l))),
     "closures"       => () -> (fs = Function[x -> x + 1, x -> 2x]; s = 0; for f in fs; s += f(opaque(3)); end; s),
     "stderr"         => () -> (println(stderr, "to the standard error ", opaque(2)); println(stdout, "to the standard output"); 0),

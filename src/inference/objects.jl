@@ -172,24 +172,43 @@ function note_object_store!(c::Compilation, @nospecialize(S), name, @nospecializ
 end
 
 # (whether an argument of a method can be an object whose stores are kept: a mutable struct with a field of an abstract type)
-holds_object_slots(@nospecialize(P)) = P isa DataType && ismutabletype(P) && tracked_object_type(P) && any(i -> needs_slot_type(fieldtype(P, i)), 1:fieldcount(P))
+function holds_object_slots(@nospecialize(P))
+    (P isa DataType && ismutabletype(P) && tracked_object_type(P)) || return false
+    for i in 1:fieldcount(P) # (a loop: see `meets_any`)
+        needs_slot_type(fieldtype(P, i)) && return true
+    end
+    return false
+end
 
 # A call of `callee`, in the code of `mi` (before it is optimized), that gives it an object whose stores are kept: what each of its arguments is (see `callsites`)
 # (whether a call of this signature gives a method an object whose stores are kept, asked once for each type in a compilation)
 function gives_object(c::Compilation, sig::DataType)
     c.settings.objects || return false
-    cache = c.objects.holds
+    o = c.objects
+    g = get(o.gives, sig, nothing) # (once for each signature: a method is called with the same one from many places)
+    g === nothing || return g::Bool
+    found = false
     for n in 1:length(sig.parameters) # (the function too: a listener, whose fields are the objects that it stores in)
         P = sig.parameters[n]
         P isa Core.TypeofVararg && continue
-        get!(() -> leads_to_slots_type(P), cache, P) && return true
+        # (not `get!` with a closure that has the type: a closure of each type is a method that Julia compiles, for each type that is asked about)
+        h = get(o.holds, P, nothing)
+        h === nothing && (h = o.holds[P] = leads_to_slots_type(P))
+        h::Bool && (found = true; break)
     end
-    return false
+    o.gives[sig] = found
+    return found
 end
 
 # (whether a value of the type `P` is, or holds in its fields as they are declared, an object whose fields are kept by object: a mutable struct with a field of an abstract type, or an immutable struct of such)
-leads_to_slots_type(@nospecialize(P), depth::Int = 0) = holds_object_slots(P) ||
-    (depth < 2 && P isa DataType && isconcretetype(P) && isstructtype(P) && !ismutabletype(P) && tracked_object_type(P) && any(i -> leads_to_slots_type(fieldtype(P, i), depth + 1), 1:fieldcount(P)))
+function leads_to_slots_type(@nospecialize(P), depth::Int = 0)
+    holds_object_slots(P) && return true
+    (depth < 2 && P isa DataType && isconcretetype(P) && isstructtype(P) && !ismutabletype(P) && tracked_object_type(P)) || return false
+    for i in 1:fieldcount(P) # (a loop: see `meets_any`)
+        leads_to_slots_type(fieldtype(P, i), depth + 1) && return true
+    end
+    return false
+end
 
 function note_object_call!(c::Compilation, ir::CC.IRCode, mi, callee::Core.MethodInstance, args::AbstractVector, sig::DataType)
     c.objects.recording || return
@@ -214,7 +233,7 @@ function resolve_object_stores!(c::Compilation, rootmi)
     o = c.objects
     # (the code of a method is of the program if a call that is left in the code calls it, or it is where the program, or a `@cfunction` of it, starts: a method that is only inlined is in its callers)
     cfunctions = Any[r.ftype for r in c.closures.cfunction_roots]
-    entered(mi) = mi === rootmi || (sig = Base.unwrap_unionall(mi.specTypes); sig isa DataType && !isempty(sig.parameters) && any(F -> sig.parameters[1] === F, cfunctions))
+    entered(mi) = mi === rootmi || (sig = Base.unwrap_unionall(mi.specTypes); sig isa DataType && !isempty(sig.parameters) && is_listed(sig.parameters[1], cfunctions))
     # (any call that is left: one that gives the method no object, as `run_finalizer(Val(id), F, T, addr)` that runs a finalizer, whose code is inlined in it, is not in `callsites`)
     runs(mi) = entered(mi) || mi in o.invoked || !isempty(get(o.callsites, mi, ()))
     for (mi, list) in o.direct
@@ -257,6 +276,14 @@ function resolve_object_stores!(c::Compilation, rootmi)
         end
     end
     return
+end
+
+# (whether `F` is one of `list`, by `===`. A loop: see `meets_any`)
+function is_listed(@nospecialize(F), list)
+    for G in list
+        G === F && return true
+    end
+    return false
 end
 
 # (the object that the fields `path` of `x` lead to, where those are fields that do not change, or `nothing`)

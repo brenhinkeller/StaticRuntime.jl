@@ -71,6 +71,40 @@ function object_type(addr::UInt)
     word = safe_load(addr - 8)
     word === nothing && return nothing
     tag = word & ~UInt(15)
+    cache = TAG_TYPES[]
+    if cache === nothing
+        T = type_of_tag(tag)
+    else
+        T = get(cache, tag, false)
+        T === false && (T = cache[tag] = type_of_tag(tag))
+    end
+    T === nothing && return nothing
+    T = T::DataType
+    addr % 16 == 0 && return T
+    # (the one instance of a type that has no fields, which has no contents, is allocated where the data of an object would be, 8 bytes in
+    # a cell that is 16 aligned: it is the `instance` of its type)
+    Base.issingletontype(T) && isdefined(T, :instance) &&
+        UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), T.instance)) == addr && return T
+    # (a symbol is 8 aligned: asked first, as it is the most common of these by far, and `Core.sizeof` of it, below, is an error, which is slow to make, with a backtrace, for each)
+    T === Symbol && return is_symbol(addr) ? T : nothing
+    # (an object of a mutable type that has no data, as `Ref(nothing)` of a type that has no size is, is allocated in the same way, and there are many of them: it is not the `instance` of its type)
+    Base.ismutabletype(T) && definite_size(T) == 0 && return T
+    return nothing
+end
+
+# The size of the objects of the type `T`, or `-1` if it has none (the size is in each object: a string, a symbol, a list, a memory), without an error for the types that are known to have none:
+# `Core.sizeof` throws for those, and an error is made with a backtrace, which takes milliseconds (it is asked for thousands of objects when a large constant is embedded)
+function definite_size(T::DataType)
+    (T === String || T === Symbol || T === Core.SimpleVector || T <: Core.GenericMemory || T === Module) && return -1
+    return try Core.sizeof(T) catch; -1 end
+end
+
+# The types of the tags that were looked at while a program is linked (`type_of_tag` of each, which depends on the tag only, and is ten reads of the memory of the type: a tag is checked once, and not for each of the
+# thousands of objects of its type that a program can embed). Set by `embed_constants!` for as long as it runs, when nothing is collected (so that a tag is the type that it was), and empty otherwise: nothing is kept for another program.
+const TAG_TYPES = Ref{Union{Nothing,Dict{UInt,Any}}}(nothing)
+
+# The type that a tag is, if it is one that objects can have, or `nothing`
+function type_of_tag(tag::UInt)
     ptr = if tag < (64 << 4)
         unsafe_load(cglobal(:jl_small_typeof, Ptr{Ptr{Cvoid}}), (tag >> 3) + 1)
     else
@@ -101,14 +135,7 @@ function object_type(addr::UInt)
     T isa DataType && isconcretetype(T) || return nothing
     # the objects that are types (`typeof(Int)` is `DataType`) are objects as well, those of these kinds (the last is `Union{}`)
     (T <: Type) && !(T in TYPE_OBJECT_KINDS) && return nothing
-    addr % 16 == 0 && return T
-    # (the one instance of a type that has no fields, which has no contents, is allocated where the data of an object would be, 8 bytes in
-    # a cell that is 16 aligned: it is the `instance` of its type)
-    Base.issingletontype(T) && isdefined(T, :instance) &&
-        UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), T.instance)) == addr && return T
-    # (an object of a mutable type that has no data, as `Ref(nothing)` of a type that has no size is, is allocated in the same way, and there are many of them: it is not the `instance` of its type)
-    Base.ismutabletype(T) && (try Core.sizeof(T) catch; -1 end) == 0 && return T
-    return T === Symbol && is_symbol(addr) ? T : nothing
+    return T
 end
 
 # Is the object at `addr`, of which the tag says that it is a symbol (and which is not aligned as
@@ -269,7 +296,8 @@ function object_extent(T::DataType, base::UInt)
         # the header and the elements, which are inline (and boxed elements are pointers)
         return 16 + len * (isbitstype(ET) ? Base.aligned_sizeof(ET) : sizeof(Ptr))
     end
-    return try Core.sizeof(T) catch; 0 end # no definite size: not something we embed
+    T === Core.SimpleVector && return 8 + 8 * unsafe_load(Ptr{Int}(base)) # (the length, and the elements)
+    return max(definite_size(T), 0) # no definite size: not something we embed
 end
 
 # The objects that `addr` may point into, as (base address, offset of `addr` in it): constants can

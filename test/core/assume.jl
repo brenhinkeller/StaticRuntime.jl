@@ -21,7 +21,7 @@ eget(x::Int) = x
 @noinline eset!(b::EBox, @nospecialize(x)) = (b.v = x; nothing)
 StaticRuntime.@assume_field_embedded EBox.v
 
-@testset "Types that are stated" begin
+@testset "Types that are @assumed" begin
     @testset "the type of a call" begin
         check_cases(["a call of a method that gives Any" => () -> (d = Dict{Symbol,Any}(:a => AInfo(opaque(3))); ainfo(d, :a).x + opaque(0))]; batch = false)
     end
@@ -45,7 +45,7 @@ end
 @eval assume_wrong_call(argc::Int, argv::Ptr{Ptr{UInt8}}) = (d = Dict{Symbol,Any}(:a => opaque(5) + 0.5); println(aliar(d, :a).x); 0)
 @eval assume_wrong_field(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(abag_liar(opaque(1)).v.x); 0)
 @eval assume_wrong_embedded(argc::Int, argv::Ptr{Ptr{UInt8}}) = (eset!(EB, Base.inferencebarrier(opaque(1) + 0.5)); println(eget(EB.v)); 0)
-@testset "What is stated is checked" begin
+@testset "What is @assumed is checked" begin
     @test_throws ProcessFailedException run_main(assume_wrong_embedded)
     @test_throws ProcessFailedException run_main(assume_wrong_call)
     @test_throws ProcessFailedException run_main(assume_wrong_field)

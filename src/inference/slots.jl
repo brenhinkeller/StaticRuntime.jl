@@ -110,9 +110,14 @@ end
 function universe_extras(c::Compilation, @nospecialize(T))
     s = c.slots
     (c.settings.universe && !isempty(s.universe)) || return Any[]
-    get!(s.universe_extras, T) do
-        Any[t for t in s.universe if t <: T]
+    # (not `get!` with a closure that has `T`: a closure of each type is a method that Julia compiles)
+    found = get(s.universe_extras, T, nothing)
+    found === nothing || return found
+    found = Any[]
+    for t in s.universe
+        t <: T && push!(found, t)
     end
+    return s.universe_extras[T] = found
 end
 
 # the types that the statements of a method have (those of the optimized code of it, or of the code before it was optimized), and its arguments
@@ -246,7 +251,9 @@ const REFLECTION_TYPES = Any[TypeVar, Core.TypeofVararg, Core.TypeName, Module, 
 function note_stored_type!(c::Compilation, key::SlotKey, @nospecialize(T))
     c.settings.universe || return
     (T isa DataType && isconcretetype(T) && !(T <: Function) && !(T <: Type)) || return
-    any(R -> T <: R, REFLECTION_TYPES) && return
+    for R in REFLECTION_TYPES # (a loop: see `meets_any`)
+        T <: R && return
+    end
     T in c.registered.dispatch && return # (registered already)
     push!(get!(Set{Any}, c.slots.stored_by_slot, key), T)
     return
@@ -529,16 +536,8 @@ function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
             callee = target isa Core.CodeInstance ? target.def : target
             first_arg = 2
         elseif st.head === :call
+            # (the calls that give objects to methods are those of the code after it is inlined: see `record_object_facts!` in objects.jl)
             info = ir.stmts[pc][:info]
-            # (the calls that give an object to a method that may store in it: each method that the call may be, see objects.jl)
-            for m in call_matches(info)
-                # (only a call that gives an object whose stores are kept, which its signature says: the method instance is looked up only for those)
-                sig_m = Base.unwrap_unionall(m.spec_types)
-                (sig_m isa DataType && length(st.args) == length(sig_m.parameters) && gives_object(c, sig_m)) || continue
-                callee_m = CC.specialize_method(m)
-                callee_m isa Core.MethodInstance || continue
-                note_object_call!(c, ir, mi, callee_m, st.args, sig_m)
-            end
             info isa CC.MethodMatchInfo && length(info.results.matches) == 1 || continue
             callee = CC.specialize_method(only(info.results.matches))
             first_arg = 1
@@ -548,7 +547,6 @@ function record_call_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
         sig isa DataType || continue
         nargs = length(st.args) - first_arg + 1
         nargs == length(sig.parameters) || continue
-        st.head === :invoke && gives_object(c, sig) && note_object_call!(c, ir, mi, callee, view(st.args, first_arg:length(st.args)), sig)
         for n in 2:nargs
             can_hold_types(sig.parameters[n]) || continue
             a = st.args[first_arg + n - 1]
@@ -639,17 +637,24 @@ note_truncated!(c::Compilation) = c.slots.facts_sink === nothing ? (c.slots.scan
 scan_leaf(@nospecialize(x)) = x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
 
 # the facts about the slots, and the universe, that are in `x0` and in what it refers to: `(slot, type of what is stored)`, `((:universe, type, nothing), Any)` and `((:truncated, nothing, nothing), Any)`, each once
-function scan_facts(@nospecialize(x0))
+# (whether objects of the type `T` hold listeners: asked once for each type in a compilation, and kept with it)
+function holds_listeners(holders::IdDict{Any,Bool}, @nospecialize(T))
+    h = get(holders, T, nothing)
+    h === nothing || return h
+    return holders[T] = Base.invokelatest(listener_holder, T)::Bool
+end
+
+function scan_facts(@nospecialize(x0), holders::IdDict{Any,Bool} = IdDict{Any,Bool}())
     facts = Set{Tuple{SlotKey,Any}}()
     seen = Base.IdSet{Any}()
     stack = Any[x0]
     budget = SCAN_BUDGET
-    holders = IdDict{Any,Bool}() # (whether objects of a type hold listeners, see "Listeners" in closures.jl: asked once for each type)
     while !isempty(stack)
         x = pop!(stack)
         push!(facts, ((:universe, typeof(x), nothing), Any))
         scan_leaf(x) && continue
-        if get!(() -> Base.invokelatest(listener_holder, typeof(x))::Bool, holders, typeof(x))
+        # (an object that holds listeners, see "Listeners" in closures.jl: one that is mutable, as an `Observable` is, of a type that is said to hold them, which is asked once for each type in a compilation)
+        if ismutable(x) && holds_listeners(holders, typeof(x))
             held = Base.invokelatest(held_listeners, x)
             if held !== nothing
                 V, objects, types = held
@@ -697,7 +702,9 @@ function note_slots_in!(c::Compilation, @nospecialize(x))
         c.slots.mode === :off || note_universe!(c, typeof(x))
         return
     end
-    facts = get!(() -> scan_facts(x), c.slots.scan_cache, x)
+    # (not `get!` with a closure that has `x`: a closure of each type of constant is a method that Julia compiles)
+    facts = get(c.slots.scan_cache, x, nothing)
+    facts === nothing && (facts = c.slots.scan_cache[x] = scan_facts(x, c.closures.listener_holders))
     for (key, T) in facts
         k = key[1]
         if k === :listener
