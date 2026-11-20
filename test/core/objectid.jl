@@ -16,7 +16,7 @@ mutable struct OidMut; x::Int; end
 const OID_DICT = Dict(OidNamed("a", 1) => 10, OidNamed("b", 2) => 20, OidNamed("c", 3) => 30)
 const OID_PTS = Dict(OidPt(1, 2.0) => 1, OidPt(3, 4.0) => 2)
 
-@testset "Objectid" begin
+@testset "ObjectID" begin
     S = StaticRuntime
     # the same number as Julia: for the sizes of values that are hashed in different ways (1, 2, 4, 8 and more bytes, of
     # which more than one block of the hash), padding, Unions, references, nested structs, and strings

@@ -180,6 +180,45 @@ end
     end
 end
 
+# `llvm_to_clang = true`: StaticCompiler writes the module as LLVM IR (a `.ll` file) and clang compiles it, with the
+# program's own code, the runtime that is linked into it and the collector, and links it (an executable through the C
+# wrapper whose `main` calls the entry point, on macOS too)
+function l2c_text(n::Int)
+    d = Dict{String,Int}()
+    for i in 1:n
+        d[string("k", i % 7)] = get(d, string("k", i % 7), 0) + i
+    end
+    total = try
+        sum(values(d)) + parse(Int, "not a number")
+    catch e
+        e isa ArgumentError ? -sum(values(d)) : 0
+    end
+    return string(sort!(collect(keys(d))), " ", total, " ", factorial(big(n)))
+end
+l2c_main(args::Vector{String}) = (println(l2c_text(parse(Int, args[1]))); 0)
+l2c_square(x::Float64) = x * x
+l2c_count(n::Int) = length(filter(isodd, collect(1:n)))
+@testset "Compiling through LLVM IR and clang (`llvm_to_clang = true`)" begin
+    # an executable that allocates, collects, catches an exception and calls GMP; with the collector, and small
+    for (gc, small) in ((true, false), (:auto, true))
+        dir = mktempdir()
+        exe = compile_executable(l2c_main, (Vector{String},), dir, "l2c"; llvm_to_clang = true, gc, small)
+        @test isfile(joinpath(dir, "l2c.ll")) && !isfile(joinpath(dir, "l2c.o"))
+        @test readchomp(`$exe 25`) == l2c_text(25)
+    end
+    # a library of two functions, called from Julia
+    dir = mktempdir()
+    lib = compile_shlib([(l2c_square, (Float64,)), (l2c_count, (Int,))], dir; filename = "libl2c", llvm_to_clang = true)
+    @test isfile(joinpath(dir, "libl2c.ll"))
+    handle = dlopen(lib)
+    try
+        @test ccall(dlsym(handle, :l2c_square), Float64, (Float64,), 1.5) == 2.25
+        @test ccall(dlsym(handle, :l2c_count), Int, (Int,), 9) == 5
+    finally
+        dlclose(handle)
+    end
+end
+
 # The optimizer reads the alignment of a pointer from the bits of the address that it was in the process that compiles (`inttoptr 0x162293e80` is aligned to 128 bytes, by chance), and the SLP vectorizer made
 # an aligned `vmovaps ymm` of four of such loads. The object that replaces the address is aligned to 16 bytes (and its data, 16 bytes in, to 16): the program crashed on the processors that have it
 # (`clamp_embedded_alignment!`). The accesses of what was embedded are as aligned as it is.

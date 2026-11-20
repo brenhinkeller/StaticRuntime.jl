@@ -35,7 +35,7 @@ sub_isa_number() = (T = opaque(Number); Int(isa(3, T)) + 10 * Int(isa("a", T)) +
 sub_isa_type() = (T = opaque(Type); Int(isa(Int, T)) + 10 * Int(isa(3, T)))
 sub_eltype_broadcast() = (u = falses(4); @. u = eltype(SUB_ZOO) <: SUB_PETS; sum(u))
 
-@testset "<: and isa with types known at run time" begin
+@testset "`<:` and `isa` with runtime types" begin
     check_cases([
         "<: a Union"                  => () -> sub_count_union(),
         "<: an abstract type"         => () -> sub_count_abstract(),

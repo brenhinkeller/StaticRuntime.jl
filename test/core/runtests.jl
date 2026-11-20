@@ -7,9 +7,11 @@ println("\n")
 
 # What goes into the binary: constants, objects, types and their tags
 @testset verbose=true "Embedding" include_timed("embedding.jl")
-@testset verbose=true "Tags" include_timed("tags.jl")
-@testset verbose=true "Subtype" include_timed("subtype.jl")
-@testset verbose=true "ObjectID" include_timed("objectid.jl")
+@testset verbose=true "Types and Tags" begin
+    include_timed("tags.jl")
+    include_timed("subtype.jl")
+    include_timed("objectid.jl")
+end
 
 # The runtime: memory and the collector, exceptions, the executable, files and the operating system
 @testset verbose=true "Runtime" begin
