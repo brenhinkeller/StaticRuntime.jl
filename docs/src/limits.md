@@ -38,7 +38,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 
 **Tasks, threads and `eval`**
 
-* **Tasks run to their end** (see [Tasks](@ref) below): `@async`, `Threads.@spawn`, `Task`, `schedule`, `wait`, `fetch`, `yield`, `@sync`, `Condition` and `Channel` work, on the one thread, and a task runs when something waits.
+* **Tasks run to their end** (see [Tasks](@ref)): `@async`, `Threads.@spawn`, `Task`, `schedule`, `wait`, `fetch`, `yield`, `@sync`, `Condition` and `Channel` work, on the one thread, and a task runs when something waits.
 
 * **A `NamedTuple` (or the keywords of a call) that holds a value of a small union of types** (`f(x; bgcol = c)` with `c` a `UInt32` or `missing`, `merge` of such) has the union as the type of its field: `@NamedTuple{bgcol::Union{Missing,UInt32}}`, where Julia's is that of the value, `@NamedTuple{bgcol::UInt32}`. `typeof` says so, and a method for the one is not a method for the other. (The type of the value is only known when the program runs, and Julia's way would be a call of the runtime.) A keyword whose value is a type (`canvas = AsciiCanvas`) is of the type of Julia.
 * There is **no `eval`**, and no keyword form of `invokelatest`; **`@cfunction`** of a function with captured state (a closure over a variable) does not work (see [Callbacks: `@cfunction`](@ref)). (`Regex`, `BigInt` and `BigFloat` work: see
@@ -58,8 +58,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
   program if compiled with `strict = false`.
 * **Values that are only known at run time** (an element of a `Vector{Any}`) can't be the argument of `objectid` or `hash` unless their types
   are registered, nor `===` of types and unions, and `show` of one is limited to the registered types (see [`show` of containers, types and structs](@ref)).
-* `titlecase` of a string (it needs the grapheme breaks of utf8proc),
-  the `MersenneTwister` generator, and `Random.seed!(seed)` of the default generator need things of libjulia that are not there.
+* `titlecase` of a string needs the grapheme breaks of utf8proc, which are in libjulia, and is not supported.
 
 * **Tuples that have a `Union` as an element** (`Tuple{Union{Vector{Float64},Vector{ComplexF64}},Int}`: what a function returns when the type of one of two values depends on the data) are made and read as
   one of the tuples that they are made of (`Tuple{Vector{Float64},Int}` or `Tuple{Vector{ComplexF64},Int}`), as a call on a union is made over its cases, when there are at most as many of them as `split_limit`
@@ -84,7 +83,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * **Locks do nothing** (there is one thread), and `islocked` is `false`.
 * **Files** are libc streams: `eachline` of a file closes it only when the loop reaches the end (not on `break`), `seek` and
   `skip` don't report errors, `open` takes only a C `fopen` mode, and the keyword arguments of `readline` and `eachline` (`keep = true`)
-  are not supported. The file system (`isfile`, `mkdir`, `readdir`, ...) and sockets are not available.
+  are not supported. Sockets are not available (only the types of addresses of `Sockets` are).
 * **`rand` without a seed** gets its state from the operating system (`getentropy`); if that fails the first `rand()` throws, rather than
   giving the same stream each time. `RandomDevice` and `uuid4()` read `getentropy` at each call.
 * The output is **unbuffered beyond libc's**: `print` and `println` write through `FILE*`, which libc flushes when the program exits
@@ -110,7 +109,7 @@ needs besides libc.
 
 ### Source layout
 
-* `src/method_table.jl`: our method table, `@device_override` and the parameters of our compilations; `src/entry_points.jl`: `compile_executable` and the other entry points; `src/extensions.jl`: the functions that package extensions add methods to; `src/registry.jl`: what packages register (`REGISTRY`, which each compilation copies when it starts).
+* `src/method_table.jl`: our method table, `@device_override` and the parameters of our compilations; `src/StaticRuntime.jl`: the module, `compile_executable` and the other entry points; `src/extensions.jl`: the functions that package extensions add methods to; `src/registry.jl`: what packages register (`REGISTRY`, which each compilation copies when it starts).
 * `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`io.jl`, `printing.jl`, `strings.jl`, `collections.jl`, `system.jl`, `bignum.jl`, ...).
 * `src/inference/`: what the compiler does with what Julia's inference leaves to the runtime. The state of a compilation and its keys (`compilation.jl`), our interpreter (`interpreter.jl`), the passes and what each reuses from the one before (`passes.jl`); calls on abstract types (`dispatch.jl`), tuples (`tuples.jl`), unknown functions, callbacks and listeners (`closures.jl`), boxes (`boxes.jl`), slots of abstract types (`slots.jl`) and of types (`types_as_values.jl`), constant objects (`objects.jl`, `object_calls.jl`), stated types (`assume.jl`), `@cfunction` (`cfunctions.jl`), replaced calls (`redirect.jl`), the optimizer's hooks (`optimize.jl`), and why a program does not infer (`diagnostics.jl`).
 * `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and the functions of libraries, BLAS among them (`libraries.jl`, `loader.jl`).

@@ -2,7 +2,7 @@
 # when it runs, as the type of the problem is then not known to the compiler: it is `Any` in Julia too), and solved with a method of `OrdinaryDiffEq`. A function that has a signature is kept by the package in a `FunctionWrapper`, which
 # is called through a pointer to a function of the runtime (see `ext/StaticRuntimeFunctionWrappersExt.jl`).
 
-using SciMLBase, OrdinaryDiffEqTsit5, OrdinaryDiffEqVerner, OrdinaryDiffEqLowOrderRK, OrdinaryDiffEqRosenbrock, OrdinaryDiffEqSDIRK, StaticArrays
+using SciMLBase, OrdinaryDiffEqTsit5, OrdinaryDiffEqVerner, OrdinaryDiffEqLowOrderRK, OrdinaryDiffEqRosenbrock, OrdinaryDiffEqSDIRK, StaticArrays, UnicodePlots
 
 sc_decay(u, p, t) = -p * u
 sc_decay!(du, u, p, t) = (du[1] = -p * u[1]; du[2] = -2p * u[2]; nothing)
@@ -11,6 +11,18 @@ sc_lorenz!(du, u, p, t) = (du[1] = p[1] * (u[2] - u[1]); du[2] = u[1] * (p[2] - 
 sc_bounce(u, p, t) = SVector(u[2], -9.8)
 sc_problem(u0 = 1.0, p = 2.0) = ODEProblem{false, SciMLBase.FullSpecialize}(sc_decay, u0, (0.0, 1.0), p)
 sc_solve_decay(alg; kw...) = () -> (sol = solve(sc_problem(1.0, 2.0 + opaque(0.0) - 1), alg; kw...); println(round(sol.u[end]; digits = 4), " ", length(sol.t)); 0)
+
+# The example of the README and of the manual's home page, as it is there: the Lorenz system, plotted with UnicodePlots
+function sc_readme_example(args::Vector{String})
+    ρ = length(args) > 0 ? parse(Float64, args[1]) : 28.0
+    prob = ODEProblem{false, SciMLBase.FullSpecialize}(sc_lorenz, SVector(1.0, 0.0, 0.0), (0.0, 30.0), SVector(10.0, ρ, 8 / 3))
+    sol = solve(prob, Tsit5(); saveat = 0.01)
+    x = [u[1] for u in sol.u]
+    z = [u[3] for u in sol.u]
+    println(lineplot(x, z; title = "Lorenz attractor, ρ = $ρ", xlabel = "x", ylabel = "z", width = 60, height = 20))
+    println(length(sol.t), " points, ", sol.stats.naccept, " steps")
+    return 0
+end
 
 @testset "SciML" begin
     check_cases([
@@ -31,5 +43,6 @@ sc_solve_decay(alg; kw...) = () -> (sol = solve(sc_problem(1.0, 2.0 + opaque(0.0
         "ImplicitEuler (stiff)"    => sc_solve_decay(ImplicitEuler()),
         "DiscreteCallback"         => () -> (cb = DiscreteCallback((u, t, integ) -> t > 0.5, integ -> (integ.u = integ.u * 2); save_positions = (false, false)); sol = solve(sc_problem(1.0, 2.0 + opaque(0.0) - 1), Tsit5(); callback = cb); println(round(sol.u[end]; digits = 4)); 0),
         "ContinuousCallback"       => () -> (cb = ContinuousCallback((u, t, integ) -> u[1], integ -> (integ.u = SVector(integ.u[1], -0.9 * integ.u[2]))); sol = solve(ODEProblem{false, SciMLBase.FullSpecialize}(sc_bounce, SVector(1.0, 0.0 + opaque(0.0) - 1), (0.0, 3.0), nothing), Tsit5(); callback = cb); println(round(sol.u[end][1]; digits = 3), " ", length(sol.t)); 0),
+        "the README example: Lorenz, plotted with UnicodePlots" => () -> sc_readme_example([opaque("28")]),
     ])
 end

@@ -55,6 +55,73 @@ If not otherwise specified, the garbage collector will be included only if it is
 
 ### More advanced examples
 
+### A differential equation, plotted in the terminal
+
+Packages compile like Base does. Here the Lorenz system is solved with [OrdinaryDiffEq](https://github.com/SciML/OrdinaryDiffEq.jl) and the attractor plotted with [UnicodePlots](https://github.com/JuliaPlots/UnicodePlots.jl), with the parameter ρ from the command line:
+
+```julia
+using StaticRuntime
+using SciMLBase, OrdinaryDiffEqTsit5, StaticArrays, UnicodePlots
+
+lorenz(u, p, t) = SVector(p[1] * (u[2] - u[1]), u[1] * (p[2] - u[3]) - u[2], u[1] * u[2] - p[3] * u[3])
+
+function main(args::Vector{String})
+    ρ = length(args) > 0 ? parse(Float64, args[1]) : 28.0
+    prob = ODEProblem{false, SciMLBase.FullSpecialize}(lorenz, SVector(1.0, 0.0, 0.0), (0.0, 30.0), SVector(10.0, ρ, 8 / 3))
+    sol = solve(prob, Tsit5(); saveat = 0.01)
+    x = [u[1] for u in sol.u]
+    z = [u[3] for u in sol.u]
+    println(lineplot(x, z; title = "Lorenz attractor, ρ = $ρ", xlabel = "x", ylabel = "z", width = 60, height = 20))
+    println(length(sol.t), " points, ", sol.stats.naccept, " steps")
+    return 0
+end
+
+compile_executable(main, (Vector{String},), "build", "lorenz"; small = true) # About 30s to compile
+```
+
+```
+shell> tree --du -h build
+[6.8M]  build
+├── [3.0M]  lorenz
+└── [3.7M]  lorenz.o
+
+ 6.8M used in 1 directory, 2 files
+
+shell> time ./build/lorenz 28
+        ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀Lorenz attractor, ρ = 28.0⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀ 
+        ┌────────────────────────────────────────────────────────────┐ 
+     50 │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡠⠤⠤⡀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠔⠒⠉⠀⠀⠀⠀⠈⢣│ 
+        │⠀⠀⠀⠀⡠⠤⠤⠤⢄⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡠⠔⠊⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸│ 
+        │⠀⠀⠀⢠⠃⢠⡲⠮⠵⠶⢬⣕⡤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠤⠒⠉⢀⡠⢤⣔⣮⣭⣭⡉⠲⡀⠀⠀⠀⡸│ 
+        │⠀⠀⠀⢸⠀⣷⠁⡴⢚⣿⣶⣶⣽⣷⠯⣖⡤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⣀⠤⠒⠁⢀⣠⣶⡷⢟⣛⠭⣉⡉⠑⣵⡀⡇⠀⠀⢀⠇│ 
+        │⠀⠀⠀⠈⡆⣿⠀⣧⡿⣕⢮⣻⣿⣿⣿⣷⣯⣟⢵⣢⢄⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⢀⡠⠔⠉⠀⡠⣔⡭⣗⣭⣵⣿⠯⠿⡭⡱⣱⠀⣿⢣⠃⠀⠀⡸⠀│ 
+        │⠀⠀⠀⠀⢱⠸⡇⢇⣧⣿⣷⡱⣶⣿⣿⣿⣿⣿⣿⣷⣷⢯⣦⢄⠀⠀⠀⠀⠀⠀⡇⢀⡠⠔⠊⠁⢀⡠⡲⡽⣚⣽⣺⣿⡿⠷⠛⠻⡕⣼⡇⣿⢰⡿⡎⠀⠀⢠⠃⠀│ 
+        │⠀⠀⠀⠀⠀⢇⢻⡜⣽⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣷⡮⣷⢯⣒⢄⣀⡠⠔⡏⠁⠀⠀⡠⣴⡵⢞⣽⡽⣿⡽⠋⠁⠀⠀⠀⠀⣷⣻⣻⠇⣾⢹⠀⠀⢀⠏⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⢇⢻⡱⣻⣿⣿⣿⣿⣿⣿⡿⢿⣿⣿⣿⣷⣿⣿⢷⢞⡻⣬⠑⢄⡇⣀⢔⣾⠾⣃⢮⣿⢮⠞⠁⠀⠀⠀⠀⠀⠀⣰⢯⣿⠟⣼⢣⠃⠀⢀⠎⠀⠀⠀│ 
+   z    │⠀⠀⠀⠀⠀⠀⠈⢎⢳⡱⣿⡿⣯⣿⣿⣿⣷⣤⣹⣿⣿⣿⣿⡪⣗⢷⣵⣄⠫⡢⣏⣶⡟⡡⡪⣷⣫⠞⠁⠀⠀⠀⠀⠀⠀⠀⣰⣯⣫⢏⣾⣣⠃⠀⢀⠎⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠈⢣⠻⣜⢿⢿⣯⣿⡻⣿⣿⣿⣿⣿⣿⣿⡷⣽⡧⣻⣿⠻⣜⡿⡣⡸⣝⣼⡱⡝⠀⠀⠀⠀⠀⠀⠀⣠⣞⣿⢽⢣⡾⡟⠀⠀⢀⠎⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠱⡙⢮⡱⣿⣾⣿⣽⣟⡿⣿⣿⣿⣟⣇⡏⣾⡗⣟⣿⡽⡇⡼⣝⣜⡏⡗⣇⡀⠀⠀⢀⣀⣔⣝⡵⣻⠕⣱⢟⠎⠀⠀⢠⠃⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢢⡳⣪⠻⡻⣟⣿⣾⢯⣶⣾⣭⡺⡴⡝⣜⡿⣿⡇⣷⡇⡏⢯⢧⡱⢌⣚⠭⣝⣳⣭⣞⣞⠏⣡⠞⡕⠁⠀⠀⡠⠃⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠑⢜⠵⣌⠺⢟⡾⣿⣭⣵⠮⢭⣚⣕⢝⡟⣼⢳⣿⣧⣇⠘⢿⡿⢭⣶⡻⢭⡵⠝⢉⣤⠞⡣⠊⠀⠀⠀⡔⠁⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠱⢌⠫⢦⢌⠓⠯⢽⣛⣛⣩⠵⠋⢠⡿⣸⡟⡞⣿⣦⡀⠉⠉⠉⢉⡡⣤⡾⢛⡡⠊⠀⠀⠀⡠⠊⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠑⠢⡉⠻⠶⣢⡤⣀⣀⠤⣔⡷⠁⡇⡇⠱⣈⠙⠻⠿⠿⠟⠛⣋⠥⠒⠁⠀⠀⠀⡠⠚⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠑⠢⢄⣈⠉⠉⠉⠀⣀⡜⠁⡇⠀⠈⠑⠒⠒⠒⠚⠉⠀⠀⠀⠀⠀⡠⠊⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠁⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠊⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⣀⠤⠊⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+      0 │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⣀⣀⣀⠤⠴⠒⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀│ 
+        └────────────────────────────────────────────────────────────┘ 
+        ⠀-20⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀20⠀ 
+        ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀x⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀ 
+3001 points, 358 steps
+
+real    0m0.004s
+user    0m0.001s
+sys     0m0.001s
+```
+
+This takes about 30 seconds to compile, and makes a 3 MB program that needs only the C standard library, runs in a few milliseconds, and prints exactly what it would in Julia.
+
 Big numbers and regular expressions are some of the Julia base features that currently rely on external libraries (GMP, MPFR, and PCRE2). These will continue to work in compiled Julia code, linking against the same libraries; `libraries = :bundle` copies those libraries next to the program, so that the folder can be moved:
 
 ```julia
@@ -118,13 +185,13 @@ compile_executable(main, (Vector{String},), "build", "crc")
 
 What compiles to a standalone binary (the arguments of the command line included), and is checked against Julia in the tests:
 
-* **The language and Base**: allocating code (`Vector`, `Dict` including mixed key and value types, `Set`, `String`, `Symbol` including `Symbol(string)` made at run time, structs, tuples, fields of a `Union{Node,Nothing}`), closures (also stored in collections and called through them), `@cfunction` callbacks (`qsort`, `bsearch`, ...), `try`/`catch`/`finally`, non-`const` global variables, `deepcopy`, `IdDict`, `rand` and `RandomDevice`, files and the standard input, and logging (`@warn` and friends).
+* **The language and Base**: allocating code (`Vector`, `Dict` including mixed key and value types, `Set`, `String`, `Symbol` including `Symbol(string)` made at run time, structs, tuples, fields of a `Union{Node,Nothing}`), closures (also stored in collections and called through them), `@cfunction` callbacks (`qsort`, `bsearch`, ...), `try`/`catch`/`finally`, non-`const` global variables, `deepcopy`, `IdDict`, `rand` and `RandomDevice`, files and the standard input, logging (`@warn` and friends), tasks that run to completion (`@async`, `Channel`, `wait`, `fetch`), `atexit`, and finalizers.
 * **Printing**: `print`, `println`, `show`, `display` and `text/plain` of numbers, strings, symbols, containers, structs, tuples and matrices, with `IOContext` properties known when compiling; `printf` and `@printf(STDOUT, ...)`.
 * **Filesystem**: `stat`, `mkdir`, `rm`, `readdir`, `cp`, `mv`, and temporary files.
 * **Dynamic dispatch**: calls on `Any` and abstract types are closed over a list of registered types, so they compile (and are exact for abstract types with few concrete subtypes).
 * **Libraries**: BLAS and LAPACK (through libblastrampoline), `BigInt`, `BigFloat`, `Regex`, SuiteSparse (sparse `\`, `lu`, `cholesky`, `qr`), **MPI** (MPI.jl programs run under `mpiexec`), any JLL or library of your own through `ccall`, with `libraries = :system` or `:bundle`; and `finalizer(f, x)` frees what they allocate.
 * **Standard libraries**: `Base64`, `CRC32c`, `LinearAlgebra` (including `schur`, `sqrt` and `log` of matrices), `Mmap` (of files by their path), `Printf`, `Random`, `SHA`, `Statistics`, `UUIDs` (including `uuid4()`), the address types of `Sockets`, and most of `Dates` and `SparseArrays`.
-* **Packages**: code from other packages compiles like Base's. The standard libraries and these packages are a survey kept as tests (`test/packages`), with the cases that don't work listed in the manual: DataStructures.jl, Distributions.jl, Graphs.jl, NaNStatistics.jl, OrderedCollections.jl, Parsers.jl, StatsBase.jl, StaticArrays.jl and MPI.jl.
+* **Packages**: code from other packages compiles like Base's. The standard libraries and these packages are a survey kept as tests (`test/packages`), with the cases that don't work listed in the manual: OrdinaryDiffEq.jl (SciML), UnicodePlots.jl, JuMP.jl with HiGHS, Makie.jl and CairoMakie.jl, DataStructures.jl, Distributions.jl, Graphs.jl, NaNStatistics.jl, OrderedCollections.jl, Parsers.jl, StatsBase.jl, StaticArrays.jl and MPI.jl.
 
 `test/` is the up-to-date list of what is checked, and `test/core/limitations.jl` of what is refused, and what happens then.
 
@@ -143,9 +210,9 @@ Code that we know can't work in a standalone binary is rejected when compiling, 
 
 The main limits, which the manual has in full:
 
-* **Dynamic behavior**: a value of an unregistered type aborts the program when it reaches a dispatch over registered types (compiling says what it did this way, with `JULIA_DEBUG=StaticRuntime`; `add_dispatch_candidates!` adds types). Not supported: types that are only known when the program runs and can't be listed, `eval`, tasks, `Channel`s and threads, and a tuple that has a `Union` as an element and is not removed by inlining (one that a function that is not inlined returns, or that is stored in a collection).
+* **Dynamic behavior**: a value of an unregistered type aborts the program when it reaches a dispatch over registered types (compiling says what it did this way, with `JULIA_DEBUG=StaticRuntime`; `add_dispatch_candidates!` adds types). Not supported: types that are only known when the program runs and can't be listed, `eval`, threads (tasks run to completion, on one thread), and a tuple that has a `Union` as an element and is not removed by inlining (one that a function that is not inlined returns, or that is stored in a collection).
 * **Libraries of Julia that are not libraries of their own**: `Markdown` (its parser needs Julia's), `TOML.parse`, `Unicode.normalize` and `graphemes` (utf8proc), `@time` and `Test`.
-* **Libraries**: by default a program needs its libraries at the paths that they had when compiling (`libraries = :bundle` copies them next to the program; BLAS is not bundled yet). `atexit` functions are not run, and a reduction in MPI with an operator of your own (a C callback into Julia) is not supported.
+* **Libraries**: by default a program needs its libraries at the paths that they had when compiling (`libraries = :bundle` copies them next to the program; BLAS is not bundled yet). A reduction in MPI with an operator of your own (a C callback into Julia) is not supported.
 * **Platforms**: macOS and Linux for the collector; the machine that compiles is the one that is targeted (no cross-compiling, no Windows). Linux is tested in CI (x86 and aarch64), and the libraries there are the least tested.
 * **Memory**: the collector is conservative and the heap is not thread-safe (a library called from several threads needs a lock; on a stack that is not its thread's it frees nothing).
 * **Runtime differences**: at most 256 nested `try` blocks, no stack overflow check (infinite recursion crashes), and uncaught exceptions exit with a short message and no backtrace.

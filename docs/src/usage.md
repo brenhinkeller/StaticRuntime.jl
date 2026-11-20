@@ -144,64 +144,6 @@ Styled strings (`styled"..."`, `AnnotatedString`, `AnnotatedChar`) are written t
 italics, reverse and strikethrough (the terminfo of the terminal is not read), 24-bit color is used when the environment says so (`COLORTERM=truecolor`, ...) and else the closest of the 256 colors, and the underline of a color
 and style is a plain underline. Not supported: `show` of an `AnnotatedString` (`repr`), which shows annotations of the type `Any`.
 
-### Observables
-
-`Observable`s (the package Makie is built on) work with `on`, `map`, `map!` and `onany`, as the package that has them is loaded (`Observables`: an extension of this package). A listener is
-called with a direct call, as the package does it with `invokelatest`, which a program has no use for. Not supported: a connection that is `weak` is not removed when it is collected, and what
-shows a listener (`show` of an `Observable` with its listeners, which asks where the function is defined). The listeners of an `Observable` are kept as functions of the type `Any`: when the
-code compiles, the functions that were given to `on` (and `map`, `onany`) for an `Observable` of a type of value are the ones that are called when an `Observable` of that type is set, and
-no others. So a listener has to compile for the type of the value of the `Observable` that it is given to (as it does in Julia), and an `Observable` that has no listener has no call. A function
-is found where it is given, so it is not found if the listeners are made by something that compiled code does not go through (`register_callback` is what they all go through).
-
-An `Observable` that is made before the program is compiled (and is a constant of it, or is reached from one, as the observables of a scene are) has listeners that the code of the program did not give to `on`: they are
-found when the program is compiled, in its constants, and nothing is changed in them. The code that sets or notifies such an `Observable` is compiled for it, with its listeners as constants, so that what one of them stores
-in another `Observable` is known of that one (a pair of the values of two, in a third). A listener of one is called as it is called in Julia, but for those that use the mouse and the keyboard (which have a module in
-them), which a program has no events for.
-
-### Makie
-
-A `Makie.Scene` that is made before the program is compiled, and is a constant of it (`const scene = Scene(...)`), can be read and changed by the program: its size, the viewport (`scene.viewport[] = Rect2i(...)`), and the inputs of its compute graph
-(`ComputePipeline.update!(scene.compute, viewport = ...)`, or `scene.compute.viewport = ...`), whose changes reach the nodes and the observables of the graph, as the camera. Call `StaticRuntime.prepare!(scene)` once, after the scene is made
-and before compiling: the typed edges get the names of their outputs, what the graph does when its outputs change is made again with the types of its observables, the functions of the inputs get the references of their nodes, a node
-that Makie keeps in a `RefValue{Any}` of a few types of value (`shading`) gets one of the union of them (the listeners of its observables are found when compiling, see [Observables](@ref)). The nodes of a graph are resolved when it is prepared: a node that
-a program resolves for the first time is an error. The observables that the program uses have to be asked for before (`get_observable!(graph, name)`, or `on(f, graph[name])`). Only the latest release of Makie is supported (0.24).
-
-The nodes of a plot in a `Figure` (`plot.attributes`, a graph of its own, which is connected with those of its scene and of the other plots) are read and set through `StaticRuntime.typed_node(graph, key)` and
-`StaticRuntime.typed_input(graph, key)`, made before compiling and kept as constants, after `prepare!` was called on every scene and on the graph of every plot (`prepare!(plot.attributes)`):
-
-```julia
-const fig = Figure(size = (300, 200)); const ax = Axis(fig[1, 1]); const plt = lines!(ax, 1:10, Float64.(1:10) .^ 2)
-# (prepare! of each scene of fig, and of each of their plots' attributes)
-const POSITIONS = StaticRuntime.typed_node(plt.attributes, :positions)
-const YS = StaticRuntime.typed_input(plt.attributes, :arg2)
-function main(argv)
-    YS[] = [i * 10.0 for i in 1:10] # (what `update!(plt.attributes, arg2 = ...)` does)
-    println(POSITIONS[][3])         # (what `plt.attributes[:positions][]` gives)
-    return 0
-end
-```
-
-A read of `graph[key][]` resolves what the node comes from with the types of all the nodes of all the graphs of the figure (the functions of the inputs, the edges, the references of the values: a few hundred types of each), which is
-too large a program; a typed node has what it comes from as a list of steps of their own types (each edge and input that it depends on, in order). A typed input has the graphs that its changes reach, and their listeners.
-The values have the types that they had when they were made: a value of another type (an input that was a `Vector{Float64}` set to a `Vector{Int}`) stops the program with a message. Changing the axis or the layout
-when the program runs (a resize, the limits of an axis) is not yet supported. `typed_node(graph, key; inputs = (YS,))` resolves only what depends on the inputs that are given (the rest is fixed: a change of it stops the program
-with a message that names it), which is a smaller program.
-
-With CairoMakie loaded, a scene or a figure is drawn to a PNG by the program with `StaticRuntime.typed_drawing`, made before compiling and kept as a constant:
-
-```julia
-using CairoMakie
-const fig = Figure(size = (300, 200))
-lines!(Axis(fig[1, 1]), 1:10, Float64.(1:10) .^ 2)
-const DRAWING = StaticRuntime.typed_drawing(fig) # (it prepares the graphs itself)
-main(argv) = (DRAWING("plot.png"); 0)            # (or `DRAWING(screen)`, on a `CairoMakie.Screen` of the scene)
-```
-
-The scene is drawn once when the drawing is made (which adds to the graphs of the plots what drawing them needs), and a figure is made ready as saving it does (the limits of its axes). Each plot is then a step with its own types,
-in the order that CairoMakie draws them. The image is what CairoMakie draws (the PNG is RGB, where `save` writes RGBA). The fonts of the text are in the program (FreeType reads them from the bytes that the figure has).
-`inputs` are the `typed_input`s that the program changes before drawing; what else changes is not drawn (it stops the program, as for `typed_node`), and plots that are added afterwards are not. Lines, line segments,
-scatter, text and polygons are supported; images, heatmaps and shown meshes are not yet.
-
 Limits: containers that contain themselves are not detected (they recurse until the program crashes); the keyword `context` of `sprint` with a pair that is written in the call
 (`sprint(show, v; context = :compact => true)`) works for what is not an array, and is not yet supported for the show of an array (give `IOContext` the stream instead, or a context that is
 a stream); `text/plain` of a `UniformScaling` (`2I`) is not supported (it uses a regular expression); a
