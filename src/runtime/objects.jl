@@ -1,5 +1,6 @@
-# The objects of the process that compiles, as they are in memory: their type tags, what a type object, a symbol, a `svec` is, how far an object extends, which fields of a type are
-# not copied, and why some objects can't be copied at all. What `embedder.jl` and `constants.jl` use to put them into a binary.
+# The objects of the process that compiles, as they are in memory: their type tags, what a type object, a symbol, a
+# `svec` is, how far an object extends, which fields of a type are not copied, and why some objects can't be copied at
+# all. What `embedder.jl` and `constants.jl` use to put them into a binary.
 
 # The type tag of the objects of a type, as Julia writes it before them (in this process, where the
 # code that is compiled has been inferred, so the tags that it compares with are these as well)
@@ -55,10 +56,9 @@ const TYPENAME_TAG = Ref{UInt}(0) # the tag of `TypeName` objects
 
 const SVEC_TAG = Ref{UInt}(0) # the tag of `svec`s
 
-# the type of the Julia object at `addr`, from its type tag, or `nothing` if it doesn't look
-# like an object.
-# The types of the objects that are types (the last is `Union{}`). In Julia 1.14 `Type{T}` is itself an object, of the type `Core.TypeEq`
-# (and `Core.TypeEgal`), that has the type `T` in it.
+# the type of the Julia object at `addr`, from its type tag, or `nothing` if it doesn't look like an object. The types
+# of the objects that are types (the last is `Union{}`). In Julia 1.14 `Type{T}` is itself an object, of the type
+# `Core.TypeEq` (and `Core.TypeEgal`), that has the type `T` in it.
 const TYPE_OBJECT_KINDS = (DataType, UnionAll, Union, Core.TypeofBottom,
                            (isdefined(Core, :TypeEq) ? (Core.TypeEq, Core.TypeEgal) : ())...)
 
@@ -81,26 +81,32 @@ function object_type(addr::UInt)
     T === nothing && return nothing
     T = T::DataType
     addr % 16 == 0 && return T
-    # (the one instance of a type that has no fields, which has no contents, is allocated where the data of an object would be, 8 bytes in
-    # a cell that is 16 aligned: it is the `instance` of its type)
+    # (the one instance of a type that has no fields, which has no contents, is allocated where the data of an object
+    # would be, 8 bytes in a cell that is 16 aligned: it is the `instance` of its type)
     Base.issingletontype(T) && isdefined(T, :instance) &&
         UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), T.instance)) == addr && return T
-    # (a symbol is 8 aligned: asked first, as it is the most common of these by far, and `Core.sizeof` of it, below, is an error, which is slow to make, with a backtrace, for each)
+    # (a symbol is 8 aligned: asked first, as it is the most common of these by far, and `Core.sizeof` of it, below, is
+    # an error, which is slow to make, with a backtrace, for each)
     T === Symbol && return is_symbol(addr) ? T : nothing
-    # (an object of a mutable type that has no data, as `Ref(nothing)` of a type that has no size is, is allocated in the same way, and there are many of them: it is not the `instance` of its type)
+    # (an object of a mutable type that has no data, as `Ref(nothing)` of a type that has no size is, is allocated in
+    # the same way, and there are many of them: it is not the `instance` of its type)
     Base.ismutabletype(T) && definite_size(T) == 0 && return T
     return nothing
 end
 
-# The size of the objects of the type `T`, or `-1` if it has none (the size is in each object: a string, a symbol, a list, a memory), without an error for the types that are known to have none:
-# `Core.sizeof` throws for those, and an error is made with a backtrace, which takes milliseconds (it is asked for thousands of objects when a large constant is embedded)
+# The size of the objects of the type `T`, or `-1` if it has none (the size is in each object: a string, a symbol, a
+# list, a memory), without an error for the types that are known to have none: `Core.sizeof` throws for those, and an
+# error is made with a backtrace, which takes milliseconds (it is asked for thousands of objects when a large constant
+# is embedded)
 function definite_size(T::DataType)
     (T === String || T === Symbol || T === Core.SimpleVector || T <: Core.GenericMemory || T === Module) && return -1
     return try Core.sizeof(T) catch; -1 end
 end
 
-# The types of the tags that were looked at while a program is linked (`type_of_tag` of each, which depends on the tag only, and is ten reads of the memory of the type: a tag is checked once, and not for each of the
-# thousands of objects of its type that a program can embed). Set by `embed_constants!` for as long as it runs, when nothing is collected (so that a tag is the type that it was), and empty otherwise: nothing is kept for another program.
+# The types of the tags that were looked at while a program is linked (`type_of_tag` of each, which depends on the tag
+# only, and is ten reads of the memory of the type: a tag is checked once, and not for each of the thousands of objects
+# of its type that a program can embed). Set by `embed_constants!` for as long as it runs, when nothing is collected (so
+# that a tag is the type that it was), and empty otherwise: nothing is kept for another program.
 const TAG_TYPES = Ref{Union{Nothing,Dict{UInt,Any}}}(nothing)
 
 # The type that a tag is, if it is one that objects can have, or `nothing`
@@ -114,17 +120,17 @@ function type_of_tag(tag::UInt)
     # the tag must point at a `DataType`
     typetag = safe_load(UInt(ptr) - 8)
     (typetag === nothing || typetag & ~UInt(15) != DATATYPE_TAG[]) && return nothing
-    # (a word before an address that is a type tag is not enough: it may be a field that holds the type `DataType`, with the next
-    # field after it, which is not a type. Asking Julia anything about that, as `<:` does, crashes it. So look at what a `DataType`
-    # has: its name is a `TypeName`, and its supertype a `DataType`.)
+    # (a word before an address that is a type tag is not enough: it may be a field that holds the type `DataType`, with
+    # the next field after it, which is not a type. Asking Julia anything about that, as `<:` does, crashes it. So look
+    # at what a `DataType` has: its name is a `TypeName`, and its supertype a `DataType`.)
     is_tagged(p, tag) = (w = safe_load(p - 8); w !== nothing && w & ~UInt(15) == tag)
     TYPENAME_TAG[] == 0 && (TYPENAME_TAG[] = unsafe_load(Ptr{UInt}(UInt(pointer_from_objref(typeof(Int).name)) - 8)) & ~UInt(15))
     name = safe_load(UInt(ptr))
     super = safe_load(UInt(ptr) + 8)
     (name === nothing || super === nothing || name % 16 != 0 || super % 16 != 0) && return nothing
     is_tagged(name, TYPENAME_TAG[]) && is_tagged(super, DATATYPE_TAG[]) || return nothing
-    # (and the lists of its parameters and of the types of its fields are `svec`s: asking Julia for the fields of a type, which
-    # `isconcretetype` and what follows do, reads the length of the list that the word is at)
+    # (and the lists of its parameters and of the types of its fields are `svec`s: asking Julia for the fields of a
+    # type, which `isconcretetype` and what follows do, reads the length of the list that the word is at)
     SVEC_TAG[] == 0 && (SVEC_TAG[] = unsafe_load(Ptr{UInt}(UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Core.svec(1))) - 8)) & ~UInt(15))
     parameters = safe_load(UInt(ptr) + fieldoffset(DataType, 3))
     types = safe_load(UInt(ptr) + fieldoffset(DataType, 4))
@@ -133,7 +139,8 @@ function type_of_tag(tag::UInt)
     (types == 0 || (types % 16 == 0 && is_tagged(types, SVEC_TAG[]))) || return nothing # (null until the fields of the type are looked up)
     T = unsafe_pointer_to_objref(ptr)
     T isa DataType && isconcretetype(T) || return nothing
-    # the objects that are types (`typeof(Int)` is `DataType`) are objects as well, those of these kinds (the last is `Union{}`)
+    # the objects that are types (`typeof(Int)` is `DataType`) are objects as well, those of these kinds (the last is
+    # `Union{}`)
     (T <: Type) && !(T in TYPE_OBJECT_KINDS) && return nothing
     return T
 end
@@ -168,12 +175,13 @@ const SYMBOL_TAG = Ref{UInt}(0) # the tag of symbols
 
 symbol_tag() = (SYMBOL_TAG[] == 0 && (SYMBOL_TAG[] = unsafe_load(Ptr{UInt}(UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), :a)) - 8)) & ~UInt(15)); SYMBOL_TAG[])
 
-# Tables whose places depend on addresses: a `Dict` (or a `Set`) of keys that `hash` by `objectid`, which for a mutable object is its address, and an
-# `IdDict`, which is made with the addresses of the keys, whatever they are. The copy of such a table in the binary has the keys at other
-# addresses, so what it looks up is not found, and no error says so. Such a table is refused.
+# Tables whose places depend on addresses: a `Dict` (or a `Set`) of keys that `hash` by `objectid`, which for a mutable
+# object is its address, and an `IdDict`, which is made with the addresses of the keys, whatever they are. The copy of
+# such a table in the binary has the keys at other addresses, so what it looks up is not found, and no error says so.
+# Such a table is refused.
 
-# whether `objectid(x)` is made from an address: `x` is a mutable object, or has one in a field (as `objectid` of the fields of an immutable
-# struct is the `objectid` of what they refer to)
+# whether `objectid(x)` is made from an address: `x` is a mutable object, or has one in a field (as `objectid` of the
+# fields of an immutable struct is the `objectid` of what they refer to)
 function objectid_by_address(x, depth::Int = 0)
     T = typeof(x)
     # (a type, a module, a symbol and a string have their own hashes, which are not those of their addresses)
@@ -211,8 +219,9 @@ function address_hashed_reason(T::DataType, addr::UInt)
     return nothing
 end
 
-# The global variables that are not `const` of Julia itself (`stdout`, `stderr` and `stdin`, which are the streams of libuv of the process that compiles) are
-# its own state and are not copied into a binary: a program that uses them has its own (see `STDOUT`).
+# The global variables that are not `const` of Julia itself (`stdout`, `stderr` and `stdin`, which are the streams of
+# libuv of the process that compiles) are its own state and are not copied into a binary: a program that uses them has
+# its own (see `STDOUT`).
 function runtime_binding_reason(T::DataType, addr::UInt)
     T === Core.Binding || return nothing
     ref = unsafe_pointer_to_objref(Ptr{Cvoid}(addr)).globalref
@@ -220,19 +229,17 @@ function runtime_binding_reason(T::DataType, addr::UInt)
     return string("the global variable `", ref.mod, ".", ref.name, "`, which is part of the state of the Julia that compiles (for the standard streams: use `STDOUT`, `STDERR` and `STDIN`)")
 end
 
-# the fields of a struct, in memory order, with padding copied as is
-# Fields of the objects that are types, which are not reproduced, as they are the runtime's own and refer to
-# most of what there is: a type refers to the types of its fields (`types`), a type name to the types
-# that were made of it (`cache`), ... Code that reads these in a program that is run gets null, or an
-# empty list, instead.
+# (the fields of a struct, in memory order, with padding copied as is.) Fields of the objects that are types, which are not
+# reproduced, as they are the runtime's own and refer to most of what there is: a type refers to the types of its fields
+# (`types`), a type name to the types that were made of it (`cache`), ... Code that reads these in a program that is run
+# gets null, or an empty list, instead.
 #
-# The same for what a program that has a type only to tell the type of an object from another (its tag, or an `isa`
-# that is made at compile time) does not need: the supertype, the wrapper and the names of the fields. They refer to
-# the supertypes (each with a name, a wrapper, ...), and so most of the objects of a small program are there for
-# them: with these cut, `println(42)` has 4.5 kB of data instead of 12 kB. What the type is called (`nameof`), its
-# parameters, and the tests of types are not affected; but `supertype(T)`, `fieldnames(T)` and `T.name.wrapper` of a type
-# that is only known when the program runs are not available in a program (they were not before: calls like these
-# are dynamic).
+# The same for what a program that has a type only to tell the type of an object from another (its tag, or an `isa` that
+# is made at compile time) does not need: the supertype, the wrapper and the names of the fields. They refer to the
+# supertypes (each with a name, a wrapper, ...), and so most of the objects of a small program are there for them: with
+# these cut, `println(42)` has 4.5 kB of data instead of 12 kB. What the type is called (`nameof`), its parameters, and
+# the tests of types are not affected; but `supertype(T)`, `fieldnames(T)` and `T.name.wrapper` of a type that is only
+# known when the program runs are not available in a program (they were not before: calls like these are dynamic).
 const EMPTY_SVEC = Ref{UInt}(0) # the address of the empty `svec()`
 
 function field_cut(T::Type, name)
@@ -242,13 +249,15 @@ function field_cut(T::Type, name)
         name === :super && return :null # (the chain of supertypes, which a program only has to have if it asks for them)
         return name === :layout ? :egalplan : nothing
     elseif T === Core.Binding
-        # A global variable that is not a `const` is read and written as the `value` of its binding (the code has the address of that field). The binding is
-        # copied with the value that it has when compiling, as a cell that the program can change; what it says of where it is (its module, the lists of
-        # what depends on it, the partitions that say what it is) is the runtime's own and refers to modules, which are not in the binary.
+        # A global variable that is not a `const` is read and written as the `value` of its binding (the code has the
+        # address of that field). The binding is copied with the value that it has when compiling, as a cell that the
+        # program can change; what it says of where it is (its module, the lists of what depends on it, the partitions
+        # that say what it is) is the runtime's own and refers to modules, which are not in the binary.
         name in (:globalref, :partitions, :backedges, :owner, :ty) && return :null
     elseif T <: Base.OncePerProcess
-        # A value that is made when the program first asks for it, and whether that has been done: the program starts as a package image does (Julia
-        # sets these back when it saves one), so what the initializer does (setting up a library) is done by the program, and not taken from this process.
+        # A value that is made when the program first asks for it, and whether that has been done: the program starts as
+        # a package image does (Julia sets these back when it saves one), so what the initializer does (setting up a
+        # library) is done by the program, and not taken from this process.
         name === :value && return :null
         name === :state && return :zero
         name === :lock && return :null # (a lock has a task and a condition in it: the program has one task, and the methods of `lock` here do nothing)
@@ -261,17 +270,20 @@ function field_cut(T::Type, name)
     return nothing
 end
 
-# (`n` structs of the type, one after the other, as the elements of a `Memory` are)
-# whether a pointer is an address in this process, as opposed to a number that stands for something (MPICH's `MPI_STATUS_IGNORE` is 1, and `MPI_IN_PLACE` is -1): the
-# addresses of memory are not small numbers, and not above the 48 bits of the address space
+# (`n` structs of the type, one after the other, as the elements of a `Memory` are) whether a pointer is an address in
+# this process, as opposed to a number that stands for something (MPICH's `MPI_STATUS_IGNORE` is 1, and `MPI_IN_PLACE`
+# is -1): the addresses of memory are not small numbers, and not above the 48 bits of the address space
 is_process_address(p::UInt) = UInt(0x10000) <= p < (UInt(1) << 48)
 
-# (a `Regex`, a `LazyLibrary` and the fields that a package says are made again (`remade_by`) are made again when the program runs, so that those are not worth a warning.) The warning is said when the program is accepted
-# (`say_dangling_pointers`), and not when it is found: a program that is refused is not run, so what it would have had null is of no concern
+# (a `Regex`, a `LazyLibrary` and the fields that a package says are made again (`remade_by`) are made again when the
+# program runs, so that those are not worth a warning.) The warning is said when the program is accepted
+# (`say_dangling_pointers`), and not when it is found: a program that is refused is not run, so what it would have had
+# null is of no concern
 function warn_dangling_pointer(e, T, name::Symbol)
     (T <: Regex && name === :regex) && return
     (T <: Libdl.LazyLibrary && name === :handle) && return
-    # (a field that the program makes again where it is null, which its package says: see "Fields that are made again" in boxes.jl)
+    # (a field that the program makes again where it is null, which its package says: see "Fields that are made again"
+    # in boxes.jl)
     (try Base.invokelatest(getfield(parentmodule(@__MODULE__), :remade_by), T, Val(name)) catch; nothing end) === nothing || return
     push!(e.dangling, (T, name))
     return
@@ -289,8 +301,8 @@ end
 # at fields of an object (e.g., the data of a string)
 function object_extent(T::DataType, base::UInt)
     T === String && return 8 + unsafe_load(Ptr{Int}(base)) + 1
-    # a symbol is { left, right, hash, name, NUL }: the code reads its hash (`objectid`, so `hash` and a `Dict` of symbols) and its
-    # name (`string`) with an address in it, that of the field
+    # a symbol is { left, right, hash, name, NUL }: the code reads its hash (`objectid`, so `hash` and a `Dict` of
+    # symbols) and its name (`string`) with an address in it, that of the field
     T === Symbol && return 24 + Int(ccall(:strlen, Csize_t, (Ptr{UInt8},), Ptr{UInt8}(base + 24))) + 1
     if T <: Core.GenericMemory
         ET = eltype(T)
@@ -302,20 +314,20 @@ function object_extent(T::DataType, base::UInt)
     return max(definite_size(T), 0) # no definite size: not something we embed
 end
 
-# The objects that `addr` may point into, as (base address, offset of `addr` in it): constants can
-# point at fields of an object (e.g., the data of a string). Whether there is an object at an
-# address is judged by its type tag, the word before it, and an address that is not that of an
-# object may look like one by chance. So there can be several candidates, only one of which is
-# right, and the caller needs to try them in order: the one closest to `addr` first, since a
-# false one is usually further away. (The false ones that are tried usually fail to be
-# embedded: their contents are not valid.)
-# how far before an address the object that it is in can start: a field of a struct of many fields (a `SphericalHe` is 392 bytes)
+# The objects that `addr` may point into, as (base address, offset of `addr` in it): constants can point at fields of an
+# object (e.g., the data of a string). Whether there is an object at an address is judged by its type tag, the word
+# before it, and an address that is not that of an object may look like one by chance. So there can be several
+# candidates, only one of which is right, and the caller needs to try them in order: the one closest to `addr` first,
+# since a false one is usually further away. (The false ones that are tried usually fail to be embedded: their contents
+# are not valid.) how far before an address the object that it is in can start: a field of a struct of many fields (a
+# `SphericalHe` is 392 bytes)
 const MAX_INTERIOR = 2048
 
 function find_objects(addr::UInt)
     candidates = Tuple{UInt,Int}[]
-    # an address that is the start of an object (a type, say) is that object: an object that has it in its data, nearer or farther, would
-    # be another that something that looks like one found (the tag of the next, or a number in a field)
+    # an address that is the start of an object (a type, say) is that object: an object that has it in its data, nearer
+    # or farther, would be another that something that looks like one found (the tag of the next, or a number in a
+    # field)
     addr % 16 == 0 && object_type(addr) !== nothing && return [(addr, 0)]
     for delta in Int(addr % 8):8:MAX_INTERIOR # (objects are aligned: `addr` may be in the middle of the data of one)
         base = addr - delta

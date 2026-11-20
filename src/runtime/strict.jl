@@ -1,5 +1,6 @@
-# Strict mode: what a program that needs libjulia (or the addresses of objects of the process that compiled it) is refused with, and what it does if it is compiled anyway (`strict = false`):
-# calls that abort, with a message that says what could not be done.
+# Strict mode: what a program that needs libjulia (or the addresses of objects of the process that compiled it) is
+# refused with, and what it does if it is compiled anyway (`strict = false`): calls that abort, with a message that says
+# what could not be done.
 
 # Runtime functions that throw. Without unwinding, the best we can do is to report and exit.
 # Their bodies are generated from the declaration, since we don't care about the arguments.
@@ -38,10 +39,12 @@ function define_aborting!(mod::LLVM.Module, fn::LLVM.Function, msg::AbstractStri
     return
 end
 
-# Calls of runtime functions that have nothing to do in a program, and are dropped (instead of refusing the code that has them):
-# * the construction of an `Expr` whose result is not used (`Expr(:meta, :noinline)` is written as a statement in some packages, as a hint that Julia reads from the code, and is not removed
-#   when it is compiled);
-# * the warning about a deprecated binding (`Base.@deprecate_binding`), which like `Base.depwarn` (see `src/overrides/base.jl`) is not shown by a program.
+# Calls of runtime functions that have nothing to do in a program, and are dropped (instead of refusing the code that
+# has them):
+# * the construction of an `Expr` whose result is not used (`Expr(:meta, :noinline)` is written as a statement in some
+#   packages, as a hint that Julia reads from the code, and is not removed when it is compiled);
+# * the warning about a deprecated binding (`Base.@deprecate_binding`), which like `Base.depwarn` (see
+#   `src/overrides/system.jl`) is not shown by a program.
 const DROPPED_WHEN_UNUSED = ("jl_f__expr", "ijl_f__expr")
 const DROPPED_ALWAYS = ("jl_binding_depwarn", "ijl_binding_depwarn")
 
@@ -63,7 +66,8 @@ function drop_ignorable_calls!(mod::LLVM.Module)
     return !isempty(dead)
 end
 
-# the name of a function of the module as the Julia function: the functions of our method table are named for where the method is (`__overlay__globalref___julia__StaticRuntime__method_table_____Base__inert_map_____2`)
+# the name of a function of the module as the Julia function: the functions of our method table are named for where the
+# method is (`__overlay__globalref___julia__StaticRuntime__method_table_____Base__inert_map_____2`)
 function readable_name(name::AbstractString)
     name = replace(name, r"^julia_" => "", r"_\d+$" => "")
     m = match(r"^__overlay__globalref___julia__StaticRuntime__method_table_____(.*?)__inert_(.*?)_+\d*$", name)
@@ -89,8 +93,9 @@ function define_aborting_functions!(mod::LLVM.Module)
     return changed
 end
 
-# Where in the Julia code a call of the runtime is: the source lines (the innermost first, and what it was inlined into), the types of the arguments of the function that has it (an argument of the
-# type `<unknown type>` is one that the compiler did not know the type of), and the functions that lead to it from the entry point of the program
+# Where in the Julia code a call of the runtime is: the source lines (the innermost first, and what it was inlined
+# into), the types of the arguments of the function that has it (an argument of the type `<unknown type>` is one that
+# the compiler did not know the type of), and the functions that lead to it from the entry point of the program
 struct DynamicSite
     function_name::String
     signature::String
@@ -176,7 +181,8 @@ function path_to_entry(callers::Dict{String,Vector{String}}, name::String; limit
     return [readable_name(n) for n in path]
 end
 
-# the places that call the runtime functions of `found` (see `dynamic_runtime_calls`): at most `limit` for each, and the first of each function
+# the places that call the runtime functions of `found` (see `dynamic_runtime_calls`): at most `limit` for each, and the
+# first of each function
 function dynamic_call_sites(mod::LLVM.Module, found; limit::Int = 4)
     sites = Pair{String,Vector{DynamicSite}}[]
     isempty(found) && return sites
@@ -223,7 +229,8 @@ UnsupportedCodeError(dynamic, pointers) = UnsupportedCodeError(dynamic, pointers
 UnsupportedCodeError(dynamic, pointers, globals) = UnsupportedCodeError(dynamic, pointers, globals, Pair{String,Vector{DynamicSite}}[], String[])
 UnsupportedCodeError(dynamic, pointers, globals, sites) = UnsupportedCodeError(dynamic, pointers, globals, sites, String[])
 
-# (for the message: the object that each address is in, its type, and why the embedder could not copy it, which it said when it tried: `failures`, by the address of the object)
+# (for the message: the object that each address is in, its type, and why the embedder could not copy it, which it said
+# when it tried: `failures`, by the address of the object)
 function describe_unresolved(failures::Dict{UInt,String}, addresses)
     found = String[]
     bases = Set{UInt}() # (each object once, for all the addresses in it)
@@ -243,13 +250,17 @@ end
 
 ## Code that is only on the way to an error
 #
-# A call that needs the runtime (or an address of the process that compiled the program) that is only reached on the way to a `throw` is not a reason to refuse the program: it is, as often as not,
-# the message of an error (`string` of something whose type is not known, a method looked up to say which one it was, `show` of a type), or the `MethodError` that the compiler found for
-# a call that it can only fail. Code that is not in such a place is what strict mode is for. Where the call is in such a block (one that has no way back to the code that goes on, but the
-# `unreachable` of a call that does not return) it is replaced by one that stops the program with a message that says what it was: the program is the same until it gets there.
-# What it prints is not what Julia would (an exception that is caught is not caught: the program stops), which is the cost of compiling the code at all.
+# A call that needs the runtime (or an address of the process that compiled the program) that is only reached on the way
+# to a `throw` is not a reason to refuse the program: it is, as often as not, the message of an error (`string` of
+# something whose type is not known, a method looked up to say which one it was, `show` of a type), or the `MethodError`
+# that the compiler found for a call that it can only fail. Code that is not in such a place is what strict mode is for.
+# Where the call is in such a block (one that has no way back to the code that goes on, but the `unreachable` of a call
+# that does not return) it is replaced by one that stops the program with a message that says what it was: the program
+# is the same until it gets there. What it prints is not what Julia would (an exception that is caught is not caught:
+# the program stops), which is the cost of compiling the code at all.
 
-# the blocks of a function that have no way back to the code that goes on: they only lead to `unreachable` (a `throw`, or an `exit`: nearly always an error). The least fixed point: a loop that never ends is not one
+# the blocks of a function that have no way back to the code that goes on: they only lead to `unreachable` (a `throw`,
+# or an `exit`: nearly always an error). The least fixed point: a loop that never ends is not one
 function error_blocks(fn::LLVM.Function)
     errors = Set{LLVM.BasicBlock}()
     blocks = collect(LLVM.blocks(fn))
@@ -271,8 +282,10 @@ function error_blocks(fn::LLVM.Function)
     return errors
 end
 
-# the functions that are only called from such blocks (see `error_blocks`), or from functions that are such, or are in `seeds` to begin with (so the whole of one is on the way to an error: the part of an error message that is made by a function
-# of its own, as `print` of a value, is there only for the message). Stubbing starts from none (a function that is only rarely run, which Julia marks `cold`, can return: what is replaced has to be on a path that never does); the
+# the functions that are only called from such blocks (see `error_blocks`), or from functions that are such, or are in
+# `seeds` to begin with (so the whole of one is on the way to an error: the part of an error message that is made by a
+# function of its own, as `print` of a value, is there only for the message). Stubbing starts from none (a function that
+# is only rarely run, which Julia marks `cold`, can return: what is replaced has to be on a path that never does); the
 # optimization for size of the code that is rarely run starts from those (see `cold_functions`)
 function error_functions(mod::LLVM.Module, cache::Dict{LLVM.Function,Set{LLVM.BasicBlock}}; seeds = ())
     errors = Set{LLVM.Function}(seeds)
@@ -300,7 +313,9 @@ function error_functions(mod::LLVM.Module, cache::Dict{LLVM.Function,Set{LLVM.Ba
     return errors
 end
 
-# the calls of a function, when all of its uses are calls (or the slot of a pointer that is only loaded and called, as the functions of a `ccall` of a library are; none, if the slot is not loaded: nothing calls it); `nothing` if it is used otherwise: it can be called from anywhere
+# the calls of a function, when all of its uses are calls (or the slot of a pointer that is only loaded and called, as
+# the functions of a `ccall` of a library are; none, if the slot is not loaded: nothing calls it); `nothing` if it is
+# used otherwise: it can be called from anywhere
 function call_sites(fn::LLVM.Function)
     list = LLVM.Instruction[]
     for use in LLVM.uses(fn)
@@ -325,7 +340,8 @@ function call_sites(fn::LLVM.Function)
     return list
 end
 
-# the instructions that strict mode refuses, and why: calls of the runtime that needs the Julia runtime, and the addresses of the objects of this process
+# the instructions that strict mode refuses, and why: calls of the runtime that needs the Julia runtime, and the
+# addresses of the objects of this process
 function unsupported_instructions(mod::LLVM.Module; allow = ())
     found = Tuple{LLVM.Instruction,String}[]
     names = String[first(d) for d in DYNAMIC_RUNTIME_FUNCTIONS]
@@ -349,7 +365,8 @@ function unsupported_instructions(mod::LLVM.Module; allow = ())
     return found
 end
 
-# Replace the unsupported instructions that are only on the way to an error (a `throw`, or an `exit`) by a stop with a message: what each was
+# Replace the unsupported instructions that are only on the way to an error (a `throw`, or an `exit`) by a stop with a
+# message: what each was
 function stub_error_paths!(mod::LLVM.Module; allow = ())
     stubbed = String[]
     cache = Dict{LLVM.Function,Set{LLVM.BasicBlock}}()
@@ -364,8 +381,9 @@ function stub_error_paths!(mod::LLVM.Module; allow = ())
         fn = LLVM.parent(bb)
         fn in error_fns || bb in get!(() -> error_blocks(fn), cache, fn) || continue
         where_ = readable_name(LLVM.name(fn))
-        # (where in the Julia code: the debug information is there until the program is accepted, see `strip` in `link_runtime!`. An instruction in a function that has none, as the thunk of a `ccall` that Julia makes,
-        # is where that function is called)
+        # (where in the Julia code: the debug information is there until the program is accepted, see `strip` in
+        # `link_runtime!`. An instruction in a function that has none, as the thunk of a `ccall` that Julia makes, is
+        # where that function is called)
         frames = debug_frames(inst)
         if isempty(frames)
             for call in something(call_sites(fn), LLVM.Instruction[])
@@ -388,7 +406,8 @@ function stub_error_paths!(mod::LLVM.Module; allow = ())
     return stubbed
 end
 
-# the names (with their modules) of the global variables that are not `const` that the code reads or writes: their bindings are in the binary
+# the names (with their modules) of the global variables that are not `const` that the code reads or writes: their
+# bindings are in the binary
 function nonconst_globals(mod::LLVM.Module)
     names = String[]
     for g in LLVM.globals(mod)
@@ -490,7 +509,8 @@ function dynamic_runtime_calls(mod::LLVM.Module; allow = ())
     return found
 end
 
-# the names of the functions of libjulia (`ijl_` and `jl_`, but not the intrinsics of Julia's code generator, which are `julia.`)
+# the names of the functions of libjulia (`ijl_` and `jl_`, but not the intrinsics of Julia's code generator, which are
+# `julia.`)
 is_libjulia_function(name::AbstractString) = startswith(name, "ijl_") || startswith(name, "jl_")
 
 # Define the runtime functions for dynamic behavior as ones that abort, as the ones that are
@@ -552,7 +572,8 @@ function unresolved_pointer_uses(mod::LLVM.Module; instructions = nothing, addre
                 n = convert(UInt, op)
                 n >= 0x10000 && n % 16 == 0 && object_type(n) === DataType ? n : nothing
             elseif op isa LLVM.ConstantInt && inst isa LLVM.CallInst && LLVM.width(LLVM.value_type(op)) == 64
-                # an address that is passed as a number (see `embed_address_arguments!`), if it is that of an object, and is not used as data
+                # an address that is passed as a number (see `embed_address_arguments!`), if it is that of an object,
+                # and is not used as data
                 n = convert(UInt, op)
                 args = LLVM.arguments(inst)
                 used_as_address = any(i -> args[i] == op && !integer_operand_is_data(inst, i), eachindex(args))

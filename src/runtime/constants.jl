@@ -1,5 +1,6 @@
-# Finding the constants of a module (`inttoptr` of an address of this process, and the numbers that are the addresses of types), and putting what they refer to in the binary
-# (`embed_constants!`): the objects (`embedder.jl`), the types and the tests of the type of an object (`isa`, `typeof`, the `switch`es on tags), and the `Symbol`s of the program.
+# Finding the constants of a module (`inttoptr` of an address of this process, and the numbers that are the addresses of
+# types), and putting what they refer to in the binary (`embed_constants!`): the objects (`embedder.jl`), the types and
+# the tests of the type of an object (`isa`, `typeof`, the `switch`es on tags), and the `Symbol`s of the program.
 
 # all `inttoptr (i64 N to ptr)` constants used by instructions of `mod`, by address
 function inttoptr_constants(mod::LLVM.Module)
@@ -17,12 +18,13 @@ function inttoptr_constants(mod::LLVM.Module)
     return consts
 end
 
-# The `inttoptr` constants in an operand: it is one, or has them in it, when it is an address that is an offset
-# from one (`getelementptr (i8, inttoptr (...), -8)`: the tag of an object is 8 bytes before it). Replacing
-# the `inttoptr` itself, and not the expression it is a part of, keeps the arithmetic as it is.
-# (Or in a constant that is made of others: `store <2 x ptr> <ptr inttoptr (...), ptr inttoptr (...)>`, which the optimizer makes of two stores of pointers when the processor has
-# vector registers for them (x86: the SLP vectorizer; ARM did not), and a constant struct or array. An address that was only in one of those was not found, and stayed as the
-# address that it was in the process that compiled: a pointer to nothing in the program.)
+# The `inttoptr` constants in an operand: it is one, or has them in it, when it is an address that is an offset from one
+# (`getelementptr (i8, inttoptr (...), -8)`: the tag of an object is 8 bytes before it). Replacing the `inttoptr`
+# itself, and not the expression it is a part of, keeps the arithmetic as it is. (Or in a constant that is made of
+# others: `store <2 x ptr> <ptr inttoptr (...), ptr inttoptr (...)>`, which the optimizer makes of two stores of
+# pointers when the processor has vector registers for them (x86: the SLP vectorizer; ARM did not), and a constant
+# struct or array. An address that was only in one of those was not found, and stayed as the address that it was in the
+# process that compiled: a pointer to nothing in the program.)
 function inttoptr_nodes(@nospecialize(op), found = LLVM.ConstantExpr[])
     (op isa LLVM.ConstantExpr || op isa LLVM.ConstantAggregate) || return found
     occursin("inttoptr", string(op)) || return found
@@ -36,11 +38,13 @@ function inttoptr_nodes(@nospecialize(op), found = LLVM.ConstantExpr[])
     return found
 end
 
-# A number in the code is an address of an object of this process only if it is used as one. A constant that is a count or a seed can be the
-# address of an object (in a process where the memory that Julia has is at low addresses, as on Linux when the executable is not position
-# independent: that of `115938146` was a symbol), and then taking it for one gives a program that quietly computes with another number. So a
-# number that is *data* is never taken for an address: an operand of arithmetic (`add`, `shl`, `xor`, ...), what a function returns, and an argument
-# in the `...` of a function with a variable number of them (`printf("%ld", n)`); what is compared (`icmp`) or stored, as the type tags are, is not.
+# A number in the code is an address of an object of this process only if it is used as one. A constant that is a count
+# or a seed can be the address of an object (in a process where the memory that Julia has is at low addresses, as on
+# Linux when the executable is not position independent: that of `115938146` was a symbol), and then taking it for one
+# gives a program that quietly computes with another number. So a number that is *data* is never taken for an address:
+# an operand of arithmetic (`add`, `shl`, `xor`, ...), what a function returns, and an argument in the `...` of a
+# function with a variable number of them (`printf("%ld", n)`); what is compared (`icmp`) or stored, as the type tags
+# are, is not.
 const ARITHMETIC_OPCODES = Set([LLVM.API.LLVMAdd, LLVM.API.LLVMSub, LLVM.API.LLVMMul, LLVM.API.LLVMUDiv, LLVM.API.LLVMSDiv, LLVM.API.LLVMURem,
                                 LLVM.API.LLVMSRem, LLVM.API.LLVMShl, LLVM.API.LLVMLShr, LLVM.API.LLVMAShr, LLVM.API.LLVMAnd, LLVM.API.LLVMOr, LLVM.API.LLVMXor])
 
@@ -54,12 +58,13 @@ function integer_operand_is_data(inst::LLVM.Instruction, i::Int)
     return false
 end
 
-# An address that a call is given as a number (`i64`): a `ccall` passes the `Cstring` of a literal to a C function like that
-# (`ccall(:strlen, Csize_t, (Cstring,), "hello")`), as the number of the address of the string. The object is in the binary, and the
-# number is that of its address there.
-# What a number that is the argument of a call can be the address of: the contents of a `String` (what a `Cstring` is made from) or of a `Memory` (what
-# `pointer` of an array is): the pointer that is passed is to the data, and not to the length that is before it, nor to any other kind of object (a number
-# that is in a symbol, a type or a struct of this process is more likely a number, see `integer_operand_is_data`)
+# An address that a call is given as a number (`i64`): a `ccall` passes the `Cstring` of a literal to a C function like
+# that (`ccall(:strlen, Csize_t, (Cstring,), "hello")`), as the number of the address of the string. The object is in
+# the binary, and the number is that of its address there. What a number that is the argument of a call can be the
+# address of: the contents of a `String` (what a `Cstring` is made from) or of a `Memory` (what `pointer` of an array
+# is): the pointer that is passed is to the data, and not to the length that is before it, nor to any other kind of
+# object (a number that is in a symbol, a type or a struct of this process is more likely a number, see
+# `integer_operand_is_data`)
 function address_argument_objects(n::UInt)
     return [(base, delta) for (base, delta) in find_objects(n) if
             (object_type(base) === String && delta >= 8) || (object_type(base) === Symbol && delta >= 24) ||
@@ -104,8 +109,9 @@ function embed_address_arguments!(e::ObjectEmbedder)
     return changed
 end
 
-# The number of a constant that is a 64 bit integer: `i64 N`, or, where the code was not optimized as far (`--check-bounds=yes`), the
-# `ptrtoint (ptr inttoptr (i64 N to ptr) to i64)` that it is made of. `nothing` if it is neither.
+# The number of a constant that is a 64 bit integer: `i64 N`, or, where the code was not optimized as far
+# (`--check-bounds=yes`), the `ptrtoint (ptr inttoptr (i64 N to ptr) to i64)` that it is made of. `nothing` if it is
+# neither.
 function number_of_address_constant(op)
     if op isa LLVM.ConstantInt
         LLVM.width(LLVM.value_type(op)) == 64 || return nothing
@@ -141,9 +147,9 @@ function type_number_constants(mod::LLVM.Module)
 end
 
 # Code names a builtin type (the `Int64` in an `InexactError`, for instance) by loading its entry of the table of the
-# types of the small tags, `jl_small_typeof`, at a fixed offset. When that is all that the code does with the table, each
-# such load is the object of that one type, and the table itself (of which the objects of all of the types, and what they
-# refer to, would be in the binary) is not needed.
+# types of the small tags, `jl_small_typeof`, at a fixed offset. When that is all that the code does with the table,
+# each such load is the object of that one type, and the table itself (of which the objects of all of the types, and
+# what they refer to, would be in the binary) is not needed.
 function fold_small_typeof_loads!(e::ObjectEmbedder)
     mod = e.mod
     globals = LLVM.globals(mod)
@@ -221,8 +227,9 @@ function define_small_typeof!(e::ObjectEmbedder)
     return true
 end
 
-# Code boxes an `Int8` or `UInt8` by indexing the table of the boxed values of libjulia (`jl_boxed_int8_cache`, `jl_boxed_uint8_cache`: 256 objects
-# each) instead of allocating one. The tables are made of the objects in the binary, when the code uses them.
+# Code boxes an `Int8` or `UInt8` by indexing the table of the boxed values of libjulia (`jl_boxed_int8_cache`,
+# `jl_boxed_uint8_cache`: 256 objects each) instead of allocating one. The tables are made of the objects in the binary,
+# when the code uses them.
 function define_boxed_caches!(e::ObjectEmbedder)
     mod = e.mod
     changed = false
@@ -350,11 +357,12 @@ end
 
 embed_constants!(mod::LLVM.Module) = embed_constants!(ObjectEmbedder(mod, Dict()))
 
-# the prefix of the names of the globals that stand for the types that code refers to while it is optimized (see `src/tags.jl`)
+# the prefix of the names of the globals that stand for the types that code refers to while it is optimized (see
+# `src/llvm/tags.jl`)
 const TYPE_PLACEHOLDER = "static_type_"
 
-# The address of the object that a constant stands for: `inttoptr (i64 N to ptr)` (possibly with an offset), or the global that stands for a
-# type while the code is optimized (see `TYPE_PLACEHOLDER`); `nothing` if it is neither
+# The address of the object that a constant stands for: `inttoptr (i64 N to ptr)` (possibly with an offset), or the
+# global that stands for a type while the code is optimized (see `TYPE_PLACEHOLDER`); `nothing` if it is neither
 function constant_object_address(op)
     if op isa LLVM.GlobalVariable
         name = LLVM.name(op)
@@ -373,8 +381,8 @@ function constant_object_address(op)
     return nothing
 end
 
-# The objects of the types that were globals while the code was optimized: the object that is in the binary, or the number of
-# the type in this process (which is what it was) if it can't be there
+# The objects of the types that were globals while the code was optimized: the object that is in the binary, or the
+# number of the type in this process (which is what it was) if it can't be there
 function resolve_type_placeholders!(e::ObjectEmbedder)
     mod = e.mod
     placeholders = [g for g in LLVM.globals(mod) if startswith(LLVM.name(g), TYPE_PLACEHOLDER)]
@@ -394,7 +402,8 @@ function resolve_type_placeholders!(e::ObjectEmbedder)
     return true
 end
 
-# The numbers of the addresses of types, where code compares and stores them as the tags of objects: the objects of the types are in the binary, and the number is that of the address of the object there
+# The numbers of the addresses of types, where code compares and stores them as the tags of objects: the objects of the
+# types are in the binary, and the number is that of the address of the object there
 function embed_type_numbers!(e::ObjectEmbedder)
     mod = e.mod
     changed = false
@@ -415,8 +424,10 @@ function embed_type_numbers!(e::ObjectEmbedder)
     return changed
 end
 
-# The objects that the code is known to refer to (the objects with a key, that code was made for: see "Code for each object" in src/inference/objects.jl), as (address, size): an address in one of them is in it, before
-# any object that a look at the memory before the address finds (the code of such an object reads its fields at their addresses: what a look finds there may be a number in the data that looks like the tag of a type)
+# The objects that the code is known to refer to (the objects with a key, that code was made for: see
+# src/inference/object_calls.jl), as (address, size): an address in one of them is in it, before any object that a look
+# at the memory before the address finds (the code of such an object reads its fields at their addresses: what a look
+# finds there may be a number in the data that looks like the tag of a type)
 known_object_ranges(objects) = Tuple{UInt,Int}[(UInt(pointer_from_objref(x)), max(object_extent(typeof(x), UInt(pointer_from_objref(x))), 8)) for x in objects if ismutable(x) && typeof(x) isa DataType]
 
 function embed_constants!(e::ObjectEmbedder; known_objects::AbstractVector = Any[])
@@ -439,8 +450,9 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
     changed = fold_small_typeof_loads!(e) || define_small_typeof!(e)
     changed |= define_boxed_caches!(e)
     consts = inttoptr_constants(mod)
-    # (an object that the code refers to by its address and that is larger than what a look before an address goes back (`MAX_INTERIOR`): the code reads its fields at their addresses, as for the objects with a key. A
-    # large immutable constant, a `typed_drawing` of a figure, is one)
+    # (an object that the code refers to by its address and that is larger than what a look before an address goes back
+    # (`MAX_INTERIOR`): the code reads its fields at their addresses, as for the objects with a key. A large immutable
+    # constant, a `typed_drawing` of a figure, is one)
     for (addr, _) in consts
         T = object_type(addr)
         T isa DataType || continue
@@ -460,10 +472,12 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
             catch err
                 if err isa EmbedFailure
                     isempty(err.reason) || @debug "Cannot embed an object" reason = err.reason
-                    # (`STATIC_RUNTIME_TRACE=embed`: the whole path, from what can not be copied to the object that was asked for, as a debug message cuts it)
+                    # (`STATIC_RUNTIME_TRACE=embed`: the whole path, from what can not be copied to the object that was
+                    # asked for, as a debug message cuts it)
                     get(ENV, "STATIC_RUNTIME_TRACE", "") == "embed" && !isempty(err.reason) && println(stderr, "[static-runtime] cannot embed: ", err.reason)
                 else
-                    # (what the exception says, and not the exception: it may have the pieces of the object in it, which are too large to write, and may be objects that are not valid any more)
+                    # (what the exception says, and not the exception: it may have the pieces of the object in it, which
+                    # are too large to write, and may be objects that are not valid any more)
                     summary = err isa ErrorException ? err.msg : err isa MethodError ? string("MethodError: ", err.f, " with ", join(string.(typeof.(err.args)), ", ")) : string(typeof(err))
                     @debug "Could not embed object" address=base type=object_type(base) error = first(summary, 500) where_ = first(string(stacktrace(catch_backtrace())[1:min(4, end)]), 600)
                 end
@@ -492,11 +506,14 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
     return changed
 end
 
-# The alignment that the objects that were embedded really have (a global of `EMBED_ALIGN`, and the object 16 bytes into it), and what the code says it is. The optimizer (that ran before the objects were
-# embedded) read the alignment of a pointer from the bits of the address that it was: `inttoptr 0x162293e80` has 7 zero bits, so its loads are `align 128` (and a `<4 x i64>` that the SLP vectorizer made of
-# four loads is `align 32`: `vmovaps ymm`, which faults on an address that is not a multiple of 32). The address was one of an object in the process that compiled, which is aligned as the allocator
-# chose, so which loads were affected changed from run to run, and the program only crashed on a processor that has the wide instructions. The accesses to what was embedded are given the alignment of
-# what they are in the binary.
+# The alignment that the objects that were embedded really have (a global of `EMBED_ALIGN`, and the object 16 bytes into
+# it), and what the code says it is. The optimizer (that ran before the objects were embedded) read the alignment of a
+# pointer from the bits of the address that it was: `inttoptr 0x162293e80` has 7 zero bits, so its loads are `align 128`
+# (and a `<4 x i64>` that the SLP vectorizer made of four loads is `align 32`: `vmovaps ymm`, which faults on an address
+# that is not a multiple of 32). The address was one of an object in the process that compiled, which is aligned as the
+# allocator chose, so which loads were affected changed from run to run, and the program only crashed on a processor
+# that has the wide instructions. The accesses to what was embedded are given the alignment of what they are in the
+# binary.
 function embedded_alignment(v)
     offset = 0
     while true
@@ -507,7 +524,8 @@ function embedded_alignment(v)
         elseif v isa LLVM.GetElementPtrInst || (v isa LLVM.ConstantExpr && LLVM.opcode(v) == LLVM.API.LLVMGetElementPtr)
             ops = LLVM.operands(v)
             length(ops) == 2 || return nothing # (indexes into a type that has fields: not made by the embedder)
-            # (an index that is not a constant is a multiple of the size of what it indexes, which the alignment that the optimizer found already took into account)
+            # (an index that is not a constant is a multiple of the size of what it indexes, which the alignment that
+            # the optimizer found already took into account)
             if ops[2] isa LLVM.ConstantInt
                 T = LLVM.LLVMType(LLVM.API.LLVMGetGEPSourceElementType(v))
                 T isa LLVM.IntegerType || return nothing
@@ -552,7 +570,8 @@ function clamp_embedded_alignment!(mod::LLVM.Module)
     return changed
 end
 
-# whether a name is a plain ASCII identifier, which is written `:name` by `show` (the same test is made for the symbols of the program, in `show.jl`)
+# whether a name is a plain ASCII identifier, which is written `:name` by `show` (the same test is made for the symbols
+# of the program, in `printing.jl`)
 function plain_symbol_name(name)
     isempty(name) && return false
     for (i, c) in enumerate(name)
@@ -563,8 +582,8 @@ function plain_symbol_name(name)
     return true
 end
 
-# The symbols of the binary: (name, its global, the address in this process), sorted by name (by the bytes, the shorter first, as
-# `compare_symbol_name` in `symbols.jl` does)
+# The symbols of the binary: (name, its global, the address in this process), sorted by name (by the bytes, the shorter
+# first, as `compare_symbol_name` in `symbols.jl` does)
 function embedded_symbol_globals(mod::LLVM.Module)
     found = Tuple{Vector{UInt8},LLVM.GlobalVariable,UInt}[]
     for g in LLVM.globals(mod)
@@ -578,7 +597,8 @@ function embedded_symbol_globals(mod::LLVM.Module)
     return sort!(found; by = first)
 end
 
-# Replace the reference (a declaration) that the code has to a list of symbols by the list: a constant `{ count, words... }`
+# Replace the reference (a declaration) that the code has to a list of symbols by the list: a constant `{ count,
+# words... }`
 function define_symbol_list!(mod::LLVM.Module, name::AbstractString, words::Vector{LLVM.Constant})
     old = get(LLVM.globals(mod), name, nothing)
     old === nothing && return false
@@ -594,17 +614,19 @@ end
 
 symbol_address(g) = LLVM.const_ptrtoint(LLVM.const_gep(LLVM.Int8Type(), g, [i64(EMBED_HEADER)]), LLVM.Int64Type())
 
-# The symbols that are in the binary, as the list that `Symbol(string)` looks in (see `symbols.jl`): { count, the address of each symbol },
-# sorted by name. Only if the code has the reference that asks for it (`_static_symbols`): the list keeps all the symbols alive.
+# The symbols that are in the binary, as the list that `Symbol(string)` looks in (see `symbols.jl`): { count, the
+# address of each symbol }, sorted by name. Only if the code has the reference that asks for it (`_static_symbols`): the
+# list keeps all the symbols alive.
 function define_symbol_table!(e::ObjectEmbedder)
     haskey(LLVM.globals(e.mod), "_static_symbols") || return false
     found = embedded_symbol_globals(e.mod)
     return define_symbol_list!(e.mod, "_static_symbols", LLVM.Constant[i64(length(found)), (symbol_address(g) for (_, g, _) in found)...])
 end
 
-# The text that `show` of a symbol writes, for the symbols of the binary that it is not `:name` for (an operator, a name that is not an identifier,
-# one with characters other than ASCII): what Julia writes, which is decided by tables of its parser that are not in the binary. As
-# { count, (the address of the symbol, the address of the text as a C string)... }, sorted by name.
+# The text that `show` of a symbol writes, for the symbols of the binary that it is not `:name` for (an operator, a name
+# that is not an identifier, one with characters other than ASCII): what Julia writes, which is decided by tables of its
+# parser that are not in the binary. As { count, (the address of the symbol, the address of the text as a C string)...
+# }, sorted by name.
 function define_symbol_texts!(e::ObjectEmbedder)
     mod = e.mod
     haskey(LLVM.globals(mod), "_static_symbol_texts") || return false

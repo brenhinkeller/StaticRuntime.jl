@@ -1,19 +1,25 @@
-# The LLVM pipeline of our compilations: what GPUCompiler runs, with what we change in it (the jobs whose parameters are `OverridesParams`; StaticCompiler's own are not changed).
+# The LLVM pipeline of our compilations: what GPUCompiler runs, with what we change in it (the jobs whose parameters are
+# `OverridesParams`; StaticCompiler's own are not changed).
 #
-# * The vectorizers run, as they do for Julia (the loop vectorizer and the SLP vectorizer: GPUCompiler's `buildVectorPipeline`).
-# * The allocations are given their type tag before they are lowered (see `tags.jl`), and the constants that are types are put where they are looked for (the numbers of the types
-#   of the binary).
+# * The vectorizers run, as they do for Julia (the loop vectorizer and the SLP vectorizer: GPUCompiler's
+#   `buildVectorPipeline`).
+# * The allocations are given their type tag before they are lowered (see `tags.jl`), and the constants that are types
+#   are put where they are looked for (the numbers of the types of the binary).
 #
-# (These are methods of functions of GPUCompiler that a version of it may not have: then this package does not load, which is better than a pipeline without the tags.)
+# (These are methods of functions of GPUCompiler that a version of it may not have: then this package does not load,
+# which is better than a pipeline without the tags.)
 
 using GPUCompiler: GPUCompiler
 using LLVM: LLVM, @dispose
 
-# GPUCompiler runs the loop and SLP vectorizers only for the jobs that say they can (`can_vectorize`, false by default: it is true for its native and GPU
-# targets, and not for StaticCompiler's). Without them a loop with `@simd` is not vectorized, nor its reduction reordered, so the result of `sum`, `dot` and
-# the like is that of a plain loop: different in the last digits from what Julia gives (which uses the vectorizer) and less accurate, and code that works on a few numbers together (a struct of
-# floats: `nbody`) is twice as slow. Our jobs (the type of the parameters is ours) run them, as Julia does. (The SLP vectorizer of the LLVM of Julia 1.14 crashes in `BoUpSLP::getTreeCost` on blocks that
-# nothing jumps to and that a `phi` still names, which IRCE leaves with `--check-bounds=yes`: GPUCompiler 2.23 runs SimplifyCFG just before it, which removes them.)
+# GPUCompiler runs the loop and SLP vectorizers only for the jobs that say they can (`can_vectorize`, false by default:
+# it is true for its native and GPU targets, and not for StaticCompiler's). Without them a loop with `@simd` is not
+# vectorized, nor its reduction reordered, so the result of `sum`, `dot` and the like is that of a plain loop: different
+# in the last digits from what Julia gives (which uses the vectorizer) and less accurate, and code that works on a few
+# numbers together (a struct of floats: `nbody`) is twice as slow. Our jobs (the type of the parameters is ours) run
+# them, as Julia does. (The SLP vectorizer of the LLVM of Julia 1.14 crashes in `BoUpSLP::getTreeCost` on blocks that
+# nothing jumps to and that a `phi` still names, which IRCE leaves with `--check-bounds=yes`: GPUCompiler 2.23 runs
+# SimplifyCFG just before it, which removes them.)
 GPUCompiler.can_vectorize(::GPUCompiler.CompilerJob{<:StaticCompiler.StaticCompilerTarget, OverridesParams}) = true
 
 # GPUCompiler lowers the intrinsics of Julia (allocation, ...) in `buildIntrinsicLoweringPipeline`, which

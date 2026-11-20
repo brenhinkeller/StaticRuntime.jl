@@ -1,9 +1,11 @@
 # Printing a styled string (`AnnotatedString`, `styled"..."`, `AnnotatedChar`) to a stream that has color.
 #
-# StyledStrings finds the face of a piece of text in `FACES.current[]`, a `ScopedValue` that holds a `Dict` of the faces that are set (an object of the Julia that compiles, which can change
-# when the program runs), and asks the terminal (`Base.current_terminfo()`) what it can do. A program is made with the faces that there are when compiling (the theme and what has been added
-# with `addface!`), as `theme_face`, a comparison with each name, and for a terminal that does what a modern one does (`xterm-256color`): italics, reverse, strikethrough, `dim`, and the
-# underline of a color and style are not used (`Base.get_have_truecolor()` is asked when the program runs: see `color.jl`). `withfaces`,
+# StyledStrings finds the face of a piece of text in `FACES.current[]`, a `ScopedValue` that holds a `Dict` of the faces
+# that are set (an object of the Julia that compiles, which can change when the program runs), and asks the terminal
+# (`Base.current_terminfo()`) what it can do. A program is made with the faces that there are when compiling (the theme
+# and what has been added with `addface!`), as `theme_face`, a comparison with each name, and for a terminal that does
+# what a modern one does (`xterm-256color`): italics, reverse, strikethrough, `dim`, and the underline of a color and
+# style are not used (`Base.get_have_truecolor()` is asked when the program runs: see `overrides/printing.jl`). `withfaces`,
 # `addface!` and the file `faces.toml` of the user, when the program runs, are not supported.
 module StaticRuntimeStyledStringsExt
 
@@ -49,8 +51,9 @@ end
 
 @device_override StyledStrings._mergedface(face::Symbol) = named_face(face)
 
-# the face that an annotation has, of the kinds of values that it has (a `Face`, a name, a list of them). One method that looks at the type (a method for each would be a call that is
-# decided when the program runs, for a value of the type `Any`)
+# the face that an annotation has, of the kinds of values that it has (a `Face`, a name, a list of them). One method
+# that looks at the type (a method for each would be a call that is decided when the program runs, for a value of the
+# type `Any`)
 function annotation_face(value)::Face
     value isa Face && return value
     value isa Symbol && return named_face(value)
@@ -177,7 +180,8 @@ const ANSI = StyledStrings.ANSI_STYLE_CODES
     print(io, 'm')
 end
 
-# `==` of the underlines, which can be a tuple of the type `Tuple{<:Union{Nothing,SimpleColor},Symbol}` (not a concrete type: what is compared is looked up when the program runs)
+# `==` of the underlines, which can be a tuple of the type `Tuple{<:Union{Nothing,SimpleColor},Symbol}` (not a concrete
+# type: what is compared is looked up when the program runs)
 function same_underline(a, b)
     if a isa Tuple{Nothing,Symbol}
         return b isa Tuple{Nothing,Symbol} && a[2] === b[2]
@@ -225,7 +229,8 @@ function same_face(a::Face, b::Face)
            a.strikethrough === b.strikethrough && a.inverse === b.inverse && a.inherit == b.inherit
 end
 
-# the values that annotations have, which are the same if they are as far as it is known here (a value that is of another kind is the same only if it is the same object)
+# the values that annotations have, which are the same if they are as far as it is known here (a value that is of
+# another kind is the same only if it is the same object)
 function same_value(a, b)
     a isa Symbol && return b isa Symbol && a === b
     a isa Face && return b isa Face && same_face(a, b)
@@ -260,8 +265,10 @@ end
 
 ## writing
 
-# the face and the link of the text between two changes of the annotations. (`eachregion` of Base makes, for each, a vector of the annotations as `@NamedTuple{label::Symbol, value::Any}`: a tuple
-# that has an `Any` is made when the program runs, so the regions are found here, in the same way, and the annotations that apply are looked at where they are.)
+# the face and the link of the text between two changes of the annotations. (`eachregion` of Base makes, for each, a
+# vector of the annotations as `@NamedTuple{label::Symbol, value::Any}`: a tuple that has an `Any` is made when the
+# program runs, so the regions are found here, in the same way, and the annotations that apply are looked at where they
+# are.)
 function region_face(annots, active::Vector{Int})
     isempty(active) && return default_face()
     combined = Face()
@@ -277,7 +284,9 @@ function region_face(annots, active::Vector{Int})
     return merge(default_face(), combined)
 end
 
-# (the value of a `:link` annotation is the address, a string: asserted, so that what the other annotations hold (a `Face`, which is what the slot of the values of the annotations of a program that has no links holds) is not printed here)
+# (the value of a `:link` annotation is the address, a string: asserted, so that what the other annotations hold (a
+# `Face`, which is what the slot of the values of the annotations of a program that has no links holds) is not printed
+# here)
 function region_link(annots, active::Vector{Int})
     for i in active
         annots[i].label === :link && return String(annots[i].value::AbstractString)

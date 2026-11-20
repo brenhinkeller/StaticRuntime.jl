@@ -1,8 +1,10 @@
 # Memory-mapped files, with the functions of libc.
 #
-# `Mmap.mmap(path, ...)` opens the file with libuv, takes the size of it with `fstat`, and registers a finalizer that unmaps the memory. What is here is the same for the arrays of a
-# file that is named by its path (the other ways to map, from an open stream or an anonymous mapping, are not here): a file that is there is mapped to be read (`mmap` opens it with `"r"`),
-# and one that is not is created, as `"w+"` does, and made as long as the array needs. The memory is not unmapped before the program ends (the array is not owned by anything that could do it).
+# `Mmap.mmap(path, ...)` opens the file with libuv, takes the size of it with `fstat`, and registers a finalizer that
+# unmaps the memory. What is here is the same for the arrays of a file that is named by its path (the other ways to map,
+# from an open stream or an anonymous mapping, are not here): a file that is there is mapped to be read (`mmap` opens it
+# with `"r"`), and one that is not is created, as `"w+"` does, and made as long as the array needs. The memory is not
+# unmapped before the program ends (the array is not owned by anything that could do it).
 module StaticRuntimeMmapExt
 
 using StaticRuntime: @device_override

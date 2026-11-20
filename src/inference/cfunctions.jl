@@ -1,19 +1,23 @@
-# `@cfunction`: a pointer to a function of the program that C can call (a comparison function for `qsort`, the callback of a library).
+# `@cfunction`: a pointer to a function of the program that C can call (a comparison function for `qsort`, the callback
+# of a library).
 #
-# What Julia makes of it is a wrapper that asks the runtime for the compiled method (`jl_get_abi_converter`), which a program does not have, and until it is there calls the
-# function by dispatch (see runtime/cfunctions_link.jl, where it is made to call the method). The method is not part of the program if nothing calls it: so the code is compiled
-# again with a function for each `@cfunction` that calls it, `cfunction_target_ID(arguments...)`, and that is called from the entry point where it can't be reached.
-# Inference says what the `@cfunction`s of the program are (the function, the types of the arguments and of the result), as for the functions of closures.jl.
+# What Julia makes of it is a wrapper that asks the runtime for the compiled method (`jl_get_abi_converter`), which a
+# program does not have, and until it is there calls the function by dispatch (see runtime/cfunctions_link.jl, where it
+# is made to call the method). The method is not part of the program if nothing calls it: so the code is compiled again
+# with a function for each `@cfunction` that calls it, `cfunction_target_ID(arguments...)`, and that is called from the
+# entry point where it can't be reached. Inference says what the `@cfunction`s of the program are (the function, the
+# types of the arguments and of the result), as for the functions of closures.jl.
 
-# What a function that is the target of a `@cfunction` does, other than call the function: it is a change of a global, so that the call from the entry point is not removed as
-# a call that has no effect, and that is not made.
+# What a function that is the target of a `@cfunction` does, other than call the function: it is a change of a global,
+# so that the call from the entry point is not removed as a call that has no effect, and that is not made.
 mutable struct CFunctionGuard
     calls::Int
     arguments::UInt # (what the arguments are folded into: see `define_cfunction_root`)
 end
 const CFUNCTION_GUARD = CFunctionGuard(0, 0)
 
-# an argument of the target of a `@cfunction`, as a number that is stored: it is then used, whatever the function does with it (a struct that C passes by value is not, and can be dropped)
+# an argument of the target of a `@cfunction`, as a number that is stored: it is then used, whatever the function does
+# with it (a struct that C passes by value is not, and can be dropped)
 cfunction_use(a::Ptr) = UInt(a)
 cfunction_use(a::Base.BitInteger) = a % UInt
 cfunction_use(a::Bool) = UInt(a)
@@ -22,7 +26,8 @@ cfunction_use(a::Float64) = UInt(reinterpret(UInt64, a))
 cfunction_use(a::Float32) = UInt(reinterpret(UInt32, a))
 cfunction_use(a) = UInt(0)
 
-# The arguments of a compilation (the function and its types come first), with the entry point that has the targets of the `@cfunction`s that were found (the roots of the compilation `c`, and the functions that they call)
+# The arguments of a compilation (the function and its types come first), with the entry point that has the targets of
+# the `@cfunction`s that were found (the roots of the compilation `c`, and the functions that they call)
 function rooted_arguments(c::Compilation, args)
     cl = c.closures
     isempty(cl.cfunction_roots) && return args
@@ -58,8 +63,9 @@ function define_cfunction_root(mod::Module, root::Runtime.CFunctionRoot, f)
     params = [:($(argnames[i])::$(root.args[i])) for i in eachindex(root.args)]
     call = :($(QuoteNode(f))($(argnames...)))
     body = root.ret === Nothing ? :($call; nothing) : :($call::$(root.ret))
-    # (each argument is used, whatever `f` does with it: the function that is compiled has the parameters that C gives, which is what the wrapper of the `@cfunction` is made to call. A
-    # function that ignores some, as the callback of HiGHS does, is otherwise compiled without them)
+    # (each argument is used, whatever `f` does with it: the function that is compiled has the parameters that C gives,
+    # which is what the wrapper of the `@cfunction` is made to call. A function that ignores some, as the callback of
+    # HiGHS does, is otherwise compiled without them)
     Core.eval(mod, :(@noinline function $name($(params...))::$(root.ret)
         $(CFUNCTION_GUARD).calls += 1
         $(CFUNCTION_GUARD).arguments = $(foldl((acc, a) -> :(xor($acc, $(cfunction_use)($a))), argnames; init = :(UInt(0))))
@@ -68,7 +74,8 @@ function define_cfunction_root(mod::Module, root::Runtime.CFunctionRoot, f)
     return name
 end
 
-# `f`, as an entry point that has the same name and types, and calls the targets of the `@cfunction`s of the program where it can't be reached
+# `f`, as an entry point that has the same name and types, and calls the targets of the `@cfunction`s of the program
+# where it can't be reached
 function rooted_entry(f::Function, signature, roots::Vector{<:Tuple})
     types = signature isa Tuple ? signature : Tuple(signature.parameters)
     mod = Module(:StaticCFunctionRoots)
@@ -77,7 +84,8 @@ function rooted_entry(f::Function, signature, roots::Vector{<:Tuple})
         name = define_cfunction_root(mod, root, g)
         args = [:(unsafe_load(Ptr{$T}(($(CFUNCTION_GUARD).calls + $i) % UInt))) for (i, T) in enumerate(root.args)]
         call = :($(name)($(args...)))
-        # (the result is stored, where it can't be: if it were not used, the function would not return it, and would not be the one that C calls)
+        # (the result is stored, where it can't be: if it were not used, the function would not return it, and would not
+        # be the one that C calls)
         root.ret === Nothing ? push!(calls, call) : push!(calls, :(unsafe_store!(Ptr{$(root.ret)}(($(CFUNCTION_GUARD).calls + $(length(root.args) + 1)) % UInt), $call)))
     end
     argnames = [Symbol(:a, i) for i in eachindex(types)]

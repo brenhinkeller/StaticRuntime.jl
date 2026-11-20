@@ -9,7 +9,9 @@
 # So, for formats that have none of those, the methods below pair the specifiers with the arguments
 # by recursing over both, and use the methods of Printf for a specifier and its argument as they are, so
 # that what they write is the same.
+module StaticRuntimePrintfExt
 
+using StaticRuntime: @device_override
 using Printf: Printf
 
 const DYNAMIC_FORMAT_ERROR = "format specifiers that take the width or precision from an argument (`*`) are not supported in compiled code"
@@ -57,3 +59,5 @@ end
 
 @device_override Printf.computelen(substringranges, formats, args) =
     Base.checked_add(sum(length, substringranges), plength_specs(formats, args))
+
+end # module

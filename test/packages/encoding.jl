@@ -19,6 +19,8 @@ end
 @testset "CRC32c" begin
     check_cases([
         "CRC32c"                   => () -> Int(crc32c(any_value("hello"))) + Int(crc32c(UInt8[1, 2, 3, 4, 5], 0x12345678)),
+        "CRC32c of integers and a UUID (Base's `_crc32c`)" => () -> Int(Base._crc32c(any_value(0x0123456789abcdef))) + Int(Base._crc32c(any_value(0x2a), 0x12345678)) +
+                                                                    Int(Base._crc32c(Base.UUID(any_value(0x4ba3cbd03c8b4d8e9b8c2f2f2b0e6a71)::UInt128))),
     ])
 end
 

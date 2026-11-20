@@ -131,7 +131,7 @@ library allocated (a `Regex` made when the program runs, a sparse factorization,
 
 * The collector can't call the code of the program (it is compiled apart), so the object is kept and queued, and the program runs its finalizer when the collection is over: the call of `finalizer(f, x)` is a *site* of the
   types of `f` and `x`, which has a list of the finalizers that were registered at it (a function, and the address of the object, as a number: the list does not keep the object alive), and the linker writes a `switch` that gives
-  each object to the function of its site (see `src/finalizers.jl`).
+  each object to the function of its site (see `src/overrides/gc.jl`).
 * A finalizer that throws is ignored (Julia prints the error). One that stores `x` somewhere (resurrection) is run once; `x` stays alive, and a later collection frees it.
 * Finalizers of the objects that are alive when the program ends are not run.
 * The collector is conservative: an object that a word of the stack happens to have the address of is not freed by that collection (so a finalizer may run at a later collection than in Julia, or, for one of the last
@@ -222,7 +222,7 @@ handled here, found by compiling [Distributions.jl](https://github.com/JuliaStat
 * **`IdDict`** works: the table is kept with Julia code, with the address of an object as its hash. What is not a mutable object all has one hash, so an `IdDict` with many
   keys that are numbers is slow.
 * **`deepcopy`** works for any struct, array, dictionary, tuple or string, with shared and cyclic references kept as in Julia. Base reads the fields of a struct by a number that
-  is only known when the program runs; here each type is copied field by field, each of its own type, made when compiling (`src/deepcopy.jl`). A field of the type `Any` or of an
+  is only known when the program runs; here each type is copied field by field, each of its own type, made when compiling (`src/overrides/deepcopy.jl`). A field of the type `Any` or of an
   abstract type is copied over the registered types (see [`add_dispatch_candidates!`](@ref)). A method of `deepcopy_internal` that a package defines for its own type can't be used:
   compiling warns, and the program stops if it reaches the copy of such a type (it is not copied field by field, which would be a different result). Locks and `SimpleVector`s are not supported.
 * **`reshape(x, :, n)`**, and **functions and `Colon()` in messages** (`string(sin)`, `show(:)`).

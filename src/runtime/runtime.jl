@@ -1,5 +1,5 @@
 # A minimal, libjulia-free runtime for statically compiled code, which is installed in the code
-# that StaticCompiler generates by `link_runtime!` (see `llvm_postprocess` in `overrides.jl`).
+# that StaticCompiler generates by `link_runtime!` (see `llvm_postprocess` in `entry_points.jl`).
 #
 # GPUCompiler lowers most of the Julia runtime interface to a small set of hooks
 # (`gpu_gc_pool_alloc`, ...), but StaticCompiler compiles with `libraries=false`, so nothing
@@ -36,7 +36,8 @@ function declare!(mod::LLVM.Module, name::AbstractString, ftype::LLVM.FunctionTy
     return haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ftype)
 end
 
-# `puts(message); exit(1)` at the position of `builder`: what a program says when it reaches what it can't do. `message` is the text, or a pointer to a C string.
+# `puts(message); exit(1)` at the position of `builder`: what a program says when it reaches what it can't do. `message`
+# is the text, or a pointer to a C string.
 function abort_message!(builder::LLVM.IRBuilder, mod::LLVM.Module, message)
     puts_t = LLVM.FunctionType(LLVM.Int32Type(), [LLVM.PointerType()])
     exit_t = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int32Type()])
@@ -54,14 +55,15 @@ include("embedder.jl")    # copying them into the binary
 include("constants.jl")   # finding the constants of a module, and embedding them
 include("types.jl")       # `getfield`, `<:` and `isa` at run time
 include("heap_link.jl")   # allocation and the collector, linked
-include("blas.jl")        # BLAS and LAPACK, through libblastrampoline
 include("loader.jl")      # the functions of libraries, found when the program needs them
-include("libraries.jl")   # the functions of libraries that are called by their library: libm, and the others loaded when the program runs
+include("libraries.jl")   # the functions of libraries that are called by their library: libm, BLAS, and the others loaded when the program runs
 include("cfunctions_link.jl") # the wrappers of `@cfunction`, that call the functions of the program
 
-# What this module finds out about the process that it is in (the addresses of its objects and the tags of its types, which are different in every process; the IR of the heap and of the loader, which refers to
-# them) is kept for the process, and is found out again when a package that was precompiled is loaded: a package that makes a workload when it is compiled (see `src/precompile.jl`) has what the workload found out
-# in its image, and that is the process that made it.
+# What this module finds out about the process that it is in (the addresses of its objects and the tags of its types,
+# which are different in every process; the IR of the heap and of the loader, which refers to them) is kept for the
+# process, and is found out again when a package that was precompiled is loaded: a package that makes a workload when it
+# is compiled (see `src/precompile.jl`) has what the workload found out in its image, and that is the process that made
+# it.
 function forget_process_state!()
     PIPE_FDS .= -1 # (the descriptors of a pipe that was made by the process that compiled the package are numbers that mean nothing here, and are not closed: another file may have them)
     DATATYPE_TAG[] = TYPENAME_TAG[] = SVEC_TAG[] = SYMBOL_TAG[] = EMPTY_SVEC[] = 0
@@ -70,11 +72,13 @@ function forget_process_state!()
     return nothing
 end
 
-# Define the runtime functions that `mod` calls but does not define.
-# The module has the addresses of objects of this process in it, and `link_runtime!` copies the objects that they are the addresses of into the binary, reading them as memory (`embed_constants!`). An object that nothing in Julia refers to any
-# more is not one that can be copied: its memory is free, and may be that of another object. The objects of a program are the constants that its code refers to, which Julia keeps, and what the code made when it was compiled: that
-# is kept by the compilation that is going on, but what is on the way (not yet a reference of what is kept) is not seen by the collector. There are no collections while the addresses are being resolved, so an address that is read is of
-# the object that it was.
+# Define the runtime functions that `mod` calls but does not define. The module has the addresses of objects of this
+# process in it, and `link_runtime!` copies the objects that they are the addresses of into the binary, reading them as
+# memory (`embed_constants!`). An object that nothing in Julia refers to any more is not one that can be copied: its
+# memory is free, and may be that of another object. The objects of a program are the constants that its code refers to,
+# which Julia keeps, and what the code made when it was compiled: that is kept by the compilation that is going on, but
+# what is on the way (not yet a reference of what is kept) is not seen by the collector. There are no collections while
+# the addresses are being resolved, so an address that is read is of the object that it was.
 function link_runtime!(mod::LLVM.Module; kwargs...)
     was_enabled = GC.enable(false)
     try
@@ -120,7 +124,7 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
                                                                             describe_unresolved(e.failures, addresses)))
     end
     say_dangling_pointers(e)
-    strip && LLVM.strip_debuginfo!(mod) # (what refusing the code needed it for is done: see the entry points in `overrides.jl`)
+    strip && LLVM.strip_debuginfo!(mod) # (what refusing the code needed it for is done: see `entry_points.jl`)
     define_dynamic_stubs!(mod)
     needed = filter(RUNTIME_SHIM_FUNCTIONS) do name
         haskey(LLVM.functions(mod), name) && LLVM.isdeclaration(LLVM.functions(mod)[name])
@@ -132,7 +136,9 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
         LLVM.datalayout!(shim, LLVM.datalayout(mod))
         LLVM.triple!(shim, LLVM.triple(mod))
         LLVM.link!(mod, shim) # consumes `shim`
-        # (the tags that the shim writes, of `Float32` and of the types that have no small tag, are the addresses of the types in this process: the objects of the types that the code compares them with are in the binary, so they are the numbers of those)
+        # (the tags that the shim writes, of `Float32` and of the types that have no small tag, are the addresses of the
+        # types in this process: the objects of the types that the code compares them with are in the binary, so they
+        # are the numbers of those)
         embed_type_numbers!(e)
     end
     linked |= link_blas!(mod, blas)
@@ -151,15 +157,25 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     return mod
 end
 
-# The functions of the program are internal to it when this runs, and not when they were optimized (they are exported by the module of StaticCompiler until it is done): a function that is called from one
-# place was then not inlined, whatever its size, and what is made of calls to it (`pow`, which calls the function of the logarithm and gets two numbers back through memory) was up to twice as slow as in Julia.
-# The inliner is run again, for the functions that are now local (`noinline` and the functions that call `sigsetjmp` are not inlined by it). With `optimize = true` the optimizer's pipeline (`O2`) is run on the whole module as well, which has
-# what it could not do before: the functions that are local can have their arguments and results changed, and what is known of the calls of the runtime (the allocator) is used. (`fib` is 30% faster, the allocation of
-# the binary trees 4%, and the strings of the string program 9%: the code of a math function can be 8% slower; see the benchmarks in the manual.) It is not the default: on CI, programs that crashed on Linux (`rand(Int)`), added up
-# `Float16` in another order than Julia does, and had more of the raw pointers that StaticCompiler warns about, with it. It needs `drop_invariant_root_loads!` and `drop_type_based_aliasing!`: see there.
-# Type-based aliasing information (`!tbaa`) says which loads and stores cannot be of the same memory. In Julia's IR it is true, and the passes that ran on it used it. It is not after the inliner and the passes that
-# follow it have changed that IR: a load of an immutable tuple (`jtbaa_const`) of a copy that a `memcpy` made (`jtbaa_field`) was taken to be of memory that nothing wrote, which is `undef`, and `GVN` made
-# of `dynamic_width || dynamic_precision`, of the `@printf` of two things into a file, `true`. The aliasing is dropped before the pipeline (the information of scopes, `!alias.scope` and `!noalias`, is kept).
+# The functions of the program are internal to it when this runs, and not when they were optimized (they are exported by
+# the module of StaticCompiler until it is done): a function that is called from one place was then not inlined,
+# whatever its size, and what is made of calls to it (`pow`, which calls the function of the logarithm and gets two
+# numbers back through memory) was up to twice as slow as in Julia. The inliner is run again, for the functions that are
+# now local (`noinline` and the functions that call `sigsetjmp` are not inlined by it). With `optimize = true` the
+# optimizer's pipeline (`O2`) is run on the whole module as well, which has what it could not do before: the functions
+# that are local can have their arguments and results changed, and what is known of the calls of the runtime (the
+# allocator) is used. (`fib` is 30% faster, the allocation of the binary trees 4%, and the strings of the string program
+# 9%: the code of a math function can be 8% slower; see the benchmarks in the manual.) It is not the default: on CI,
+# programs that crashed on Linux (`rand(Int)`), added up `Float16` in another order than Julia does, and had more of the
+# raw pointers that StaticCompiler warns about, with it. It needs `drop_invariant_root_loads!` and
+# `drop_type_based_aliasing!`: see there.
+#
+# Type-based aliasing information (`!tbaa`) says which loads and stores cannot
+# be of the same memory. In Julia's IR it is true, and the passes that ran on it used it. It is not after the inliner
+# and the passes that follow it have changed that IR: a load of an immutable tuple (`jtbaa_const`) of a copy that a
+# `memcpy` made (`jtbaa_field`) was taken to be of memory that nothing wrote, which is `undef`, and `GVN` made of
+# `dynamic_width || dynamic_precision`, of the `@printf` of two things into a file, `true`. The aliasing is dropped
+# before the pipeline (the information of scopes, `!alias.scope` and `!noalias`, is kept).
 function drop_type_based_aliasing!(mod::LLVM.Module)
     ctx = LLVM.context(mod)
     ids = [LLVM.API.LLVMGetMDKindIDInContext(ctx, k, length(k)) for k in ("tbaa", "tbaa.struct")]
@@ -169,16 +185,20 @@ function drop_type_based_aliasing!(mod::LLVM.Module)
     return
 end
 
-# The functions that are rarely run: what is known to be so is the code on the way to an error (see `error_functions`), and the functions that Julia marks `cold` (the constructors of the exceptions,
-# what throws) or `noreturn`, with those that are only called from them. A path that is rarely run and returns is not here (it can be that, and not an error): this is what is known, and not all that is cold.
+# The functions that are rarely run: what is known to be so is the code on the way to an error (see `error_functions`),
+# and the functions that Julia marks `cold` (the constructors of the exceptions, what throws) or `noreturn`, with those
+# that are only called from them. A path that is rarely run and returns is not here (it can be that, and not an error):
+# this is what is known, and not all that is cold.
 function cold_functions(mod::LLVM.Module)
     marked = Set{LLVM.Function}(fn for fn in LLVM.functions(mod) if !LLVM.isdeclaration(fn) &&
                                 any(a -> a in collect(LLVM.function_attributes(fn)), (LLVM.EnumAttribute("cold"), LLVM.EnumAttribute("noreturn"))))
     return error_functions(mod, Dict{LLVM.Function,Set{LLVM.BasicBlock}}(); seeds = marked)
 end
 
-# The code that is rarely run is optimized for size (`optsize` and `minsize`, as `-Oz` does): the code that runs only to stop with an error is 10% of the code of a program that prints, parses or sorts, and nothing
-# waits for it. (The machine outliner of AArch64 runs on the functions that are `minsize`.) The rest of the program is not: the same for all of it takes 12 to 34% more time.
+# The code that is rarely run is optimized for size (`optsize` and `minsize`, as `-Oz` does): the code that runs only to
+# stop with an error is 10% of the code of a program that prints, parses or sorts, and nothing waits for it. (The
+# machine outliner of AArch64 runs on the functions that are `minsize`.) The rest of the program is not: the same for
+# all of it takes 12 to 34% more time.
 function optimize_cold_for_size!(mod::LLVM.Module)
     cold = cold_functions(mod)
     for fn in LLVM.functions(mod)
@@ -191,8 +211,9 @@ function optimize_cold_for_size!(mod::LLVM.Module)
 end
 
 function inline_internal_functions!(mod::LLVM.Module; optimize::Bool = false)
-    # Only the functions that are internal: the others (`static_alloc` of the heap, the loader of BLAS, ...) are the runtime, which is called and was not inlined before; inlining
-    # `static_alloc` into every allocation of a program, with its slow paths, made programs crash (the one that calls BLAS, on the machines of CI).
+    # Only the functions that are internal: the others (`static_alloc` of the heap, the loader of BLAS, ...) are the
+    # runtime, which is called and was not inlined before; inlining `static_alloc` into every allocation of a program,
+    # with its slow paths, made programs crash (the one that calls BLAS, on the machines of CI).
     kept = LLVM.Function[]
     noinline = LLVM.EnumAttribute("noinline")
     for fn in LLVM.functions(mod)

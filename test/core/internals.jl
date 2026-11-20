@@ -15,6 +15,8 @@
     end
     @test !uses_quirk(StaticRuntime.method_table)
     @test uses_quirk(SC.method_table)
+    # (Random is in the system image, and StaticTools depends on it: its extension is always loaded, which `rand` needs)
+    @test Base.get_extension(StaticRuntime, :StaticRuntimeRandomExt) isa Module
 end
 
 # Code that can't work as a standalone binary is rejected when compiling, rather than crashing
@@ -110,7 +112,7 @@ end
 
 ## the functions that test a program (`src/testing.jl`)
 
-# The functions that look at a program and test it (src/testing.jl, and the introspection functions of src/overrides.jl): `static_status` and how it classifies, running many cases as one program,
+# The functions that look at a program and test it (src/testing.jl, and the introspection functions of src/entry_points.jl): `static_status` and how it classifies, running many cases as one program,
 # `static_result`, `@static_test`, `undefined_symbols`, `allocation_sites`, `static_code_typed`, `static_code_llvm` and `static_code_native`.
 
 harness_add(n::Int) = n + 1

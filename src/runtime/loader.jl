@@ -78,8 +78,9 @@ end
     return
 end
 
-# The path of the file that has the table (the program, or the shared library that it is part of) in `buffer`, which has room for `cap` bytes: its length, or 0
-# if the system doesn't say, or says a path that is not absolute (the name that the program was started with)
+# The path of the file that has the table (the program, or the shared library that it is part of) in `buffer`, which has
+# room for `cap` bytes: its length, or 0 if the system doesn't say, or says a path that is not absolute (the name that
+# the program was started with)
 @noinline function image_path(buffer::UInt, cap::Int)
     info = UInt(calloc(4, 8)) # (`Dl_info`: the file name, ...)
     info == 0 && out_of_memory()
@@ -97,7 +98,8 @@ end
     return n
 end
 
-# The folder of the program, as a C string that is never freed (or 1: not known): the path of the file up to its last slash.
+# The folder of the program, as a C string that is never freed (or 1: not known): the path of the file up to its last
+# slash.
 @noinline function program_directory()
     d = sget(S_DIRECTORY)
     d != 0 && return d
@@ -111,7 +113,8 @@ end
         sset(S_DIRECTORY, UInt(1))
         return UInt(1)
     end
-    # (up to the last slash, which is replaced by the end of the string; "/" if it is the first character, and "." if there is none)
+    # (up to the last slash, which is replaced by the end of the string; "/" if it is the first character, and "." if
+    # there is none)
     k = n
     while k > 0 && byte(buffer, k - 1) != UInt8('/')
         k -= 1
@@ -223,8 +226,9 @@ end
       ret i32 %r
     }""", "fwd"), Int32, Tuple{UInt,UInt,UInt}, f, lib, suffix)
 
-# Tell libblastrampoline, which a library that was loaded is linked to, where the BLAS and LAPACK of the program are: the libraries that it was forwarding to when compiling, in the
-# order that they were loaded in, as Julia does when it starts. `block` is { path of libblastrampoline, number of libraries, (path, suffix or 0)... }.
+# Tell libblastrampoline, which a library that was loaded is linked to, where the BLAS and LAPACK of the program are:
+# the libraries that it was forwarding to when compiling, in the order that they were loaded in, as Julia does when it
+# starts. `block` is { path of libblastrampoline, number of libraries, (path, suffix or 0)... }.
 @noinline function forward_blas(block::UInt)
     sset(S_LBT, UInt(1))
     h = UInt(@symbolcall dlopen(Ptr{UInt8}(ld(block, 0))::Ptr{UInt8}, RTLD_NOW::Int32)::Ptr{Cvoid})

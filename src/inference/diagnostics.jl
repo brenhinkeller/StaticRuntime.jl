@@ -1,10 +1,11 @@
 # Why an entry point can't be compiled when its return type is not concrete.
 #
-# StaticCompiler stops with "did not infer to a concrete type. Got `Union{}`", which does not say what in the program makes it so. The most
-# common causes are a call that always throws (or that no method fits, as far as the compiler can tell), and a value whose type is only known when
-# the program runs (`Val(n)` of a variable, a type that has a size in it that is computed, a collection of an abstract type). Before the call
-# to StaticCompiler the entry point is inferred (the result is kept, so that it costs little), and when it is not concrete, the calls that it
-# is made of are followed, down to the one that is `Union{}` (or abstract) there, and said.
+# StaticCompiler stops with "did not infer to a concrete type. Got `Union{}`", which does not say what in the program
+# makes it so. The most common causes are a call that always throws (or that no method fits, as far as the compiler can
+# tell), and a value whose type is only known when the program runs (`Val(n)` of a variable, a type that has a size in
+# it that is computed, a collection of an abstract type). Before the call to StaticCompiler the entry point is inferred
+# (the result is kept, so that it costs little), and when it is not concrete, the calls that it is made of are followed,
+# down to the one that is `Union{}` (or abstract) there, and said.
 
 """
     InferenceError
@@ -72,7 +73,8 @@ method_instance(x::Core.MethodInstance) = x
 method_instance(x::Core.CodeInstance) = x.def isa Core.MethodInstance ? x.def : nothing
 method_instance(x) = nothing
 
-# whether a statement is a call of a function that is made to throw (`_throw_boundserror_indices`, `throw_boundserror`, `error`)
+# whether a statement is a call of a function that is made to throw (`_throw_boundserror_indices`, `throw_boundserror`,
+# `error`)
 function thrower_call(ci::Core.CodeInfo, st::Expr)
     name = if st.head === :invoke
         mi = method_instance(st.args[1])
@@ -83,8 +85,8 @@ function thrower_call(ci::Core.CodeInfo, st::Expr)
     return startswith(name, "_throw") || startswith(name, "throw") || name in ("error", "Base.error")
 end
 
-# the calls, inside the code of `f(types...)`, that have the type `Union{}` (what makes it that), as lines to say; and what is wrong with
-# the arguments of the last one
+# the calls, inside the code of `f(types...)`, that have the type `Union{}` (what makes it that), as lines to say; and
+# what is wrong with the arguments of the last one
 function explain_inference!(path::Vector{String}, notes::Vector{String}, f, tt::Type, seen::Set; depth::Int = 0, kwargs...)
     depth > 8 && return false
     ci = try
@@ -95,8 +97,9 @@ function explain_inference!(path::Vector{String}, notes::Vector{String}, f, tt::
     return explain_codeinfo!(path, notes, ci, seen; depth, kwargs...)
 end
 
-# The code that a call was inferred as, from what is kept (the `CodeInstance` of a call is in the code that has it), for any types of the arguments: `static_code_typed` takes only those that a method instance can be
-# made of (a tuple of concrete types, and not `Type{Plot}` of a type that has parameters)
+# The code that a call was inferred as, from what is kept (the `CodeInstance` of a call is in the code that has it), for
+# any types of the arguments: `static_code_typed` takes only those that a method instance can be made of (a tuple of
+# concrete types, and not `Type{Plot}` of a type that has parameters)
 function inferred_codeinfo(x)
     x isa Core.CodeInstance || return nothing
     mi = x.def
@@ -113,7 +116,8 @@ function explain_codeinfo!(path::Vector{String}, notes::Vector{String}, ci::Core
         T = ci.ssavaluetypes isa Vector ? ci.ssavaluetypes[i] : Any
         T === Union{} || continue
         st isa Expr && st.head in (:call, :invoke) || continue
-        # (the calls that only throw, `_throw_boundserror_indices` of a check of the bounds, are the end of a path that is not taken, as often as the cause: they are looked at last)
+        # (the calls that only throw, `_throw_boundserror_indices` of a check of the bounds, are the end of a path that
+        # is not taken, as often as the cause: they are looked at last)
         allow_throwers || !thrower_call(ci, st) || continue
         if st.head === :invoke
             mi = method_instance(st.args[1])

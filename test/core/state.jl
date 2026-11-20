@@ -130,9 +130,9 @@ end
     S = StaticRuntime
     @test isempty(S.RUNQUEUE) && S.CURRENT_TASK[] === nothing
     @test isempty(S.ATEXIT_HOOKS) && !S.ATEXIT_INSTALLED[]
-    @test all(isempty, values(S.FINALIZER_REGISTRIES)) && !S.FINALIZER_NEVER[] # (the sites are the process's: see finalizers.jl)
+    @test all(isempty, values(S.FINALIZER_REGISTRIES)) && !S.FINALIZER_NEVER[] # (the sites are the process's: see overrides/gc.jl)
     @test !S.LOG_SILENT[] && S.MATCH_CONTEXT[] == C_NULL && S.DYNAMIC_SYMBOLS[] == 0
-    @test all(iszero, S.TASKLOCAL_RNG_STATE[])
+    @test all(iszero, Base.get_extension(S, :StaticRuntimeRandomExt).TASKLOCAL_RNG_STATE[])
 end
 
 

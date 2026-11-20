@@ -1,20 +1,24 @@
 # `deepcopy`, for any struct.
 #
-# Base's method of `deepcopy_internal` for a struct reads its fields with `getfield(x, i)` and writes them with `jl_set_nth_field`, for an
-# `i` that is only known when the program runs, so the type of each field is not known to the compiler. The copy here is made for each
-# type when compiling, with the fields one after the other, each of its own type (`copy_struct`).
+# Base's method of `deepcopy_internal` for a struct reads its fields with `getfield(x, i)` and writes them with
+# `jl_set_nth_field`, for an `i` that is only known when the program runs, so the type of each field is not known to the
+# compiler. The copy here is made for each type when compiling, with the fields one after the other, each of its own
+# type (`copy_struct`).
 #
-# An overlay method of `deepcopy_internal` is used for all the calls that it covers, in place of the methods of Base for more specific types
-# (an overlay does not stack with Base's methods), so the methods of Base for the other types (arrays, dictionaries, tuples, strings, ...)
-# are written again below, with the same behavior, as `static_deepcopy`; it is the function that the recursion is made with.
-# A method of `deepcopy_internal` for a struct that another package defines is not used (the struct is copied field by field): it can't be
-# called from here, and which methods there are can't be looked up by a generated function.
+# An overlay method of `deepcopy_internal` is used for all the calls that it covers, in place of the methods of Base for
+# more specific types (an overlay does not stack with Base's methods), so the methods of Base for the other types
+# (arrays, dictionaries, tuples, strings, ...) are written again below, with the same behavior, as `static_deepcopy`; it
+# is the function that the recursion is made with. A method of `deepcopy_internal` for a struct that another package
+# defines is not used (the struct is copied field by field): it can't be called from here, and which methods there are
+# can't be looked up by a generated function.
 
 const DEEPCOPY_ATOMS = Union{Symbol, Core.MethodInstance, Method, GlobalRef, DataType, Union, UnionAll, Task, Regex}
 
-# The methods of `deepcopy_internal` that are not Base's (a package's own, for its types). A generated function can't look at the methods (reflection is not
-# allowed in it), so they are looked up when compiling (`register_custom_deepcopy!`, which the functions that compile call) and kept in this list, which
-# the generator reads (the list is in the registry, see registry.jl); as with the registered types of dispatch, what is inferred is kept apart for each state of the registry (its version).
+# The methods of `deepcopy_internal` that are not Base's (a package's own, for its types). A generated function can't
+# look at the methods (reflection is not allowed in it), so they are looked up when compiling
+# (`register_custom_deepcopy!`, which the functions that compile call) and kept in this list, which the generator reads
+# (the list is in the registry, see registry.jl); as with the registered types of dispatch, what is inferred is kept
+# apart for each state of the registry (its version).
 function register_custom_deepcopy!()
     for m in methods(Base.deepcopy_internal)
         m.module === Base && continue
@@ -27,7 +31,8 @@ custom_deepcopy_methods(T::DataType) =
 
 function static_deepcopy end
 
-# (what the table of the copies has for an object whose copy is not made yet: one with `const` fields, see `copy_struct`)
+# (what the table of the copies has for an object whose copy is not made yet: one with `const` fields, see
+# `copy_struct`)
 struct DeepcopyInProgress end
 function copy_struct end
 @device_override Base.deepcopy_internal(x, stackdict::IdDict) = static_deepcopy(x, stackdict)
@@ -37,7 +42,8 @@ function copy_struct end
 end
 
 static_deepcopy(x::DEEPCOPY_ATOMS, stackdict::IdDict) = x
-# (the copy of an element is of the type of the element: asserted, so that the type of the tuple is known where the copies recurse through each other, which inference widens to `Any`)
+# (the copy of an element is of the type of the element: asserted, so that the type of the tuple is known where the
+# copies recurse through each other, which inference widens to `Any`)
 @generated function static_deepcopy(x::T, stackdict::IdDict) where {T<:Tuple}
     isconcretetype(T) || return :(ntuple(i -> static_deepcopy(x[i], stackdict), length(x)))
     return Expr(:tuple, (:(static_deepcopy(x[$i], stackdict)::$(fieldtype(T, i))) for i in 1:fieldcount(T))...)
@@ -108,8 +114,9 @@ end
     if T <: Union{BigInt, BigFloat, Base.AbstractLock}
         return :(error(string("deepcopy of a ", $(string(T)), " is not supported in standalone binaries")))
     end
-    # a method of `deepcopy_internal` that a package defines for the type would be what Julia calls, and can't be called from here (see above): so the
-    # program says so, and doesn't copy the fields instead, which would be a different result
+    # a method of `deepcopy_internal` that a package defines for the type would be what Julia calls, and can't be called
+    # from here (see above): so the program says so, and doesn't copy the fields instead, which would be a different
+    # result
     custom = custom_deepcopy_methods(T)
     if !isempty(custom)
         compile_warning!((:deepcopy, T), string("`deepcopy` of a `", T, "` is not supported in standalone binaries: a method of `deepcopy_internal` defined by a package (",
@@ -121,8 +128,9 @@ end
     nf = fieldcount(T)
     nf == 0 && return :(x)
     if ismutabletype(T)
-        # (a field that is `const` is not one that `setfield!` sets: the object is made with the fields up to the last of them, `new(T, copies...)`, so they are copied before there is a copy to refer to. A reference from
-        # one of them back to the object, which Julia copies as the one copy, is not: the program stops and says so.)
+        # (a field that is `const` is not one that `setfield!` sets: the object is made with the fields up to the last
+        # of them, `new(T, copies...)`, so they are copied before there is a copy to refer to. A reference from one of
+        # them back to the object, which Julia copies as the one copy, is not: the program stops and says so.)
         lastconst = something(findlast(i -> isconst(T, i), 1:nf), 0)
         if lastconst > 0
             first_fields, later = Expr[], Expr[]

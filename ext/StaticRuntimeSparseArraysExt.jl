@@ -1,7 +1,9 @@
-# What a compiled program needs in SparseArrays' factorizations that Base does not give the program: SuiteSparse keeps a "common" (its settings and workspace) for each
-# task, in the storage of the task, which a program does not have, and calls back into Julia when something fails, through a function that Julia makes a C function of.
-# Here the program has one common for each size of integer, and the error is not given back by that function: the code of the failure is, in the `status` of the common,
-# which is what `check_status` looks at (the message that Julia keeps there is what the function was for, so the exception says the code instead).
+# What a compiled program needs in SparseArrays' factorizations that Base does not give the program: SuiteSparse keeps a
+# "common" (its settings and workspace) for each task, in the storage of the task, which a program does not have, and
+# calls back into Julia when something fails, through a function that Julia makes a C function of. Here the program has
+# one common for each size of integer, and the error is not given back by that function: the code of the failure is, in
+# the `status` of the common, which is what `check_status` looks at (the message that Julia keeps there is what the
+# function was for, so the exception says the code instead).
 module StaticRuntimeSparseArraysExt
 
 using StaticRuntime: @device_override
@@ -53,7 +55,8 @@ end
     return nothing
 end
 
-# `eltype(A) <: Union{Integer, Complex{<:Integer}}` makes the type that is the `Union` when the program runs (a `Complex{T} where T<:Integer` has a type variable in it)
+# `eltype(A) <: Union{Integer, Complex{<:Integer}}` makes the type that is the `Union` when the program runs (a
+# `Complex{T} where T<:Integer` has a type variable in it)
 Base.@assume_effects :foldable integer_eltype(::Type{T}) where {T} = T <: Union{Integer,Complex{<:Integer}}
 @device_override SparseArrays._hermitian_solve(A::SparseArrays.AbstractSparseMatrixCSC) = !integer_eltype(eltype(A)) && ishermitian(A)
 

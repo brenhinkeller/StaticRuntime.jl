@@ -1,12 +1,16 @@
 # `@cfunction`, in the code that is generated (see cfunctions.jl for what is done before).
 #
-# Julia gives the C function of `@cfunction(f, R, (A...))` as a wrapper, `jlcapi_f_N`, that calls a function that it asks the runtime for (`jl_get_abi_converter`: that of
-# the compiled method of `f` for the types of the arguments, made when it is first needed, or if the method was changed since). The one that it has until then is a thunk
-# (`j_N_gfthunk`) that boxes the arguments and calls `f` by dispatch (`ijl_apply_generic`). A program has neither of them. The method that the thunk calls is
-# made part of the program by the code that cfunctions.jl adds (a function `cfunction_target_ID` for each `@cfunction`, that is called from the entry point where
-# it can't be reached, so that it is compiled), and here the wrapper is made to call it: that is a call of the types that the wrapper has, which are those of C.
+# Julia gives the C function of `@cfunction(f, R, (A...))` as a wrapper, `jlcapi_f_N`, that calls a function that it
+# asks the runtime for (`jl_get_abi_converter`: that of the compiled method of `f` for the types of the arguments, made
+# when it is first needed, or if the method was changed since). The one that it has until then is a thunk
+# (`j_N_gfthunk`) that boxes the arguments and calls `f` by dispatch (`ijl_apply_generic`). A program has neither of
+# them. The method that the thunk calls is made part of the program by the code that cfunctions.jl adds (a function
+# `cfunction_target_ID` for each `@cfunction`, that is called from the entry point where it can't be reached, so that it
+# is compiled), and here the wrapper is made to call it: that is a call of the types that the wrapper has, which are
+# those of C.
 
-# What a `@cfunction` of the program is: the type of the function, the types of the arguments, and of the result, and the number that its function has
+# What a `@cfunction` of the program is: the type of the function, the types of the arguments, and of the result, and
+# the number that its function has
 struct CFunctionRoot
     id::Int
     ftype::DataType
@@ -17,7 +21,8 @@ end
 # the name of the function of the program that a root is compiled as (the compiler adds `julia_` and a number)
 cfunction_root_name(id::Integer) = string("cfunction_target_", id)
 
-# The function that a thunk of `jl_get_abi_converter` calls by dispatch: the roots that are for the type of its function, and have the types that it has
+# The function that a thunk of `jl_get_abi_converter` calls by dispatch: the roots that are for the type of its
+# function, and have the types that it has
 function cfunction_root_function(mod::LLVM.Module, thunk::LLVM.Function, roots::AbstractVector{CFunctionRoot})
     fns = LLVM.functions(mod)
     haskey(fns, "ijl_apply_generic") || return nothing
@@ -42,7 +47,8 @@ function cfunction_root_function(mod::LLVM.Module, thunk::LLVM.Function, roots::
     return nothing
 end
 
-# A function of the type and the properties of `old` that calls `target` with its arguments, and is what `old` was: it has the name, and what used it uses it
+# A function of the type and the properties of `old` that calls `target` with its arguments, and is what `old` was: it
+# has the name, and what used it uses it
 function replace_with_call!(old::LLVM.Function, target::LLVM.Function)
     mod = LLVM.parent(old)
     t = LLVM.function_type(old)

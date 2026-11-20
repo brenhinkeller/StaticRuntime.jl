@@ -1,22 +1,26 @@
-# MPI.jl in a compiled program. MPI is a library that the program calls (see `runtime/libraries.jl`: MPI.jl opens `libmpi` with `RTLD_GLOBAL` when it is loaded, and
-# calls its functions by name; the program opens it, from the path that it has when compiling, when it first calls one), and what is different is what MPI.jl does when
-# it starts up and ends:
+# MPI.jl in a compiled program. MPI is a library that the program calls (see `runtime/libraries.jl`: MPI.jl opens
+# `libmpi` with `RTLD_GLOBAL` when it is loaded, and calls its functions by name; the program opens it, from the path
+# that it has when compiling, when it first calls one), and what is different is what MPI.jl does when it starts up and
+# ends:
 #
-# * `MPI.Init` runs the functions that were registered with `MPI.add_init_hook!` (the types of MPI.jl set up their handles), a list of functions of different
-#   types that it calls one after another. They are the ones that are registered when compiling: here they are called by name, in the same order (and the finalize hooks
-#   in the opposite order, as MPI.jl does).
-# * `MPI.Init` registers a function with `atexit` that calls `MPI.Finalize` when the program ends, which a compiled program does not run: call `MPI.Finalize()`
-#   yourself at the end (`finalize_atexit` is ignored).
+# * `MPI.Init` runs the functions that were registered with `MPI.add_init_hook!` (the types of MPI.jl set up their
+#   handles), a list of functions of different types that it calls one after another. They are the ones that are
+#   registered when compiling: here they are called by name, in the same order (and the finalize hooks in the opposite
+#   order, as MPI.jl does).
+# * `MPI.Init` registers a function with `atexit` that calls `MPI.Finalize` when the program ends, which a compiled
+#   program does not run: call `MPI.Finalize()` yourself at the end (`finalize_atexit` is ignored).
 #
 #
-# The handles of the constants (`MPI.COMM_WORLD`, `MPI.INT`, `MPI.SUM`, ...) are the numbers that the library has them as when compiling, which are
-# the same each time for the MPICH family (MPICH, Intel MPI, and the libraries of the MPI ABI), and are addresses for Open MPI, which a program that is compiled can't use.
+# The handles of the constants (`MPI.COMM_WORLD`, `MPI.INT`, `MPI.SUM`, ...) are the numbers that the library has them
+# as when compiling, which are the same each time for the MPICH family (MPICH, Intel MPI, and the libraries of the MPI
+# ABI), and are addresses for Open MPI, which a program that is compiled can't use.
 module StaticRuntimeMPIExt
 
 using StaticRuntime: @device_override
 using MPI: MPI
 
-# the hooks that are registered now, written as calls of each (the functions are constants, so each call is to a function whose type is known)
+# the hooks that are registered now, written as calls of each (the functions are constants, so each call is to a
+# function whose type is known)
 @generated function call_hooks(::Val{which}) where {which}
     hooks = which === :init ? copy(MPI.mpi_init_hooks) : reverse(copy(MPI.mpi_finalize_hooks))
     return Expr(:block, (Expr(:call, QuoteNode(h)) for h in hooks)..., nothing)

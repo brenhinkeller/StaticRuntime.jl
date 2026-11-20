@@ -1,14 +1,21 @@
-# What is registered: the one place that the packages that are compiled say things to the compiler in, with `add_show_candidates!`, `add_dispatch_candidates!`, `@assume` and `@assume_field`.
+# What is registered: the one place that the packages that are compiled say things to the compiler in, with
+# `add_show_candidates!`, `add_dispatch_candidates!`, `@assume` and `@assume_field`.
 #
-# The registrations of a process are one value, `REGISTRY`, and they only grow: a type that is registered stays, and a statement of a type that is made again replaces the one before it. The `version` of the registry is
-# a hash of what is in it (not a count of the changes): two states of the registry have the same version if what they have is the same, in whatever order it was registered, and in whatever process, which is what the key
-# of what a compilation infers needs of it (see `inference_key`: what was inferred for a version is found by every session that has it, and a session that has another content has another version).
+# The registrations of a process are one value, `REGISTRY`, and they only grow: a type that is registered stays, and a
+# statement of a type that is made again replaces the one before it. The `version` of the registry is a hash of what is
+# in it (not a count of the changes): two states of the registry have the same version if what they have is the same, in
+# whatever order it was registered, and in whatever process, which is what the key of what a compilation infers needs of
+# it (see `inference_key`: what was inferred for a version is found by every session that has it, and a session that has
+# another content has another version).
 #
-# A compilation does not read the registry as it goes (that is the way that what is registered between two compilations can change what the second one is, without the key of what it infers saying so):
-# it takes a `Registered`, a copy of what is in the registry when it starts (see `Compilation`), and everything that it asks is asked of that. The functions that Julia generates the code of
-# `show_element` and `deepcopy` with read the registry itself: they are made when the code that has them is inferred, and what they are made of is the state that the registry has then. They are made again when what they
-# are made for is inferred again, which is whenever the version of the registry is another (it is in the key of what is inferred): what is registered after a program that has them was compiled is what the next one has
-# (`test/core/state.jl` compiles one, registers a type, and compiles another).
+# A compilation does not read the registry as it goes (that is the way that what is registered between two compilations
+# can change what the second one is, without the key of what it infers saying so): it takes a `Registered`, a copy of
+# what is in the registry when it starts (see `Compilation`), and everything that it asks is asked of that. The
+# functions that Julia generates the code of `show_element` and `deepcopy` with read the registry itself: they are made
+# when the code that has them is inferred, and what they are made of is the state that the registry has then. They are
+# made again when what they are made for is inferred again, which is whenever the version of the registry is another (it
+# is in the key of what is inferred): what is registered after a program that has them was compiled is what the next one
+# has (`test/core/state.jl` compiles one, registers a type, and compiles another).
 
 const SlotKey = Tuple{Symbol,Any,Any} # (the memory of a type of elements, or a field of a struct: see slots.jl)
 
@@ -26,7 +33,8 @@ Registry() = Registry(Type[], Type[], Any[], Tuple{Any,Any}[], Dict{SlotKey,Any}
 
 const REGISTRY = Registry()
 
-# The hash of what the registry has: the sum of the hashes of its parts, so that the order that they were registered in does not matter. (`type_hash`, in compilation.jl, is the same in every process.)
+# The hash of what the registry has: the sum of the hashes of its parts, so that the order that they were registered in
+# does not matter. (`type_hash`, in compilation.jl, is the same in every process.)
 function registry_version(r::Registry)
     h = UInt(0)
     for T in r.show; h += hash(type_hash(T), UInt(1)); end
@@ -72,7 +80,8 @@ function register_field!(key::SlotKey, T)
     return true
 end
 
-# (a callback of the type `F` that is called with a value of the type `V`, that was made before the program: `note_callback(V, f)` is what the code of the program says for those that it makes)
+# (a callback of the type `F` that is called with a value of the type `V`, that was made before the program:
+# `note_callback(V, f)` is what the code of the program says for those that it makes)
 function register_callback!(V::Type, F::Type)
     (V, F) in REGISTRY.callbacks && return false
     push!(REGISTRY.callbacks, (V, F))
@@ -90,7 +99,8 @@ end
 """
     Registered
 
-What was registered when a compilation started (a copy of the `REGISTRY`: see there), with the lists that the compilation asks for already made: the types that a call over `Any` is made over, and the types that `show` is.
+What was registered when a compilation started (a copy of the `REGISTRY`: see there), with the lists that the
+compilation asks for already made: the types that a call over `Any` is made over, and the types that `show` is.
 """
 struct Registered
     version::Int

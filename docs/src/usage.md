@@ -18,11 +18,10 @@ function main(args::Vector{String})
 end
 ```
 
-!!! warning "`stdout`, `stderr` and `stdin` of Base can't be used: use `STDOUT`, `STDERR` and `STDIN`"
-    In Julia, `stdout` is a global variable of the abstract type `IO`, so a call like
-    `println(stdout, x)` can only be resolved when it is run, and a compiled program can't do that.
-    It is rejected when compiling (see strict mode), with a message that says what to use instead. Code
-    that uses `stdout` will work if it is written in a way that doesn't (`println(x)`, or `STDOUT`).
+!!! note "`stdout`, `stderr` and `stdin` of Base are the program's streams"
+    In Julia, `stdout` is a global variable of the abstract type `IO`, so a call like `println(stdout, x)` would be
+    resolved only when it runs. In a compiled program, reads of Base's `stdout`, `stderr` and `stdin` are `STDOUT`,
+    `STDERR` and `STDIN`, so such code works as it is.
 
 ### Formatted output: `printf` and `@printf`
 
@@ -91,7 +90,7 @@ data of the Julia that compiles it, and so are the same as in Julia.
 
 Base's `show` for a container asks the `IOContext` of the stream what is known about the types of the
 elements (an `ImmutableDict` of `Any`s), and writes type names by looking up modules and bindings: all
-dynamic. Here the same output is made with what is known when compiling (`src/show.jl`, `src/context.jl`), and most of what Base does is Base's own code:
+dynamic. Here the same output is made with what is known when compiling (`src/overrides/printing.jl`, `src/overrides/io.jl`), and most of what Base does is Base's own code:
 
 * the name of a type is a constant string made by Base's own `show` when compiling, so it is what Base prints;
 * the **properties of the context** (`:typeinfo`, `:compact`, `:limit`, `:displaysize`, ...) are in the type of the stream (`ContextIO`), so that asking for one is a
@@ -261,7 +260,7 @@ specific than it.** So an override `print(x1, x2) = print(STDOUT, x1, x2)` would
 `print(io, x)`, which must go to the methods of Base for printing to an `IO`: `print(io, 'c')`,
 `print(io, "string")`... Overrides therefore need to be written so that they don't cover calls that
 they should not: with the same signature as the method that they replace, with restricted argument
-types, or by doing for those calls what the method of Base does (see `src/io.jl`).
+types, or by doing for those calls what the method of Base does (see `src/overrides/io.jl`).
 
 ### Fields that are made again when the program runs
 

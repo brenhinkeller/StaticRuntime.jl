@@ -1,9 +1,11 @@
-# Calls on types that the program makes when it runs: `getfield` by a name that is known then, `<:` and `isa` with types that are only known then, and what a call that no method fits
-# says. The answers for the types of the binary are made when compiling, as tables.
+# Calls on types that the program makes when it runs: `getfield` by a name that is known then, `<:` and `isa` with types
+# that are only known then, and what a call that no method fits says. The answers for the types of the binary are made
+# when compiling, as tables.
 
-# A call that has no method to run (`Core.throw_methoderror(f, args...)`: what union splitting leaves when the types that were
-# split on were all of them) aborts the program, and does not look at its arguments. The function and the types in them are
-# not needed, then: where the arguments are put (a frame on the stack), the addresses of objects are replaced by null.
+# A call that has no method to run (`Core.throw_methoderror(f, args...)`: what union splitting leaves when the types
+# that were split on were all of them) aborts the program, and does not look at its arguments. The function and the
+# types in them are not needed, then: where the arguments are put (a frame on the stack), the addresses of objects are
+# replaced by null.
 function null_methoderror_arguments!(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     haskey(fns, "jl_f_throw_methoderror") || return false
@@ -33,8 +35,8 @@ function null_methoderror_arguments!(mod::LLVM.Module)
                 end
             end
         end
-        # say which call it was: where the types that were split on were the ones that are registered, it is what an object of
-        # another type reaches (see `dispatch.jl`)
+        # say which call it was: where the types that were split on were the ones that are registered, it is what an
+        # object of another type reaches (see `dispatch.jl`)
         what = (name === nothing) ? "a call" : "`$name`"
         msg = "MethodError: no method matching $what with the given argument types.\n This may be due to a type that the program was not found to make when compiling: `add_dispatch_candidates!(T)` adds one."
         @dispose builder = LLVM.IRBuilder() begin
@@ -46,8 +48,8 @@ function null_methoderror_arguments!(mod::LLVM.Module)
     return changed
 end
 
-# The name of the function that is the object at `addr` (a function is an object of a type of its own, without contents, that may not be
-# aligned as the others are), or `nothing`
+# The name of the function that is the object at `addr` (a function is an object of a type of its own, without contents,
+# that may not be aligned as the others are), or `nothing`
 function function_name_at(addr::UInt)
     object_type(UInt(0x10000)) # (which sets what the tag of a type is)
     word = safe_load(addr - 8)
@@ -61,13 +63,16 @@ function function_name_at(addr::UInt)
     return string(nameof(T.instance))
 end
 
-# `getfield(x, name)` with a name that is only known at run time (`getproperty(::QRPivoted, ::Symbol)` is, when it is not inlined) is
-# `ijl_field_index(T, name, 0)`, the number of the field of the type `T` of that name, or -1. `T` is a constant, so the names
-# of its fields are, and the answer is a comparison with each of them (as the symbols of the same name are the same object).
+# `getfield(x, name)` with a name that is only known at run time (`getproperty(::QRPivoted, ::Symbol)` is, when it is
+# not inlined) is `ijl_field_index(T, name, 0)`, the number of the field of the type `T` of that name, or -1. `T` is a
+# constant, so the names of its fields are, and the answer is a comparison with each of them (as the symbols of the same
+# name are the same object).
 #
-# `getfield(x, name)` itself with a name that is only known at run time, of fields of different types, is `jl_f_getfield` in Julia, whose result has a type that the program does not know:
-# for a struct the compiler makes it a comparison with each name (`dynamic_field_plan`, `struct_field`). OPEN: it is not done for the fields of a type object (`getproperty(T, name)`),
-# which is what fails for `MvNormal` in `test/packages/distributions.jl` under `--code-coverage` (that disables the inlining and the folding that avoid it).
+# `getfield(x, name)` itself with a name that is only known at run time, of fields of different types, is
+# `jl_f_getfield` in Julia, whose result has a type that the program does not know: for a struct the compiler makes it a
+# comparison with each name (`dynamic_field_plan`, `struct_field`). OPEN: it is not done for the fields of a type object
+# (`getproperty(T, name)`), which is what fails for `MvNormal` in `test/packages/distributions.jl` under
+# `--code-coverage` (that disables the inlining and the folding that avoid it).
 function define_field_index!(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     haskey(fns, "ijl_field_index") && LLVM.isdeclaration(fns["ijl_field_index"]) || return false
@@ -101,12 +106,12 @@ function define_field_index!(mod::LLVM.Module)
 end
 
 # `x isa T` for an `x` that is only known at run time, and a type `T` that is not concrete (`Number`, `Union{A,B}`,
-# `AbstractVector{Int}`), is `ijl_subtype(typeof(x), T)`: libjulia's subtyping, which is a large and complicated part
-# of it. The types that `T` is in the code are constants, though, and the types that the objects of the program can have are
-# those in the binary (the tags of the objects are those): so the answers can be had when compiling, from Julia's
+# `AbstractVector{Int}`), is `ijl_subtype(typeof(x), T)`: libjulia's subtyping, which is a large and complicated part of
+# it. The types that `T` is in the code are constants, though, and the types that the objects of the program can have
+# are those in the binary (the tags of the objects are those): so the answers can be had when compiling, from Julia's
 # `<:`, for each of the types in the binary and each type that is asked about. Written out as `ijl_subtype`: a
-# comparison of the second argument with each of those types, and of the first with the types that are subtypes of it.
-# A call with a type that was not one of those exits with a message, as does one of a type that is not in the binary
+# comparison of the second argument with each of those types, and of the first with the types that are subtypes of it. A
+# call with a type that was not one of those exits with a message, as does one of a type that is not in the binary
 # (which has no objects).
 
 # the addresses of the types that `ijl_subtype` is called with, or `nothing` if the function is used in any other way
@@ -169,9 +174,9 @@ function define_subtype!(e, queries::Vector{UInt}) # (e::ObjectEmbedder, which i
     return
 end
 
-# `a <: b` for two types that are only known when the program runs (a `Vector{DataType}` of the types of some objects, compared
-# with a type): `jl_f_issubtype`, the builtin, which is `ijl_subtype` with its arguments in an array and its result boxed; and
-# `x isa T` for a type `T` that is only known then: the same with the type of `x`, which is its tag
+# `a <: b` for two types that are only known when the program runs (a `Vector{DataType}` of the types of some objects,
+# compared with a type): `jl_f_issubtype`, the builtin, which is `ijl_subtype` with its arguments in an array and its
+# result boxed; and `x isa T` for a type `T` that is only known then: the same with the type of `x`, which is its tag
 function define_subtype_builtins!(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     wanted(name) = haskey(fns, name) && LLVM.isdeclaration(fns[name]) && !isempty(LLVM.uses(fns[name]))
@@ -217,10 +222,11 @@ function define_subtype_builtins!(mod::LLVM.Module)
     return true
 end
 
-# `ijl_subtype(a, b)` for any two of the types that are in the binary: a table of the answers, which Julia's `<:` gave when
-# compiling, for each pair (a bit for each, row `b`, column `a`), and a search of the table of types for each of the arguments. (A type
-# that is not in the binary can't be the type of an object that the program has, or a type that it can name, so it is not asked about.)
-# `define_subtype!` is shorter for what is asked about with types that are constants, and is used if all of the calls are like that.
+# `ijl_subtype(a, b)` for any two of the types that are in the binary: a table of the answers, which Julia's `<:` gave
+# when compiling, for each pair (a bit for each, row `b`, column `a`), and a search of the table of types for each of
+# the arguments. (A type that is not in the binary can't be the type of an object that the program has, or a type that
+# it can name, so it is not asked about.) `define_subtype!` is shorter for what is asked about with types that are
+# constants, and is used if all of the calls are like that.
 function define_subtype_table!(e)
     mod = e.mod
     haskey(LLVM.functions(mod), "ijl_subtype") && LLVM.isdeclaration(LLVM.functions(mod)["ijl_subtype"]) || return
@@ -295,8 +301,10 @@ function define_subtype_table!(e)
     return
 end
 
-# `static_type_name(T)`, the text of a type that a program prints when it runs (`runtime_type_text` in overrides/show.jl): a table of the types that are in the binary, each with what Julia's `show` gives it in this
-# process (`host_string`, as for a type that is a constant), and a search of it; null for a type that is not in it. Made only for a program that asks for it.
+# `static_type_name(T)`, the text of a type that a program prints when it runs (`runtime_type_text` in
+# overrides/printing.jl): a table of the types that are in the binary, each with what Julia's `show` gives it in this
+# process (`host_string`, as for a type that is a constant), and a search of it; null for a type that is not in it. Made
+# only for a program that asks for it.
 function define_type_name_table!(e)
     mod = e.mod
     haskey(LLVM.functions(mod), "static_type_name") && LLVM.isdeclaration(LLVM.functions(mod)["static_type_name"]) || return

@@ -1,57 +1,11 @@
-# The method table of this package, and the entry points that use it.
-#
-# StaticCompiler compiles with an overlay method table (`StaticCompiler.method_table`) that holds
-# overrides of Base methods that can't be compiled. That table includes overrides, from
-# `quirks.jl`, that replace the error helpers of Base with functions that print and exit; they
-# made sense before compiled code could throw, but they prevent errors from being caught.
-#
-# A compilation uses exactly one overlay table (overlays do not stack), with Base itself as the
-# fallback. So we have a table of our own, which contains only the overrides defined by this
-# package, and compile with it by default: the `quirks.jl` overrides do not apply, and Julia's
-# own error helpers (which throw) are used. The functions below are StaticCompiler's entry points,
-# defaulting to this table. Pass `method_table = StaticCompiler.method_table` for the old behavior.
+# The entry points: StaticCompiler's (`compile_executable`, `compile_shlib`, `static_code_*`), with our method table,
+# our runtime linked into the code they make (`link_runtime!`), and the passes of a compilation (inference/passes.jl)
+# around them; and the `main` of an executable, which gives a program its command line.
 
-include("runtime/runtime.jl") # The runtime functions that compiled code needs: allocation, exceptions, ...
-using .Runtime: link_runtime!, UnsupportedCodeError
-
-# The parameters of the compilations of this package. GPUCompiler's functions that we specialize (`inference_params`,
-# `optimize!`, ...) are for this type, which is ours, and so they don't change what StaticCompiler's own compilations do.
-#
-# GPUCompiler keeps what it infers apart for each value of the parameters (they are part of the token that owns the code instances, which is the same token if they are the same values), and what it asks of a job
-# for inference (`inference_params`, ...) has to be made of them. So they are all that inference can depend on, and what they hold is all that it does depend on: `key`, a number made of the state of the compilation
-# in the pass that is made (see `inference_key`: the settings, what is registered, and what the passes found), and the limit that is asked for by the job (`split_limit`). Two compilations at the same state have the same
-# parameters, and what is inferred for one is used for the other.
-struct OverridesParams <: GPUCompiler.AbstractCompilerParams
-    key::Int
-    split_limit::Int
-    id::Int          # the cache of the compilation (`Compilation.id`): its own, so that what another compilation inferred is not found
-end
-OverridesParams(c) = OverridesParams(cache_key(c), c.settings.split_limit, c.id) # (the compilation `c`: see compilation.jl and reuse.jl)
-OverridesParams() = OverridesParams(Compilation())                 # (of a compilation that has just begun)
-
-Base.Experimental.@MethodTable(method_table)
-@doc """
-    StaticRuntime.method_table
-
-The overlay method table of this package, which `@device_override` adds methods to, and which the functions
-that compile (`compile_executable` and the others) use by default.
-""" method_table
-
-"""
-    @device_override old_bad_method(args...) = new_good_method(args...)
-
-Override a method that can't be compiled statically (`old_bad_method`) with one that can, in the
-method table of StaticRuntime, which is the one used by the functions of this package
-(`compile_executable`, ...). Unlike `StaticCompiler.@device_override`, this does not affect
-compilation with StaticCompiler's own functions.
-"""
-macro device_override(ex)
-    return esc(:($Base.Experimental.@consistent_overlay($(GlobalRef(@__MODULE__, :method_table)), $ex)))
-end
-
-# `gc` is `:auto`, where the collector is available (it needs to know where the stack of the program starts): the program has the collector if it needs it (see `allocation_is_finite`), and not otherwise.
-# The environment variable `STATIC_RUNTIME_GC` (`auto`, `false`, `true`, or a number of allocations: see `gc`) is for running all the tests (or any
-# program that is compiled) with another, for finding bugs in the collector
+# `gc` is `:auto`, where the collector is available (it needs to know where the stack of the program starts): the
+# program has the collector if it needs it (see `allocation_is_finite`), and not otherwise. The environment variable
+# `STATIC_RUNTIME_GC` (`auto`, `false`, `true`, or a number of allocations: see `gc`) is for running all the tests (or
+# any program that is compiled) with another, for finding bugs in the collector
 function default_gc()
     setting = get(ENV, "STATIC_RUNTIME_GC", "")
     if !isempty(setting)
@@ -62,53 +16,64 @@ function default_gc()
     return Sys.isapple() || Sys.islinux() ? :auto : false
 end
 
-# Whether the program is optimized once more after it is linked (`optimize = true`: the pipeline `O2` of the optimizer, on the whole program, see `inline_internal_functions!`). Not by default. The environment variable
+# Whether the program is optimized once more after it is linked (`optimize = true`: the pipeline `O2` of the optimizer,
+# on the whole program, see `inline_internal_functions!`). Not by default. The environment variable
 # `STATIC_RUNTIME_OPTIMIZE` (`true` or `false`) sets the default, for running all of the tests with it.
 default_optimize() = get(ENV, "STATIC_RUNTIME_OPTIMIZE", "false") in ("true", "1", "yes")
 
-# what `gc` can be: `true` (the collector is always in the program), `false` (never), `:auto` (it is if the program needs it), or a number of allocations (the collector is always in, and runs that often)
+# what `gc` can be: `true` (the collector is always in the program), `false` (never), `:auto` (it is if the program
+# needs it), or a number of allocations (the collector is always in, and runs that often)
 check_gc(gc) = (gc isa Bool || gc === :auto || gc isa Integer) ||
     throw(ArgumentError("`gc` is `true`, `false`, `:auto`, or a number of allocations, not `$(repr(gc))`"))
 
-# The math library: on Linux its functions (`erfc`, which Julia code calls by name, see `runtime/libraries.jl`) are in `libm`, which is
-# not linked by default, as it is on macOS (where it is part of libSystem).
+# The math library: on Linux its functions (`erfc`, which Julia code calls by name, see `runtime/libraries.jl`) are in
+# `libm`, which is not linked by default, as it is on macOS (where it is part of libSystem).
 #
-# With `small = true`, what the file has that the program does not need is left out. On macOS, the names of the functions that are not exported (all of those of the program, but its entry
-# point; `-x`): a program does not look at them, and they are 5 to 25 kB; and the segment of the constants and the table of the addresses of functions, which is made read-only when the program
-# starts (`-no_data_const`): it is a page of 16 kB, and a program of a few kilobytes has a few hundred bytes in it. On Linux, the symbols (`-s`: not tried yet).
+# With `small = true`, what the file has that the program does not need is left out. On macOS, the names of the
+# functions that are not exported (all of those of the program, but its entry point; `-x`): a program does not look at
+# them, and they are 5 to 25 kB; and the segment of the constants and the table of the addresses of functions, which is
+# made read-only when the program starts (`-no_data_const`): it is a page of 16 kB, and a program of a few kilobytes has
+# a few hundred bytes in it. On Linux, the symbols (`-s`: not tried yet).
 function default_cflags(small::Bool = false)
     Sys.islinux() && return small ? `-lm -ldl -Wl,-s` : `-lm -ldl`
     if Sys.isapple()
-        # (clang does not find out which linker it has, and so gives it the version of the system with the option that is the old one, `-macosx_version_min`, which the linker of recent versions says
-        # has been renamed, once for each program that is made. With the version of the linker said, it gives the new one, `-platform_version`, which linkers have understood since Xcode 11 (version 520))
+        # (clang does not find out which linker it has, and so gives it the version of the system with the option that
+        # is the old one, `-macosx_version_min`, which the linker of recent versions says has been renamed, once for
+        # each program that is made. With the version of the linker said, it gives the new one, `-platform_version`,
+        # which linkers have understood since Xcode 11 (version 520))
         return small ? `-mlinker-version=900 -Wl,-x -Wl,-no_data_const` : `-mlinker-version=900`
     end
     return ``
 end
 
-# The target: the host, as StaticCompiler's own default, but, on macOS, with a version in the triple. StaticCompiler's triple for it
-# has none (`aarch64-apple-darwin`), so the object files have no "platform load command", which says what system they are for, and the
-# linker of recent versions of macOS warns about each (`no platform load command found in 'x.o', assuming: macOS`). The oldest version that
-# exists for the architecture is used, which is what the binary says that it needs at least.
+# The target: the host, as StaticCompiler's own default, but, on macOS, with a version in the triple. StaticCompiler's
+# triple for it has none (`aarch64-apple-darwin`), so the object files have no "platform load command", which says what
+# system they are for, and the linker of recent versions of macOS warns about each (`no platform load command found in
+# 'x.o', assuming: macOS`). The oldest version that exists for the architecture is used, which is what the binary says
+# that it needs at least.
 function default_target()
     Sys.isapple() || return StaticCompiler.StaticTarget()
     arch, minimum = Sys.ARCH === :x86_64 ? ("x86_64", "10.13.0") : ("aarch64", "11.0.0")
     features = LLVM.host_cpu_features()
-    # On Apple Silicon, without `fuse-literals`: the CPU model of the Apple cores has it, and with it the code generator makes every
-    # floating-point constant that is not tiny from four integer instructions (`mov`, three `movk`) and a `fmov`, in place of one load from
-    # the constant pool, which is what it does for the generic CPU, and what the C library does. The math functions of Julia (`log`, `exp`,
-    # `atan`, `pow`, ...) have tens of constants each, and are 15% to 35% slower with it; nothing else changes, in speed or size.
+    # On Apple Silicon, without `fuse-literals`: the CPU model of the Apple cores has it, and with it the code generator
+    # makes every floating-point constant that is not tiny from four integer instructions (`mov`, three `movk`) and a
+    # `fmov`, in place of one load from the constant pool, which is what it does for the generic CPU, and what the C
+    # library does. The math functions of Julia (`log`, `exp`, `atan`, `pow`, ...) have tens of constants each, and are
+    # 15% to 35% slower with it; nothing else changes, in speed or size.
     arch == "aarch64" && (features = isempty(features) ? "-fuse-literals" : features * ",-fuse-literals")
     return StaticCompiler.StaticTarget(string(arch, "-apple-macosx", minimum), LLVM.host_cpu_name(), features)
 end
 
-# StaticCompiler's entry points, with our method table as the default, and the runtime of this
-# package installed in the code that they generate (`llvm_postprocess`)
-# The check that an entry point infers to a concrete type is made before the code is: when a call over the types that the program makes was seen and what the slots of the program hold is not analyzed yet, or not settled,
-# an entry that is `Union{}` may be so because the types of what is read from the slots are not known (`attr.inputs[key]` is an `Input` that is not known to be an `Input{ComputeGraph}`, and what is called on its fields has no
-# method for the types that are tried). The analysis is made where the code that is compiled is inferred (`drive_inference!`, not the inference that the check is made of), so that is done for it, of the entry that is compiled
-# (`rooted`: the one that has the targets of the `@cfunction`s), without making its code: if the types of the slots are others then, the pass is made again with them (`SlotsChanged`, which is thrown from there), and if
-# they are what they were, the check is made again, and says what it found.
+# StaticCompiler's entry points, with our method table as the default, and the runtime of this package installed in the
+# code that they generate (`llvm_postprocess`). The check that an entry point infers to a concrete type is made before
+# the code is: when a call over the types that the program makes was seen and what the slots of the program hold is not
+# analyzed yet, or not settled, an entry that is `Union{}` may be so because the types of what is read from the slots
+# are not known (`attr.inputs[key]` is an `Input` that is not known to be an `Input{ComputeGraph}`, and what is called
+# on its fields has no method for the types that are tried). The analysis is made where the code that is compiled is
+# inferred (`drive_inference!`, not the inference that the check is made of), so that is done for it, of the entry that
+# is compiled (`rooted`: the one that has the targets of the `@cfunction`s), without making its code: if the types of
+# the slots are others then, the pass is made again with them (`SlotsChanged`, which is thrown from there), and if they
+# are what they were, the check is made again, and says what it found.
 function early_entry_check(c, args, rooted; method_table, params, target)
     started = time()
     try
@@ -116,8 +81,9 @@ function early_entry_check(c, args, rooted; method_table, params, target)
         trace_on() && trace("check of the entry point: ", round(time() - started; digits = 1), " s")
         return
     catch e
-        # (in any pass that the slots are still analyzed in: what one pass finds of them can make what is read from others be known in the next, `model.moi_backend` of JuMP, a `CachingOptimizer` that is made
-        # of what is read from the one that was there)
+        # (in any pass that the slots are still analyzed in: what one pass finds of them can make what is read from
+        # others be known in the next, `model.moi_backend` of JuMP, a `CachingOptimizer` that is made of what is read
+        # from the one that was there)
         (e isa InferenceError && c.slots.mode === :on && c.slots.passes < SLOT_PASS_LIMIT) || rethrow()
     end
     trace_on() && trace("check of the entry point (not settled): ", round(time() - started; digits = 1), " s")
@@ -137,10 +103,13 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             check_gc(gc)
             register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
             explicit_params = params
-            # (The code keeps its debug information until it has been accepted, which is what says where in the Julia code the calls of the runtime that it refuses are: `link_runtime!` removes it then, as `strip` says. The code
-            # was made without it, and made again with it when it was refused: that was twice the time of what is refused. With a postprocess of the caller's, the code is given to it as `strip` says.)
+            # (The code keeps its debug information until it has been accepted, which is what says where in the Julia
+            # code the calls of the runtime that it refuses are: `link_runtime!` removes it then, as `strip` says. The
+            # code was made without it, and made again with it when it was refused: that was twice the time of what is
+            # refused. With a postprocess of the caller's, the code is given to it as `strip` says.)
             ours = llvm_postprocess === nothing
-            # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked to it, and does not change it; see `input_dependent_cases` in testing.jl)
+            # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked
+            # to it, and does not change it; see `input_dependent_cases` in testing.jl)
             postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); started = time(); linked = link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = comp.objects.keyed_objects); trace_on() && trace("linking the runtime (and embedding the constants): ", round(time() - started; digits = 1), " s"); linked)) : llvm_postprocess
             result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
@@ -190,8 +159,8 @@ end
 """
     static_code_llvm(f, types; io = stdout, kwargs...)
 
-Write the LLVM IR of the compiled `f(types...)`, as it is when the program is made (with the runtime of this package, and the objects that it refers to in it), to `io`.
-The options are those of [`static_llvm_module`](@ref).
+Write the LLVM IR of the compiled `f(types...)`, as it is when the program is made (with the runtime of this package,
+and the objects that it refers to in it), to `io`. The options are those of [`static_llvm_module`](@ref).
 """
 function static_code_llvm(f, types; io::IO = stdout, kwargs...)
     tt = Base.to_tuple_type(types)
@@ -237,16 +206,18 @@ end
     return args
 end
 
-# `ARGS` of the binary is the vector of the Julia that compiled it, with what that had in it: the arguments of the command line of that. (Not inlined, like `command_line_arguments`: what these two
-# allocate is as much as the arguments are, and `allocation_is_finite` ignores it: it knows them by their names.)
+# `ARGS` of the binary is the vector of the Julia that compiled it, with what that had in it: the arguments of the
+# command line of that. (Not inlined, like `command_line_arguments`: what these two allocate is as much as the arguments
+# are, and `allocation_is_finite` ignores it: it knows them by their names.)
 @noinline function set_base_args(args::Vector{String})
     empty!(Base.ARGS)
     append!(Base.ARGS, args)
     return nothing
 end
 
-# The exit status of the program is the integer that `f` returns, and 0 if it returns something else (`nothing`, for one): the entry point
-# that StaticCompiler makes of `f` itself has whatever is in the register of the result, when `f` does not return an integer.
+# The exit status of the program is the integer that `f` returns, and 0 if it returns something else (`nothing`, for
+# one): the entry point that StaticCompiler makes of `f` itself has whatever is in the register of the result, when `f`
+# does not return an integer.
 exit_status(status) = status isa Integer ? Int(status) : 0
 
 # what the entry point of `f(args::Vector{String})` does: `ARGS` is also set, as it is in Julia
@@ -262,8 +233,8 @@ function run_entry_without_arguments(f, argc::Int, argv::Ptr{Ptr{UInt8}})
     return exit_status(f())
 end
 
-# A function `main(argc::Int, argv::Ptr{Ptr{UInt8}})` that runs `f(args)` (or `f()`, with `arguments = false`), named `name`. The entry
-# point of the executable has the name of the function, so it is made in a module of its own.
+# A function `main(argc::Int, argv::Ptr{Ptr{UInt8}})` that runs `f(args)` (or `f()`, with `arguments = false`), named
+# `name`. The entry point of the executable has the name of the function, so it is made in a module of its own.
 function entry_point(f, name::AbstractString; arguments::Bool = true)
     entry = Module(:StaticEntryPoint)
     runner = arguments ? run_entry : run_entry_without_arguments
@@ -298,7 +269,9 @@ function compile_executable(f::Function, types::Tuple{DataType}, args...; kwargs
     types == (Vector{String},) || return invoke(compile_executable, Tuple{Vararg{Any}}, f, types, args...; kwargs...)
     return compile_executable_with_arguments(f, args...; kwargs...)
 end
+
 compile_executable(f::Function, types::Tuple{}, args...; kwargs...) = compile_executable_with_arguments(f, args...; arguments = false, kwargs...)
+
 compile_executable(f::Function; kwargs...) = compile_executable(f, (); kwargs...)
 
 function compile_executable_with_arguments(f::Function, path::String = pwd(), name::AbstractString = string(nameof(f)); arguments::Bool = true, kwargs...)

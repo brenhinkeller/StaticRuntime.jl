@@ -1,14 +1,14 @@
 # `IdDict`, without libjulia.
 #
-# An `IdDict` keeps its keys and values in a `Memory{Any}` (a key, then its value), and Base looks in that table, adds to it, and
-# removes from it with `jl_eqtable_*`, functions of libjulia. Here the same table is kept with Julia code (linear probing, with the
-# hash of `objectid`, as the docstring of `IdDict` says): the struct is Base's own, and what is not written here (iteration, `length`,
-# `copy`, ...) is Base's. This is what `deepcopy` uses.
+# An `IdDict` keeps its keys and values in a `Memory{Any}` (a key, then its value), and Base looks in that table, adds
+# to it, and removes from it with `jl_eqtable_*`, functions of libjulia. Here the same table is kept with Julia code
+# (linear probing, with the hash of `objectid`, as the docstring of `IdDict` says): the struct is Base's own, and what
+# is not written here (iteration, `length`, `copy`, ...) is Base's. This is what `deepcopy` uses.
 #
-# The hash: the address of a mutable object (which is what `objectid` is, too), and one number for everything else. Keys are
-# also looked at as `Any` when the table is made larger, and the types they have then are not known when compiling, so this
-# can't use the types (`objectid` of an immutable looks at its fields, one type at a time): a table with many keys that are not
-# mutable (an `IdDict{Int,...}`) is slow, but not wrong.
+# The hash: the address of a mutable object (which is what `objectid` is, too), and one number for everything else. Keys
+# are also looked at as `Any` when the table is made larger, and the types they have then are not known when compiling,
+# so this can't use the types (`objectid` of an immutable looks at its fields, one type at a time): a table with many
+# keys that are not mutable (an `IdDict{Int,...}`) is slow, but not wrong.
 eq_hash(key) = ismutable(key) ? int64hash(UInt64(UInt(pointer_from_objref(key)))) : UInt64(0x9e3779b97f4a7c15)
 
 # A slot of keys that has not been assigned is empty, and one that holds `secret_table_token` has had its key removed.
@@ -135,9 +135,10 @@ end
 
 ## `IdSet`
 #
-# Base keeps the keys of an `IdSet` in a list in the order that they were added, with a table of their places that `jl_idset_*` of libjulia look in and change. Here the list is looked
-# through for a key (the table is not used, and is left empty): the order, `length`, iteration and the rest are Base's own, and what is added to the set is found as fast as the set is
-# short. A set of many thousands of objects is slow.
+# Base keeps the keys of an `IdSet` in a list in the order that they were added, with a table of their places that
+# `jl_idset_*` of libjulia look in and change. Here the list is looked through for a key (the table is not used, and is
+# left empty): the order, `length`, iteration and the rest are Base's own, and what is added to the set is found as fast
+# as the set is short. A set of many thousands of objects is slow.
 function idset_find(list::Memory{Any}, max::Int, key)
     i = 1
     while i <= max

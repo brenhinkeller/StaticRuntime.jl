@@ -167,7 +167,8 @@ end
 # `objectid`, from the type of `x`: what `jl_object_id` does with it
 @generated function static_objectid(x::T) where {T}
     fallback = :(ccall(:jl_object_id, UInt, (Any,), x))
-    # the object id of a `DataType` is its `hash` (which is made from its name and parameters, and is copied into the binary with it)
+    # the object id of a `DataType` is its `hash` (which is made from its name and parameters, and is copied into the
+    # binary with it)
     T === DataType && return :(UInt(getfield(x, :hash) % UInt32))
     (isconcretetype(T) && T !== DataType && T !== Module && T !== Core.TypeName && T !== Core.SimpleVector &&
         T !== Symbol) || return fallback
@@ -177,18 +178,22 @@ end
 end
 @device_override Base.objectid(x) = static_objectid(x)
 
-# `T == S` of types is a call of libjulia (`jl_types_equal`). Two types are equal if each is a subtype of the other: for concrete types,
-# which there is one object of each, that is `===`, and that is all that has to be looked at when both are concrete. (Types that are not,
-# a `Union` or an abstract type with parameters, are compared by `<:`: the table of `<:` in `runtime/types.jl`.)
+# `T == S` of types is a call of libjulia (`jl_types_equal`). Two types are equal if each is a subtype of the other: for
+# concrete types, which there is one object of each, that is `===`, and that is all that has to be looked at when both
+# are concrete. (Types that are not, a `Union` or an abstract type with parameters, are compared by `<:`: the table of
+# `<:` in `runtime/types.jl`.)
 @device_override function Base.:(==)(a::Type, b::Type)
     a === b && return true
     (a isa DataType && b isa DataType && isconcretetype(a) && isconcretetype(b)) && return false
     return (a <: b) & (b <: a)
 end
 
-# `hash` of a type is made from `jl_type_hash`, which for a `DataType` is its `hash` field, as `objectid` is (above). The other types (a `Union`, a `UnionAll`) have it computed by libjulia from what they are made of, which
-# is a call of libjulia, so here it is made from the same parts: the hashes of the two types of a `Union`, and of the bounds of the variable and the body of a `UnionAll`. (Not the number that libjulia gives: a table that has
-# them, which is made when the program runs, is what they are for: the type is a value that the program has, as `Type` of a slot of types, see slots.jl.)
+# `hash` of a type is made from `jl_type_hash`, which for a `DataType` is its `hash` field, as `objectid` is (above).
+# The other types (a `Union`, a `UnionAll`) have it computed by libjulia from what they are made of, which is a call of
+# libjulia, so here it is made from the same parts: the hashes of the two types of a `Union`, and of the bounds of the
+# variable and the body of a `UnionAll`. (Not the number that libjulia gives: a table that has them, which is made when
+# the program runs, is what they are for: the type is a value that the program has, as `Type` of a slot of types, see
+# slots.jl.)
 @inline function type_hash_part(@nospecialize(x))
     x isa DataType && return UInt(getfield(x, :hash) % UInt32)
     x isa Union && return UInt(bitmix(UInt64(type_hash_part(getfield(x, :a))), UInt64(type_hash_part(getfield(x, :b)))) % UInt32)

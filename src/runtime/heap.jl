@@ -1,5 +1,5 @@
-# The heap of compiled programs: where everything that Julia allocates comes from, and the garbage collector that
-# frees what is not used any more.
+# The heap of compiled programs: where everything that Julia allocates comes from, and the garbage collector that frees
+# what is not used any more.
 #
 # This is written in Julia, over raw pointers, and compiled with StaticCompiler like any other code (once for the
 # session, and the code is cached: see `link_heap!` in `heap_link.jl`). It must not allocate, throw or dispatch
@@ -12,13 +12,13 @@
 # There are two allocators. `alloc_nogc` hands out memory from chunks and never frees it. `alloc` is a *conservative,
 # non-moving, mark and sweep* garbage collector, which is safe for all code that Julia can generate:
 #
-# * What can refer to an object is looked for without knowing the types: every word of the stack (and the registers),
-#   of the data of the program that can refer to heap objects, and of the objects that are reached, that is the address
-#   of an object, or of anything inside it (or just after it, which is what a loop that has gone past the end of an array
+# * What can refer to an object is looked for without knowing the types: every word of the stack (and the registers), of
+#   the data of the program that can refer to heap objects, and of the objects that are reached, that is the address of
+#   an object, or of anything inside it (or just after it, which is what a loop that has gone past the end of an array
 #   holds), keeps it. A number that looks like an address keeps an object that is not used: it can't make anything
 #   unsafe. Objects don't move, so the addresses that the code holds are still right.
-# * What is known is the kind of allocation: whether the object can hold references (see `ATOMIC`), which is decided when
-#   compiling, from the type. Objects that can't (strings, arrays of numbers, boxed numbers) are not looked inside.
+# * What is known is the kind of allocation: whether the object can hold references (see `ATOMIC`), which is decided
+#   when compiling, from the type. Objects that can't (strings, arrays of numbers, boxed numbers) are not looked inside.
 # * Small objects are in blocks of one size class, each with a bitmap of the cells that are in use and one of those that
 #   were reached; large objects have memory of their own.
 
@@ -32,8 +32,9 @@ const NORMAL, ATOMIC = 0, 1 # the kinds of allocation: the object may have refer
 
 # the commands that the program can give the heap (see `command`)
 const COLLECT, LIVE_BYTES, COLLECTIONS, HEAP_BYTES, DISABLE, ENABLE = -1, -2, -3, -4, -5, -6
-# (a finalizer is given in two commands: the function, and then the object; a command has one argument, which is the `kind` of an allocation)
-const FINALIZER_FUNCTION, FINALIZER_OBJECT, FINALIZER_SITE = -7, -8, -9 # (a C function, the object that it is for, or the number of a site of `finalizer(f, x)`: see `finalizers.jl`)
+# (a finalizer is given in two commands: the function, and then the object; a command has one argument, which is the
+# `kind` of an allocation)
+const FINALIZER_FUNCTION, FINALIZER_OBJECT, FINALIZER_SITE = -7, -8, -9 # (a C function, the object that it is for, or the number of a site of `finalizer(f, x)`: see `overrides/gc.jl`)
 const FINALIZER_PRESSURE = UInt(1024)
 
 const CHUNK_SIZE = 1 << 20 # for `alloc_nogc`
@@ -82,9 +83,9 @@ const S_PARTIAL = S_CUR + 2 * NCLASSES # and the list of those with free cells
 @inline ld(p::UInt, i::Int) = unsafe_load(Ptr{UInt}(p), i + 1) # the word `i` of memory at `p` (from 0)
 @inline st(p::UInt, i::Int, v::UInt) = unsafe_store!(Ptr{UInt}(p), v, i + 1)
 
-# What the program tells the collector (these are weak references, so that code without them, and the host, still link): the data
-# that can refer to heap objects, as { count, (address, bytes)... }, and how often to collect (and poison what is freed) to find
-# the objects that the collector doesn't know to be in use
+# What the program tells the collector (these are weak references, so that code without them, and the host, still link):
+# the data that can refer to heap objects, as { count, (address, bytes)... }, and how often to collect (and poison what
+# is freed) to find the objects that the collector doesn't know to be in use
 @inline roots_table() = Base.llvmcall(("""
     @_static_gc_roots = extern_weak global i64
     define i64 @roots() alwaysinline {
@@ -136,12 +137,12 @@ else
     stack_base() = UInt(0) # (the stack is not known: the collector can't be used)
 end
 
-# The stack size limit of the process (`getrlimit(RLIMIT_STACK)`): how far below the base the stack of the main thread can reach. The stacks of
-# other threads are not within that distance of it (the system leaves a gap of that size under the stack of the main thread before where
-# it puts them), so a stack pointer that is farther than that from the base is not on the stack of the main thread. A limit that is not
-# set (infinity), or that can't be read, is taken to be 1 GiB.
-# (a global of its own, and not a place in the state: an address that is the sum of that of the state and a number is not recognized as one of the
-# program's own, and is reported as a pointer to a Julia object)
+# The stack size limit of the process (`getrlimit(RLIMIT_STACK)`): how far below the base the stack of the main thread
+# can reach. The stacks of other threads are not within that distance of it (the system leaves a gap of that size under
+# the stack of the main thread before where it puts them), so a stack pointer that is farther than that from the base is
+# not on the stack of the main thread. A limit that is not set (infinity), or that can't be read, is taken to be 1 GiB.
+# (a global of its own, and not a place in the state: an address that is the sum of that of the state and a number is
+# not recognized as one of the program's own, and is reported as a pointer to a Julia object)
 @inline rlimit_buffer() = Base.llvmcall(("""
     @_static_rlimit = linkonce_odr hidden global [2 x i64] zeroinitializer, align 16
     define i64 @rlimit() alwaysinline {
@@ -155,7 +156,8 @@ end
     return (ok != 0 || cur == typemax(UInt) || cur == 0) ? UInt(1) << 30 : cur
 end
 
-# how far below the base the stack of the thread can reach, which is known on macOS, and on Linux is the limit of the process
+# how far below the base the stack of the thread can reach, which is known on macOS, and on Linux is the limit of the
+# process
 @static if Sys.isapple()
     @inline stack_size() = Base.llvmcall(("""
         declare ptr @pthread_self()
@@ -280,8 +282,9 @@ end
         sset(S_EXT_CAP, newcap % UInt)
         ext = new
     end
-    # (at the end: they are put in order when a collection needs them to be, `sort_extents!`. Putting each where it goes, in an array that is in order, took as long as the number of extents, for each object that was
-    # allocated: a program with many large objects, as live as there were 80000 of, was 30 times slower than Julia)
+    # (at the end: they are put in order when a collection needs them to be, `sort_extents!`. Putting each where it
+    # goes, in an array that is in order, took as long as the number of extents, for each object that was allocated: a
+    # program with many large objects, as live as there were 80000 of, was 30 times slower than Julia)
     i = n
     st(ext, 3i, start)
     st(ext, 3i + 1, stop)
@@ -364,7 +367,8 @@ end
 
 ## allocation
 
-# the next cell of the block that is free (the cells that are in use are those of the bitmap, and those before the cursor), or 0
+# the next cell of the block that is free (the cells that are in use are those of the bitmap, and those before the
+# cursor), or 0
 @inline function block_cell(b::UInt)
     i = ld(b, B_CURSOR) % Int
     n = ld(b, B_NCELLS) % Int
@@ -455,10 +459,10 @@ end
     return
 end
 
-# What the program can ask of the heap, as a negative size (which is never that of an allocation), so that the way to the
-# allocator is the same: -1 collects, -2 is the number of bytes that were alive after the last collection, -3 the number of
-# collections, -4 the bytes that the heap has from the system, -5 and -6 turn collections off and on (the answer is whether they
-# were on). The numbers that are the answers are returned as an address.
+# What the program can ask of the heap, as a negative size (which is never that of an allocation), so that the way to
+# the allocator is the same: -1 collects, -2 is the number of bytes that were alive after the last collection, -3 the
+# number of collections, -4 the bytes that the heap has from the system, -5 and -6 turn collections off and on (the
+# answer is whether they were on). The numbers that are the answers are returned as an address.
 @noinline function command(sz::Int, arg::Int)
     sz == COLLECT && (collect(sget(S_SCAN_STACK) != 0); return UInt(0))
     sz == LIVE_BYTES && return sget(S_LIVE)
@@ -483,15 +487,16 @@ end
 
 ## finalizers
 #
-# There are two kinds. A C function that takes the object (Julia's `ijl_gc_add_ptr_finalizer`: what `BigInt` has to free the memory that GMP
-# allocated) is called, when a collection finds the object unreachable, before the object is freed (the memory is still as it was, and the function
-# does not give the object another reference).
+# There are two kinds. A C function that takes the object (Julia's `ijl_gc_add_ptr_finalizer`: what `BigInt` has to free
+# the memory that GMP allocated) is called, when a collection finds the object unreachable, before the object is freed
+# (the memory is still as it was, and the function does not give the object another reference).
 #
-# A Julia function (`finalizer(f, x)`: what the wrappers of SuiteSparse, PCRE and MPI have) can't be called from here: the collector is compiled
-# apart, and the code of `f` is the program's. The object is kept (it is marked, with what it refers to, as the finalizer may use it) and put in a
-# queue of objects that wait; when the collection is over, each is handed to the program, which has a function that runs the finalizers of the
-# site that registered it (`static_run_finalizer(site, object)`, written when linking: see `finalizers.jl`). The object is freed by the
-# next collection that finds it unreachable, as it is not in the table any more.
+# A Julia function (`finalizer(f, x)`: what the wrappers of SuiteSparse, PCRE and MPI have) can't be called from here:
+# the collector is compiled apart, and the code of `f` is the program's. The object is kept (it is marked, with what it
+# refers to, as the finalizer may use it) and put in a queue of objects that wait; when the collection is over, each is
+# handed to the program, which has a function that runs the finalizers of the site that registered it
+# (`static_run_finalizer(site, object)`, written when linking: see `overrides/gc.jl`). The object is freed by the next
+# collection that finds it unreachable, as it is not in the table any more.
 
 @inline call_finalizer(f::UInt, obj::UInt) = Base.llvmcall(("""
     define void @callfin(i64 %f, i64 %o) alwaysinline {
@@ -501,7 +506,8 @@ end
       ret void
     }""", "callfin"), Cvoid, Tuple{UInt,UInt}, f, obj)
 
-# (the function of the program that runs a finalizer of the site: a reference to a symbol that may not be defined, so that this links without)
+# (the function of the program that runs a finalizer of the site: a reference to a symbol that may not be defined, so
+# that this links without)
 @inline call_site_finalizer(site::UInt, obj::UInt) = Base.llvmcall(("""
     declare extern_weak void @static_run_finalizer(i64, i64)
     define void @callsite(i64 %site, i64 %o) alwaysinline {
@@ -537,7 +543,8 @@ end
     st(table, 3n + 1, f)
     st(table, 3n + 2, kind)
     sset(S_FIN_N, (n + 1) % UInt)
-    # (what the finalizer frees is memory that the collector doesn't count: each object counts as some, to collect in time)
+    # (what the finalizer frees is memory that the collector doesn't count: each object counts as some, to collect in
+    # time)
     sset(S_SINCE, sget(S_SINCE) + FINALIZER_PRESSURE)
     return
 end
@@ -582,8 +589,9 @@ end
     return
 end
 
-# After marking, and before the sweep frees what was not reached: the objects of Julia finalizers that were not reached are kept and queued (what they refer to is
-# kept as well, and so what the C finalizers of the others are for may be kept by them: so those are looked at after), and the C finalizers of the rest are run.
+# After marking, and before the sweep frees what was not reached: the objects of Julia finalizers that were not reached
+# are kept and queued (what they refer to is kept as well, and so what the C finalizers of the others are for may be
+# kept by them: so those are looked at after), and the C finalizers of the rest are run.
 @noinline function run_finalizers()
     n = sget(S_FIN_N) % Int
     table = sget(S_FIN)
@@ -622,8 +630,9 @@ end
     return
 end
 
-# Hand the objects that wait to the program, one at a time (not inside a collection: the finalizers allocate). One that is being run is not in the queue, and
-# is on the stack of the finalizer, which is what keeps it; a collection that happens in a finalizer does not start another round.
+# Hand the objects that wait to the program, one at a time (not inside a collection: the finalizers allocate). One that
+# is being run is not in the queue, and is on the stack of the finalizer, which is what keeps it; a collection that
+# happens in a finalizer does not start another round.
 @noinline function run_pending_finalizers()
     sget(S_FINALIZING) != 0 && return
     sset(S_FINALIZING, UInt(1))
@@ -832,8 +841,10 @@ end
     return live
 end
 
-# The large object that starts at `l` is not in the heap any more: its extent is marked as dropped (the header is 0), and `compact_extents!` takes the dropped ones out when the sweep has gone through all of them
-# (which is once, and not once for each: the array has as many as there are objects). The extents are in order when this is called, as a collection puts them (`sort_extents!`), and none is added during it.
+# The large object that starts at `l` is not in the heap any more: its extent is marked as dropped (the header is 0),
+# and `compact_extents!` takes the dropped ones out when the sweep has gone through all of them (which is once, and not
+# once for each: the array has as many as there are objects). The extents are in order when this is called, as a
+# collection puts them (`sort_extents!`), and none is added during it.
 @inline function drop_extent(l::UInt)
     e = find_extent(l)
     e > 0 || return
@@ -863,7 +874,8 @@ end
     return
 end
 
-# Put the extents in order of where they start, as the lookups need them to be: the ones that were added since the last time (the end of the array) are sorted (a heap sort, in place), and merged with the ones that were in order
+# Put the extents in order of where they start, as the lookups need them to be: the ones that were added since the last
+# time (the end of the array) are sorted (a heap sort, in place), and merged with the ones that were in order
 @noinline function sort_extents!()
     n = sget(S_EXT_N) % Int
     m = sget(S_EXT_SORTED) % Int
@@ -883,7 +895,8 @@ end
         sift_down!(ext, base, 0, last)
         last -= 1
     end
-    # merge with the part that is in order, from the end (the part that is not is copied: it is the one that the part in order is moved over)
+    # merge with the part that is in order, from the end (the part that is not is copied: it is the one that the part in
+    # order is moved over)
     if m > 0 && ld(ext, 3 * (m - 1)) > ld(ext, 3 * m)
         tmp = UInt(calloc(1, k * 24))
         tmp == 0 && out_of_memory()
@@ -920,7 +933,8 @@ end
     return
 end
 
-# (the heap of the sort: the extent `root` of the `count` that start at `base`, moved down until the one that starts last of its children is not after it)
+# (the heap of the sort: the extent `root` of the `count` that start at `base`, moved down until the one that starts
+# last of its children is not after it)
 @inline function sift_down!(ext::UInt, base::Int, root::Int, count::Int)
     while true
         child = 2root + 1
@@ -936,8 +950,9 @@ end
 
 ## collecting
 
-# Zero the part of the stack below the caller (a function that has returned leaves what it kept there, and the frames of what is called next have slots that they do not
-# write, which then hold what that was: an address of an object that is not used any more, which the collector, that looks at every word, would take for a reference).
+# Zero the part of the stack below the caller (a function that has returned leaves what it kept there, and the frames of
+# what is called next have slots that they do not write, which then hold what that was: an address of an object that is
+# not used any more, which the collector, that looks at every word, would take for a reference).
 @inline scrub_stack() = Base.llvmcall(("""
     declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
     define void @scrub() #0 {
@@ -966,15 +981,15 @@ end
     return
 end
 
-# Free what nothing refers to. `scan_stack`: whether the stack and the registers are looked at, which the program needs (and
-# a test of the collector, which has the roots it chooses, does not).
+# Free what nothing refers to. `scan_stack`: whether the stack and the registers are looked at, which the program needs
+# (and a test of the collector, which has the roots it chooses, does not).
 @noinline function collect(scan_stack::Bool)
     sget(S_INIT) == 0 && init!()
     scan_stack && scrub_stack()
     if scan_stack
-        # The stack is what is looked at, from where it is now to the base of that of this thread. Code that runs on another
-        # stack (a library called from a task of Julia, which has a stack of its own, or from a coroutine) has references there that
-        # can't be found, so nothing is freed: it is not known which of the objects are in use.
+        # The stack is what is looked at, from where it is now to the base of that of this thread. Code that runs on
+        # another stack (a library called from a task of Julia, which has a stack of its own, or from a coroutine) has
+        # references there that can't be found, so nothing is freed: it is not known which of the objects are in use.
         sp = stack_pointer()
         base = stack_base()
         if !(sp < base && base - sp <= stack_size())
@@ -986,7 +1001,8 @@ end
     sort_extents!() # (the lookups of the marking need them in order)
     scan_roots()
     if scan_stack
-        # the registers are saved in the state (a buffer in memory that is not the stack), and the stack is from here to the base
+        # the registers are saved in the state (a buffer in memory that is not the stack), and the stack is from here to
+        # the base
         buffer = state() + (S_REGS - 1) * 8
         save_registers(buffer)
         scan(buffer, buffer + 512)
@@ -1004,8 +1020,8 @@ end
     return
 end
 
-# for tests of the collector: when it collects by itself (the bytes allocated between collections: more than is ever allocated
-# means never), and whether it looks at the stack
+# for tests of the collector: when it collects by itself (the bytes allocated between collections: more than is ever
+# allocated means never), and whether it looks at the stack
 function configure(threshold::UInt, scan_stack::Int)
     sget(S_INIT) == 0 && init!()
     sset(S_THRESHOLD, threshold)

@@ -110,11 +110,12 @@ needs besides libc.
 
 ### Source layout
 
-* `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`show.jl`, `files.jl`, `random.jl`, `bignum.jl`, ...); `src/overrides.jl` is the method table and the entry points (`compile_executable` and the rest).
-* `src/inference/`: what the compiler does with calls that Julia does not resolve: dynamic dispatch (`dispatch.jl`), closures (`closures.jl`), the slots of abstract types (`slots.jl`), `@cfunction` (`cfunctions.jl`) and the errors that say why a program does not infer (`diagnostics.jl`). What a compilation finds and is made with, over its passes, is one value that exists for that compilation (`compilation.jl`); what packages register is the one `REGISTRY` that a compilation takes a copy of when it starts (`src/registry.jl`).
-* `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and BLAS and the loader of libraries.
-* `src/pipeline.jl` and `src/tags.jl`: the LLVM passes; `src/testing.jl`: `static_status` and the other functions that compare a compiled program with Julia.
-* `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, StyledStrings, Observables, Makie, Mmap, MPI).
+* `src/method_table.jl`: our method table, `@device_override` and the parameters of our compilations; `src/entry_points.jl`: `compile_executable` and the other entry points; `src/extensions.jl`: the functions that package extensions add methods to; `src/registry.jl`: what packages register (`REGISTRY`, which each compilation copies when it starts).
+* `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`io.jl`, `printing.jl`, `strings.jl`, `collections.jl`, `system.jl`, `bignum.jl`, ...).
+* `src/inference/`: what the compiler does with what Julia's inference leaves to the runtime. The state of a compilation and its keys (`compilation.jl`), our interpreter (`interpreter.jl`), the passes and what each reuses from the one before (`passes.jl`); calls on abstract types (`dispatch.jl`), tuples (`tuples.jl`), unknown functions, callbacks and listeners (`closures.jl`), boxes (`boxes.jl`), slots of abstract types (`slots.jl`) and of types (`types_as_values.jl`), constant objects (`objects.jl`, `object_calls.jl`), stated types (`assume.jl`), `@cfunction` (`cfunctions.jl`), replaced calls (`redirect.jl`), the optimizer's hooks (`optimize.jl`), and why a program does not infer (`diagnostics.jl`).
+* `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and the functions of libraries, BLAS among them (`libraries.jl`, `loader.jl`).
+* `src/llvm/`: our LLVM passes (`pipeline.jl`, `tags.jl`); `src/testing.jl`: `static_status` and the other functions that compare a compiled program with Julia.
+* `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, Printf, Random, StyledStrings, Mmap, Observables, Makie, CairoMakie, UnicodePlots, MPI, FunctionWrappers).
 
 ### Running the tests
 

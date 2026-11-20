@@ -1,5 +1,5 @@
 # Strings and characters: construction, interpolation, parsing and searching, `SubString`, and the properties of characters (case, category, width), compared with Julia, and the tables
-# that those use (src/unicode.jl), compared with utf8proc's for every character.
+# that those use (src/overrides/strings.jl), compared with utf8proc's for every character.
 
 @testset "Characters" begin
     check_cases([
@@ -18,7 +18,7 @@ pl_category_abbrevs() = (n = 0; for cp in 0x00:0x2ff; n = 31 * n + codeunit(Base
     @test static_status(pl_category_abbrevs)[1] == :ok
 end
 
-# the tables of the properties of characters (src/unicode.jl) agree with utf8proc for every code point
+# the tables of the properties of characters (src/overrides/strings.jl) agree with utf8proc for every code point
 @testset "Unicode tables" begin
     U = StaticRuntime
     function mismatches()

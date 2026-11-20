@@ -1,14 +1,19 @@
-# UnicodePlots in a program (plots written to the terminal). What the package writes with the types of values that are only known when it runs is written again here with the types known.
+# UnicodePlots in a program (plots written to the terminal). What the package writes with the types of values that are
+# only known when it runs is written again here with the types known.
 
 module StaticRuntimeUnicodePlotsExt
 
 using StaticRuntime: @device_override
 using UnicodePlots: UnicodePlots
 
-# The keywords of a plot are split, by name, into those of the plot (`PLOT_KEYS`) and the others, with `filter` of the keywords: of a `NamedTuple`, whose names are in its type, `filter` is a value that is made when the
-# program runs, with the names that are left in it (a `NamedTuple` of a type that the compiler does not know: the call with it is the one that is `Union{}`). The names are in the type, so the split is done by them, when compiling.
-# The keywords that are given to a call are a `Pairs` that has `Nothing` for its iterator (`Pairs{Symbol,V,Nothing,NamedTuple}`), which `NamedTuple(pairs)` and the merge of a call with `kw...` take the `NamedTuple` out of, with its type;
-# what `pairs(nt)` gives has the keys there, and for that `NamedTuple(pairs)` is a value made when the program runs, of a type that the compiler does not know. The `Pairs` of keywords are made here as the call makes them.
+# The keywords of a plot are split, by name, into those of the plot (`PLOT_KEYS`) and the others, with `filter` of the
+# keywords: of a `NamedTuple`, whose names are in its type, `filter` is a value that is made when the program runs, with
+# the names that are left in it (a `NamedTuple` of a type that the compiler does not know: the call with it is the one
+# that is `Union{}`). The names are in the type, so the split is done by them, when compiling. The keywords that are
+# given to a call are a `Pairs` that has `Nothing` for its iterator (`Pairs{Symbol,V,Nothing,NamedTuple}`), which
+# `NamedTuple(pairs)` and the merge of a call with `kw...` take the `NamedTuple` out of, with its type; what `pairs(nt)`
+# gives has the keys there, and for that `NamedTuple(pairs)` is a value made when the program runs, of a type that the
+# compiler does not know. The `Pairs` of keywords are made here as the call makes them.
 function kw_pairs_expr(::Type{NT}, names::Tuple) where {NT<:NamedTuple}
     values = Expr(:tuple, (:(getfield(data, $(QuoteNode(n)))) for n in names)...)
     return :(kw_pairs($names, $values))
@@ -28,9 +33,12 @@ end
 
 @device_override UnicodePlots.split_plot_kw(kw::Base.Pairs{Symbol,V,I,<:NamedTuple}) where {V,I} = split_named(getfield(kw, :data))
 
-# `filter(f, kw)` of the keywords of a call (`callable(hist; info, filter(p -> p.first ≢ :nbins, kw)...)`) is the `filter` of a dictionary, a `Dict` made when the program runs, and what is splatted into the keywords of another call is then
-# a `NamedTuple` that the compiler does not know the names of. The names are in the type of the keywords, so `f` is called with each of them as a constant (a `Pair` of the name and the value), and what it says is known when compiling if `f` depends on
-# the name only (the usual predicate): what is kept is then in the type. What is given back is the `Pairs` of the kept ones, which is iterated and splatted as the `Dict` was (it is not one that can be changed).
+# `filter(f, kw)` of the keywords of a call (`callable(hist; info, filter(p -> p.first ≢ :nbins, kw)...)`) is the
+# `filter` of a dictionary, a `Dict` made when the program runs, and what is splatted into the keywords of another call
+# is then a `NamedTuple` that the compiler does not know the names of. The names are in the type of the keywords, so `f`
+# is called with each of them as a constant (a `Pair` of the name and the value), and what it says is known when
+# compiling if `f` depends on the name only (the usual predicate): what is kept is then in the type. What is given back
+# is the `Pairs` of the kept ones, which is iterated and splatted as the `Dict` was (it is not one that can be changed).
 @generated function filter_named(f, data::NT) where {NT<:NamedTuple}
     names = fieldnames(NT)
     block = Expr(:block)
@@ -50,8 +58,10 @@ end
     return filter_named(f, getfield(kw, :data))
 end
 
-# `histogram` takes the dimensions of size one out of the array (`dropdims(x; dims = Tuple(filter(d -> size(x, d) == 1, 1:ndims(x))))`): the number of them is in the number of dimensions of the array that it gives, which is a value that
-# is only known when the program runs (a tuple of a length that depends on the sizes). A vector keeps its dimension here (what the package makes of one that has one element is a plot of a single value, not of an array that has no
+# `histogram` takes the dimensions of size one out of the array (`dropdims(x; dims = Tuple(filter(d -> size(x, d) == 1,
+# 1:ndims(x))))`): the number of them is in the number of dimensions of the array that it gives, which is a value that
+# is only known when the program runs (a tuple of a length that depends on the sizes). A vector keeps its dimension here
+# (what the package makes of one that has one element is a plot of a single value, not of an array that has no
 # dimensions), and the rest is as the package has it.
 @device_override function UnicodePlots.histogram(x::AbstractVector; closed = :left, vertical = false, stats = true, kw...)
     len = length(x)
@@ -74,9 +84,14 @@ end
     return callable(hist; info, filter(p -> p.first ≢ :nbins, kw)...)
 end
 
-# `heatmap` of a matrix of numbers. The original gives the limits of the colors as `(0, 0)` and then the extrema of the matrix (integers, then of the type of the elements), and keeps the function that makes the colors in a variable that is
-# one of two functions (that of the colors of an image, or that of the color map), so that the keywords of the plot are a `NamedTuple` of a type that has unions of types in it, and merging it with the keywords of the call (`filter(...)...`) gives a
-# `NamedTuple` that the compiler does not know the type of. Here the limits are `Float64`s and the function is the color map's (the rest is as the package has it), for a matrix of `Float64`s: the limits of another type are printed as that type, which `Float64`s are not, so those are left to the package (and are refused when compiling).
+# `heatmap` of a matrix of numbers. The original gives the limits of the colors as `(0, 0)` and then the extrema of the
+# matrix (integers, then of the type of the elements), and keeps the function that makes the colors in a variable that
+# is one of two functions (that of the colors of an image, or that of the color map), so that the keywords of the plot
+# are a `NamedTuple` of a type that has unions of types in it, and merging it with the keywords of the call
+# (`filter(...)...`) gives a `NamedTuple` that the compiler does not know the type of. Here the limits are `Float64`s
+# and the function is the color map's (the rest is as the package has it), for a matrix of `Float64`s: the limits of
+# another type are printed as that type, which `Float64`s are not, so those are left to the package (and are refused
+# when compiling).
 @device_override function UnicodePlots.heatmap(
         A::AbstractMatrix{T};
         xlim = UnicodePlots.KEYWORDS.xlim,
@@ -213,8 +228,11 @@ end
     return plot
 end
 
-# `polarplot`: the limit of the radius is `(0, 0)` (two integers) when it is not given, and the largest radius is then the maximum of the data or the integer that was given: one of two types, which makes the limits of the axes, the keywords of the plot and
-# the grid that is drawn have types that are unions. The limits are `Float64`s here, and the rest is as the package has it, for a vector of `Float64` radii (others are left to the package, as their limits are printed as their own type).
+# `polarplot`: the limit of the radius is `(0, 0)` (two integers) when it is not given, and the largest radius is then
+# the maximum of the data or the integer that was given: one of two types, which makes the limits of the axes, the
+# keywords of the plot and the grid that is drawn have types that are unions. The limits are `Float64`s here, and the
+# rest is as the package has it, for a vector of `Float64` radii (others are left to the package, as their limits are
+# printed as their own type).
 @device_override function UnicodePlots.polarplot(θ::AbstractVector, r::AbstractVector{Float64}; rlim = (0, 0), kw...)
     pkw, okw = UnicodePlots.split_plot_kw(kw)
 
@@ -279,8 +297,10 @@ end
     return plot
 end
 
-# `surfaceplot` of the values of a function (or of a matrix) on a grid of two vectors, with the scale of the heights that is the default (`:identity`: `zscale` is a symbol, a function or a tuple, and the height and the matrix of the points are
-# of a type for each). The type of the limits of the colors is one of two (`(0, 0)` as integers, or the extrema of the heights), so they are `Float64`s. The rest is the package's.
+# `surfaceplot` of the values of a function (or of a matrix) on a grid of two vectors, with the scale of the heights
+# that is the default (`:identity`: `zscale` is a symbol, a function or a tuple, and the height and the matrix of the
+# points are of a type for each). The type of the limits of the colors is one of two (`(0, 0)` as integers, or the
+# extrema of the heights), so they are `Float64`s. The rest is the package's.
 @device_override function UnicodePlots.surfaceplot(
         x::AbstractVector,
         y::AbstractVector,
@@ -348,12 +368,16 @@ end
     return plot
 end
 
-# The scale of an axis is a symbol (`:identity`, `:ln`, `:log2`, `:log10`) that the canvas turns into a function, and the function is in the type of the canvas (`BrailleCanvas{YS,XS}`): the type of a canvas, and of the plot that has it, is
-# then one of sixteen when the symbol is a value that is only known when the program runs (the compiler does not carry the default of a keyword through the constructors of a plot). Only the scale that is the default is supported in a program: the
-# symbol is then a function that is one type, and the canvas, the plot and what is done with them have the types that they have.
+# The scale of an axis is a symbol (`:identity`, `:ln`, `:log2`, `:log10`) that the canvas turns into a function, and
+# the function is in the type of the canvas (`BrailleCanvas{YS,XS}`): the type of a canvas, and of the plot that has it,
+# is then one of sixteen when the symbol is a value that is only known when the program runs (the compiler does not
+# carry the default of a keyword through the constructors of a plot). Only the scale that is the default is supported in
+# a program: the symbol is then a function that is one type, and the canvas, the plot and what is done with them have
+# the types that they have.
 @device_override UnicodePlots.scale_callback(scale::Symbol) = scale === :identity ? identity : error("only the `:identity` scale of an axis is supported in a compiled program")
 
-# The limits of an axis are `Float64`s, or the integers that were given (`lims` as `(0, 0)` when the plot is not given any): a value of one of two types, which is the type of the origin of the canvas, of the keywords that the canvas is
+# The limits of an axis are `Float64`s, or the integers that were given (`lims` as `(0, 0)` when the plot is not given
+# any): a value of one of two types, which is the type of the origin of the canvas, of the keywords that the canvas is
 # made with, and so of a call that the compiler can only make when the program runs. They are all `Float64` here.
 @device_override function UnicodePlots.extend_limits(vec::AbstractVector, lims, scale::Union{Symbol,Function})
     scale = UnicodePlots.scale_callback(scale)
@@ -380,9 +404,11 @@ end
     return Float64(scale(mi)), Float64(scale(ma))
 end
 
-# The color map of a plot: a function of the value, made of the scheme that has the name (`colorschemes[cmap]`, a dictionary of all the schemes, by a name that is a value when the program runs). The type of the scheme is
-# then one of the types that they have in the dictionary (`ColorScheme{V,T}`), and the function that has it is a closure of an abstract type that `ColorMap` has a type parameter of. The schemes that the package has are all of one type
-# (that of the default): a scheme of another type is an error.
+# The color map of a plot: a function of the value, made of the scheme that has the name (`colorschemes[cmap]`, a
+# dictionary of all the schemes, by a name that is a value when the program runs). The type of the scheme is then one of
+# the types that they have in the dictionary (`ColorScheme{V,T}`), and the function that has it is a closure of an
+# abstract type that `ColorMap` has a type parameter of. The schemes that the package has are all of one type (that of
+# the default): a scheme of another type is an error.
 const COLORSCHEME = typeof(UnicodePlots.ColorSchemes.colorschemes[:viridis])
 
 @device_override function UnicodePlots.colormap_callback(cmap::Symbol)

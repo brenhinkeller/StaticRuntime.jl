@@ -1,28 +1,58 @@
-# Symbols that are made when the program runs: `Symbol("abc")` of a `String` that is not known when compiling, `Symbol("x", 1)`,
-# `Symbol(uppercase(string(s)))`, ...
+# Symbols that are made when the program runs: `Symbol("abc")` of a `String` that is not known when compiling,
+# `Symbol("x", 1)`, `Symbol(uppercase(string(s)))`, ...
 #
-# Julia keeps all symbols in a table (in libjulia), so that there is one object for each name and `===` of symbols is a comparison of
-# addresses. A program has no such table. The symbols that it has when it is compiled are copied into it, as any constant, so here:
+# Julia keeps all symbols in a table (in libjulia), so that there is one object for each name and `===` of symbols is a
+# comparison of addresses. A program has no such table. The symbols that it has when it is compiled are copied into it,
+# as any constant, so here:
 #
-# * the symbols that are in the binary are found in a list of them that is made when linking (`define_symbol_table!` in `runtime/constants.jl`),
-#   sorted by name, which is searched first (a symbol that is in the binary is that object, so that `Symbol("abc") === :abc`);
-# * a name that is not there is made into a symbol that is kept in a binary tree (as the table of Julia is, by the `left` and `right` of
-#   the node, which the embedded symbols have as well), by its hash and then its name. Symbols are never freed (they are not made by the
-#   collector's heap, and nothing in them refers to it). Memory: 40 bytes and the name, for each different name.
+# * the symbols that are in the binary are found in a list of them that is made when linking (`define_symbol_table!` in
+#   `runtime/constants.jl`), sorted by name, which is searched first (a symbol that is in the binary is that object, so
+#   that `Symbol("abc") === :abc`);
+# * a name that is not there is made into a symbol that is kept in a binary tree (as the table of Julia is, by the
+#   `left` and `right` of the node, which the embedded symbols have as well), by its hash and then its name. Symbols are
+#   never freed (they are not made by the collector's heap, and nothing in them refers to it). Memory: 40 bytes and the
+#   name, for each different name.
 #
-# A symbol is `{ left, right, hash, name, NUL }` (the object is at `left`; a header of 16 bytes with the type tag is before it). The hash is
-# what `objectid` and so `hash` of a symbol is, so a `Dict` of symbols that was made when compiling and one that is made by the program agree.
+# A symbol is `{ left, right, hash, name, NUL }` (the object is at `left`; a header of 16 bytes with the type tag is
+# before it). The hash is what `objectid` and so `hash` of a symbol is, so a `Dict` of symbols that was made when
+# compiling and one that is made by the program agree.
 
-# the list of the symbols of the binary, as { count, address of each symbol (sorted by name)... }, or null (the linker makes it if the program
-# calls `static_symbol`; a weak reference, so that this still links without)
+## The name of a `Symbol`, as a string
+#
+# `Symbol`s whose value is not known when compiling (the name of a function in a message, taken from a field). Base asks
+# libjulia for the bytes of a `Symbol` (`jl_symbol_name`) and for how long they are (`sizeof`, a builtin that is a call
+# into the runtime when it can't be folded). The name is stored right after the three pointers of the node of the symbol
+# table (`jl_sym_t`), and ends with a NUL.
+symbol_pointer(s::Symbol) = Ptr{UInt8}(Base.pointer_from_objref(s)) + 3 * sizeof(Ptr{Cvoid})
+
+symbol_length(s::Symbol) = Int(@symbolcall strlen(symbol_pointer(s)::Ptr{UInt8})::Int64)
+
+@device_override Base.unsafe_convert(::Type{Ptr{UInt8}}, s::Symbol) = symbol_pointer(s)
+
+@device_override Base.unsafe_convert(::Type{Ptr{Int8}}, s::Symbol) = Ptr{Int8}(symbol_pointer(s))
+
+@device_override Base._str_sizehint(s::Symbol) = symbol_length(s)
+
+@device_override function Base.__unsafe_string!(out, s::Symbol, offs::Integer)
+    n = symbol_length(s)
+    GC.@preserve s out unsafe_copyto!(pointer(out, offs), symbol_pointer(s), n)
+    return n
+end
+
+@device_override Base.print(io::IO, s::Symbol) = (unsafe_write(io, symbol_pointer(s), UInt(symbol_length(s))); nothing)
+
+@device_override Base.write(io::IO, s::Symbol) = Int(unsafe_write(io, symbol_pointer(s), UInt(symbol_length(s))))
+
+# the list of the symbols of the binary, as { count, address of each symbol (sorted by name)... }, or null (the linker
+# makes it if the program calls `static_symbol`; a weak reference, so that this still links without)
 @inline embedded_symbols() = Base.llvmcall(("""
     @_static_symbols = extern_weak global i64
     define i64 @symbols() alwaysinline {
       ret i64 ptrtoint (ptr @_static_symbols to i64)
     }""", "symbols"), UInt, Tuple{})
 
-# the text that `show` writes for the symbols of the binary that it is not `:name` for, as { count, (symbol, text as a C string)... } sorted by name
-# (made by the linker if `show` of a symbol is in the program)
+# the text that `show` writes for the symbols of the binary that it is not `:name` for, as { count, (symbol, text as a C
+# string)... } sorted by name (made by the linker if `show` of a symbol is in the program)
 @inline embedded_symbol_texts() = Base.llvmcall(("""
     @_static_symbol_texts = extern_weak global i64
     define i64 @texts() alwaysinline {
@@ -68,13 +98,15 @@ function find_embedded_symbol(q::Ptr{UInt8}, n::Int)
     return UInt(0)
 end
 
-# the hash of a name that is made here (the symbols of the binary have what Julia made: the hashes only have to agree among those made here)
+# the hash of a name that is made here (the symbols of the binary have what Julia made: the hashes only have to agree
+# among those made here)
 symbol_hash(q::Ptr{UInt8}, n::Int) = murmur(i -> unsafe_load(Ptr{UInt64}(q + i)), i -> unsafe_load(q + i), n, 0xdeadbeef)
 
 # the root of the tree of the symbols made by the program (the address of the first symbol, or 0)
 const DYNAMIC_SYMBOLS = Ref{UInt}(0)
 
-# a new symbol, outside of the heap that is collected (symbols are not freed), as { header (the type tag), left, right, hash, name, NUL }
+# a new symbol, outside of the heap that is collected (symbols are not freed), as { header (the type tag), left, right,
+# hash, name, NUL }
 function new_symbol(q::Ptr{UInt8}, n::Int, h::UInt64)
     mem = Ptr{UInt8}(calloc(1, 16 + SYMBOL_NAME + n + 1)) # (zero: no links, and the NUL)
     mem == C_NULL && throw(OutOfMemoryError())
@@ -117,8 +149,8 @@ function static_symbol(q::Ptr{UInt8}, n::Int)::Symbol
     return Base.unsafe_pointer_to_objref(Ptr{Cvoid}(sym))::Symbol
 end
 
-# (`Symbol` of a constant is a constant, as it is in Julia: that is what `foldable` says; the compiler evaluates the method of Base for it, which
-# the overlay is a consistent replacement of, and not this one)
+# (`Symbol` of a constant is a constant, as it is in Julia: that is what `foldable` says; the compiler evaluates the
+# method of Base for it, which the overlay is a consistent replacement of, and not this one)
 Base.@assume_effects :foldable @device_override function Core.Symbol(s::String)
     GC.@preserve s return static_symbol(Ptr{UInt8}(pointer(s)), sizeof(s))
 end
@@ -150,7 +182,8 @@ function symbol_text(s::Symbol)
     return UInt(0)
 end
 
-# whether the name of a symbol is a plain ASCII identifier (`Runtime.plain_symbol_name` is the same test, for the linker)
+# whether the name of a symbol is a plain ASCII identifier (`Runtime.plain_symbol_name` is the same test, for the
+# linker)
 function symbol_is_plain(s::Symbol)
     p = symbol_pointer(s)
     n = symbol_length(s)
@@ -164,8 +197,9 @@ function symbol_is_plain(s::Symbol)
     return true
 end
 
-# A name that is certainly not an identifier or an operator, which `show` writes as `Symbol("...")`: it is empty, or has a space or a control
-# character or a quote in it, or starts with a digit. (Of other names, whether they are operators is decided by the tables of the parser.)
+# A name that is certainly not an identifier or an operator, which `show` writes as `Symbol("...")`: it is empty, or has
+# a space or a control character or a quote in it, or starts with a digit. (Of other names, whether they are operators
+# is decided by the tables of the parser.)
 function symbol_is_certainly_quoted(s::Symbol)
     p = symbol_pointer(s)
     n = symbol_length(s)
@@ -181,11 +215,14 @@ end
 
 ## `NamedTuple`s with a name that is not known when compiling
 #
-# `nt[name]`, `nt.name` and `get(nt, name, default)` with a `Symbol` that the program has when it runs (`FSCALES[scale]` of UnicodePlots: a table of the functions that a scale
-# is made of, and a scale that a keyword says) is `getfield(nt, name)`, which for fields of different types has a type that depends on `name`, and is a call of the runtime that
-# looks the field up and boxes it. One comparison of the name with each of the names gives each field its own type, and the result is the union of them, which is split when it is
-# used (as the value of a `Union` is); for a name that is a constant the comparisons are folded, and for fields of one type they are selects. (Symbols are compared by address:
-# one that was made by the program is the one that the binary has, see `static_symbol`.) The same is done for the `getfield` of a tuple with an index that is not known: `tuple_getindex`.
+# `nt[name]`, `nt.name` and `get(nt, name, default)` with a `Symbol` that the program has when it runs (`FSCALES[scale]`
+# of UnicodePlots: a table of the functions that a scale is made of, and a scale that a keyword says) is `getfield(nt,
+# name)`, which for fields of different types has a type that depends on `name`, and is a call of the runtime that looks
+# the field up and boxes it. One comparison of the name with each of the names gives each field its own type, and the
+# result is the union of them, which is split when it is used (as the value of a `Union` is); for a name that is a
+# constant the comparisons are folded, and for fields of one type they are selects. (Symbols are compared by address:
+# one that was made by the program is the one that the binary has, see `static_symbol`.) The same is done for the
+# `getfield` of a tuple with an index that is not known: `tuple_getindex`.
 function field_chain(T::DataType, fallback)
     chain = fallback
     for k in fieldcount(T):-1:1
@@ -194,12 +231,15 @@ function field_chain(T::DataType, fallback)
     return chain
 end
 
-# `getfield(x, name)` of any struct (or `NamedTuple`) with a name that is not known when compiling is that chain over the fields of its type. Julia compiles it as `jl_f_getfield`; the
-# compiler replaces that call with a call of this (see `dynamic_field_plan`), which is also what `nt[name]` and `nt.name` are.
+# `getfield(x, name)` of any struct (or `NamedTuple`) with a name that is not known when compiling is that chain over
+# the fields of its type. Julia compiles it as `jl_f_getfield`; the compiler replaces that call with a call of this (see
+# `dynamic_field_plan`), which is also what `nt[name]` and `nt.name` are.
 @generated struct_field(x, name::Symbol) = field_chain(x, :(throw(FieldError($x, name))))
 
-# `isdefined(x, name)` with a name that is not known when compiling (`get(f, nt, name)` and `haskey(nt, name)` of a `NamedTuple` are that) is a call of the runtime too: the same comparisons, each with the `isdefined` of its field
-# (which is folded for a field that is always defined), and `false` for a name that is not a field. (See `abstract_call_known` for `isdefined` in dispatch.jl.)
+# `isdefined(x, name)` with a name that is not known when compiling (`get(f, nt, name)` and `haskey(nt, name)` of a
+# `NamedTuple` are that) is a call of the runtime too: the same comparisons, each with the `isdefined` of its field
+# (which is folded for a field that is always defined), and `false` for a name that is not a field. (See
+# `abstract_call_known` for `isdefined` in tuples.jl.)
 function isdefined_chain(T::DataType)
     chain = false
     for k in fieldcount(T):-1:1
@@ -209,15 +249,20 @@ function isdefined_chain(T::DataType)
 end
 @generated struct_isdefined(x, name::Symbol) = isdefined_chain(x)
 
-# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`) is `Core._apply_iterate(iterate, Base.vect, (a,), v)`, or of `getindex` with the type first, a call of the runtime: the number
-# of arguments is known when the program runs. It is made here with the parts of the splat (`parts`: the tuples, whose elements are pushed, and the collections, which are appended), with the conversion of each element
-# to the element type that both do. For `T[...]` that is `T` (`skip`: the type is the first element of the first part). For `[...]`, `T === :promote`, it is what `vect` promotes the types of the elements that there are
-# to (`Any` for none): it depends on which of the collections are empty, so there is one for each combination of them (`splat_types`), and the vector is made with the one that the program has. (The call is replaced
-# with this in inference: see `abstract_call_known` for `Core._apply_iterate` in dispatch.jl.)
+# A vector literal with a splat of something that is not a tuple (`[a, v...]`, `T[a, v..., b]`) is
+# `Core._apply_iterate(iterate, Base.vect, (a,), v)`, or of `getindex` with the type first, a call of the runtime: the
+# number of arguments is known when the program runs. It is made here with the parts of the splat (`parts`: the tuples,
+# whose elements are pushed, and the collections, which are appended), with the conversion of each element to the
+# element type that both do. For `T[...]` that is `T` (`skip`: the type is the first element of the first part). For
+# `[...]`, `T === :promote`, it is what `vect` promotes the types of the elements that there are to (`Any` for none): it
+# depends on which of the collections are empty, so there is one for each combination of them (`splat_types`), and the
+# vector is made with the one that the program has. (The call is replaced with this in inference: see
+# `abstract_call_known` for `Core._apply_iterate` in tuples.jl.)
 const SPLAT_MAX_COLLECTIONS = 4
 
-# (the element type of `[...]` for each combination of the collections that are empty: the `m`th has the collections whose bit is set in `m - 1`, in order. `nothing` if an element type is not concrete, for which the type of
-# the vector depends on the values)
+# (the element type of `[...]` for each combination of the collections that are empty: the `m`th has the collections
+# whose bit is set in `m - 1`, in order. `nothing` if an element type is not concrete, for which the type of the vector
+# depends on the values)
 function splat_types(types, spread)
     collections = findall(spread)
     length(collections) <= SPLAT_MAX_COLLECTIONS || return nothing
@@ -230,7 +275,8 @@ function splat_types(types, spread)
     return result
 end
 
-# (the elements and collections of the parts of a splat: their expressions, whether each is a collection, and the type of each element; a tuple of an unknown length is a collection)
+# (the elements and collections of the parts of a splat: their expressions, whether each is a collection, and the type
+# of each element; a tuple of an unknown length is a collection)
 function splat_items(parts, skip::Bool)
     items, spread, types = Any[], Bool[], Any[]
     for (k, P) in enumerate(parts)
@@ -254,7 +300,8 @@ function splat_fill(T, items, spread)
     return Expr(:block, body...)
 end
 
-# (a method for each number of parts, up to `SPLAT_MAX_PARTS`, and not one with a varargs argument: Julia does not specialize those for arguments of different types, and calls them by the runtime's convention)
+# (a method for each number of parts, up to `SPLAT_MAX_PARTS`, and not one with a varargs argument: Julia does not
+# specialize those for arguments of different types, and calls them by the runtime's convention)
 const SPLAT_MAX_PARTS = 8
 function splat_vector_body(T, skip, parts)
     items, spread, types = splat_items(parts, skip)
@@ -273,12 +320,14 @@ end
 for n in 1:SPLAT_MAX_PARTS
     args = [Symbol(:p, k) for k in 1:n]
     @eval @generated function splat_vector(::Val{T}, ::Val{skip}, $(args...)) where {T,skip}
-        # (`parts`, the tuple of the arguments, which the code that is made reads; the types of the arguments are what it is made for)
+        # (`parts`, the tuple of the arguments, which the code that is made reads; the types of the arguments are what
+        # it is made for)
         return Expr(:block, Expr(:(=), :parts, Expr(:tuple, $(QuoteNode.(args)...))), splat_vector_body(T, skip, ($(args...),)))
     end
 end
 
-# `getfield(x, i)` with an `i::Int` that is not known when compiling (`getfield(nt, i)` in a loop over the fields of a `NamedTuple`, as `Makie`'s `node_pairs` does) is the same: a comparison with each index.
+# `getfield(x, i)` with an `i::Int` that is not known when compiling (`getfield(nt, i)` in a loop over the fields of a
+# `NamedTuple`, as `Makie`'s `node_pairs` does) is the same: a comparison with each index.
 @generated function index_field(x, i::Int)
     chain = :(throw(BoundsError(x, i)))
     for k in fieldcount(x):-1:1
@@ -287,8 +336,9 @@ end
     return chain
 end
 
-# `values(nt)` is `Tuple(nt)`, a call that is made when the program runs for a `NamedTuple` whose field types are not all concrete (a value of the type `Any`, or a union, that was read from a `RefValue{Any}`: Makie's compute
-# graph calls its functions with `values(inputs)...`). The fields are the elements of the tuple, one by one, with their types.
+# `values(nt)` is `Tuple(nt)`, a call that is made when the program runs for a `NamedTuple` whose field types are not
+# all concrete (a value of the type `Any`, or a union, that was read from a `RefValue{Any}`: Makie's compute graph calls
+# its functions with `values(inputs)...`). The fields are the elements of the tuple, one by one, with their types.
 @device_override @inline Base.values(nt::NamedTuple{names}) where {names} = ntuple(i -> getfield(nt, i), Val(length(names)))
 
 # `get(nt, name, default)` is the same chain that ends in the default.

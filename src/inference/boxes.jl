@@ -1,23 +1,14 @@
-# Boxes with the type of what they hold.
+# The types of what the boxes of closures hold.
 #
-# A variable that a closure takes and that is assigned more than once (or after the closure is made) is a `Core.Box`, which holds a value of any type: what is read from it is an `Any`, and what
-# is done with that is a call that is not known when compiling (a dispatch on the registered types, at best). `viewport = Observable(...)` in the constructor of a `Scene` of Makie, which a closure
-# takes, is one. Julia does not give what is read from a box the type of what is assigned to the variable, though it is a `Union{Nothing,Observable{Rect2i}}` in every place that it is assigned.
-#
-# What is read from a box (`getfield(box, :contents)`) is given that type here: the union of the types of what is assigned to the variable, which is what compiling found the last time (the passes of
-# `run_passes`: what the first one finds, with the reads of the boxes as `Any`, is what the second one is made with, and so on until they say the same). A closure has the box as a field
-# (a `Core.Box`, whatever the variable is), so the type is also kept for the field of the closure, and a read from it in the code of the closure has it. That is only done for a box that nothing but the
-# function and the closures that it makes reads and assigns, and that none of those closures assigns (what a closure assigns is not known until it has been inferred, with the type of the box).
+# A variable that a closure captures and that is assigned more than once is a `Core.Box`: what is read from it is `Any`,
+# and calls on it dispatch. Here a read of a box (`getfield(box, :contents)`) is given the union of the types assigned
+# to the variable, as the pass before found them; the box field of each closure that captures it gets the same type.
+# Only for boxes that nothing but the method and its closures reads or assigns, and that no closure assigns. A variable
+# assigned from itself (`y = y * 2`) keeps its type if what is assigned is of that type; otherwise the union grows, and
+# a box whose union is not closed is left as it is. Also: fields of pointers that extensions make again where they are
+# null (`remade_by`), and the hooks of `getfield` and `memoryrefget` that give reads of boxes and slots their types.
 
-# What the passes know of the boxes is the `BoxState` of the compilation (compilation.jl): for each box, `(the specialization of a method, the number of the box among those that its code makes)` or `(the type of a
-# closure, the name of its field that is a box)`, the type of what it holds (`types`: what the last pass found, which this one is made with; `seen`: what this one finds), and the boxes that were given up (what
-# is assigned to them is of a type that is not known, even when the type of what they hold is): they stay `Core.Box`. What is found is for the compilation, and the key of what is inferred has the types (see `inference_key`).
-
-# A variable that is assigned from itself (`y = y * 2`) is of the type of what it is assigned if it is assigned only things of that type: the first time the code is inferred what is read
-# from the box is an `Any`, so a value that is made from it is too, and is not counted. The next time the box holds the type that the rest were, and what is assigned is of that type or not:
-# if it is not, the type is made a union of the two, and if that is not one that is known (an `Any`) the box is left as it is.
-
-# `slot = Core.Box(args...)`: the slot and the call
+# (`slot = Core.Box(args...)`: the slot and the call, or `nothing`)
 function box_creation(code, st)
     st isa Expr && st.head === :(=) && length(st.args) == 2 && st.args[1] isa Core.SlotNumber || return nothing
     call = st.args[2]
@@ -50,7 +41,8 @@ function operand_type(src::Core.CodeInfo, x)
     end
 end
 
-# whether a closure of this type (or one that it makes) assigns a variable that it took: `setfield!(box, :contents, value)`
+# whether a closure of this type (or one that it makes) assigns a variable that it took: `setfield!(box, :contents,
+# value)`
 function closure_assigns_box(T, world::UInt, seen::Set{Any}, depth::Int = 0)
     T isa Type || return true
     T in seen && return false
@@ -78,8 +70,9 @@ function closure_assigns_box(T, world::UInt, seen::Set{Any}, depth::Int = 0)
     return false
 end
 
-# The statements that are made from what is read from the box in `slot`, directly or through other statements and variables: their types are those of the code inferred with the box as it was, so they say nothing about what
-# the box holds (a value made from an `Any` is a union of whatever the registered types make of it)
+# The statements that are made from what is read from the box in `slot`, directly or through other statements and
+# variables: their types are those of the code inferred with the box as it was, so they say nothing about what the box
+# holds (a value made from an `Any` is a union of whatever the registered types make of it)
 function box_dependents(code, slot::Int)
     ssa = Set{Int}()
     slots = Set{Int}()
@@ -108,7 +101,8 @@ function box_dependents(code, slot::Int)
     return ssa, slots
 end
 
-# the closures that were made with the box, as the type of the field that it is: `closures` are the type of each and the place of the box in the call that makes it
+# the closures that were made with the box, as the type of the field that it is: `closures` are the type of each and the
+# place of the box in the call that makes it
 function record_closure_fields!(bx::BoxState, closures, code, T)
     for (C, i) in closures
         C isa DataType && 1 <= i <= fieldcount(C) && fieldtype(C, i) === Core.Box || continue
@@ -116,8 +110,8 @@ function record_closure_fields!(bx::BoxState, closures, code, T)
     end
 end
 
-# The types of what each box of the code holds, as far as that can be known: `bx.seen`. (Run after the code has been inferred, before it is optimized: the statements are those of the
-# lowered code, with their types.)
+# The types of what each box of the code holds, as far as that can be known: `bx.seen`. (Run after the code has been
+# inferred, before it is optimized: the statements are those of the lowered code, with their types.)
 function learn_boxes!(bx::BoxState, src::Core.CodeInfo, mi::Core.MethodInstance)
     code = src.code
     created = Dict{Int,Int}()   # slot => number of the box
@@ -227,8 +221,9 @@ function box_slots(bx::BoxState, src::Core.CodeInfo, mi::Core.MethodInstance)
     end
 end
 
-# The type of what is read from a box, `getfield(box, :contents)`, where it is known: `x` is the box as the statement has it (a slot of the method that made it, or a field of the closure that took it)
-# (the key is asked about whether or not there are types of boxes yet: what is read depends on it, see `depends!`)
+# The type of what is read from a box, `getfield(box, :contents)`, where it is known: `x` is the box as the statement
+# has it (a slot of the method that made it, or a field of the closure that took it) (the key is asked about whether or
+# not there are types of boxes yet: what is read depends on it, see `depends!`)
 function box_content_type(c::Compilation, sv, @nospecialize(x))
     bx = c.boxes
     src = sv.src
@@ -252,59 +247,28 @@ function box_content_type(c::Compilation, sv, @nospecialize(x))
     return T === Any ? nothing : T
 end
 
-# the type of `t[i]` for a tuple `t` that is a constant with a type in it, and an `i::Int` that is not a constant: a union of the types of its elements, with `Type{x}` for each that is a type; or `nothing`
-function types_of_constant_tuple(argtypes)
-    length(argtypes) == 3 || return nothing
-    t, i = argtypes[2], argtypes[3]
-    (t isa Core.Const && t.val isa Tuple && !(i isa Core.Const) && CC.widenconst(i) === Int) || return nothing
-    # (the elements by `getfield`: `any` and a generator over the tuple are methods that Julia compiles for the type of each tuple that is asked about)
-    v = t.val
-    n = nfields(v)
-    n <= SLOT_LIMIT[] || return nothing
-    types = Any[]
-    has_type = false
-    for k in 1:n
-        e = getfield(v, k)
-        e isa Type && (has_type = true)
-        push!(types, e isa Type ? Core.TypeEgal{e} : typeof(e))
-    end
-    has_type || return nothing
-    return Union{types...}
-end
-
-# A read of a slot of types (see slots.jl) has the slots of the program looked at: it is what a program that has types as values does, which may make no other call that would have them looked at (`Vector{T}`
-# of a `T` that is read is the builtin `apply_type`)
+# A read of a slot of types (see slots.jl) has the slots of the program looked at: it is what a program that has types
+# as values does, which may make no other call that would have them looked at (`Vector{T}` of a `T` that is read is the
+# builtin `apply_type`)
 function type_slot_read!(c::Compilation, sv, key)
     (key === nothing || c.dispatch.registered_used || c.slots.mode === :off) && return
     type_value_declared(key[1] === :elem ? key[2] : fieldtype(key[2], key[3])) && note_dispatch_used!(c, sv)
     return
 end
 
-# What a hook gives after the call that it made, `then(result, x)` (a function of the module): the value that it takes, `x` (a type, mostly), is held in a field of the type `Any`, so that the closure is one method that Julia
-# compiles once, and not one for each type that `x` is, which it would be if it took `x` itself (a closure is of the types of what it took: a method compiled when the program is, for each type that a program reads)
-struct Held; x::Any; end
-function after_call(then, call, interp, sv, @nospecialize(x))
-    h = Held(x)
-    return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
-        return then(result, h.x)
-    end
-end
-result_of_type(result::CC.CallMeta, @nospecialize(T)) = result.rt === Union{} ? result : CC.CallMeta(T, result.exct, result.effects, result.info, result.refinements)
-result_refined(result::CC.CallMeta, @nospecialize(T)) = CC.CallMeta(refined_read(T, result.rt), result.exct, result.effects, result.info, result.refinements)
-
-# the type of a read that is checked (see `type_slot_get`) is the union of the types that the slot holds: what inference makes of the checks is a union of at most three of them, as a merge of constants is
-typed_read(call, @nospecialize(T), interp, sv) = after_call(result_of_type, call, interp, sv, T)
-
 ## Fields that are made again
 #
-# A field of a pointer of an object that the program has as a constant (a face of FreeType in a font, a surface of Cairo) is an address of the process that compiles it, and null in the program (the embedder writes it so). A package
-# says how such a field is made again with a method of `remade_by` (in its extension): a read of the field is then `remade_field`, which makes it (and stores it) when it is null, the first time that the program reads it.
+# A pointer field of a constant object (a FreeType face in a font, a Cairo surface) holds an address of the compiling
+# process, and is null in the program (the embedder writes it so). An extension says how to make it again with a method of
+# `remade_by`: reads of the field become `remade_field`, which makes and stores it when it is null.
 
 """
     StaticRuntime.remade_by(::Type{T}, ::Val{name})
 
-The function that makes the field `name` of an object of the type `T` again when the program reads it and it is null, given the object (a field of a pointer of a constant, which is null in the program), or `nothing`
-(the default). An extension of a package says it for its types with a method: `StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) = program_face`. Only for fields of a `Ptr` type.
+The function that makes the field `name` of an object of the type `T` again when the program reads it and it is null,
+given the object (a field of a pointer of a constant, which is null in the program), or `nothing` (the default). An
+extension of a package says it for its types with a method: `StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) =
+program_face`. Only for fields of a `Ptr` type.
 """
 remade_by(@nospecialize(T), @nospecialize(name)) = nothing
 
@@ -316,7 +280,8 @@ function remade_field(make, ::Val{name}, x) where {name}
     return v
 end
 
-# (the function that a read of `getfield(x, name)` is made with, for its types, or `nothing`; not in `remade_field` itself, whose read is the field's)
+# (the function that a read of `getfield(x, name)` is made with, for its types, or `nothing`; not in `remade_field`
+# itself, whose read is the field's)
 function field_remaker(c::Compilation, @nospecialize(sv), argtypes::Vector{Any})
     length(argtypes) == 3 || return nothing
     name = argtypes[3]
@@ -332,27 +297,29 @@ function field_remaker(c::Compilation, @nospecialize(sv), argtypes::Vector{Any})
 end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.getfield), arginfo::CC.ArgInfo, si::CC.StmtInfo,
-                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
-    # (a field of a struct by a name or an index that is not a constant: a comparison with each, see `dynamic_field_plan`. The elements of a tuple that is a constant, and has types in it, are each a type that is known,
-    # see `types_of_constant_tuple`, where the callee gives the `DataType` that they are all of)
+                                vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    # (a field of a struct by a name or an index that is not a constant: a comparison with each, see
+    # `dynamic_field_plan`. The elements of a tuple that is a constant, and has types in it, are each a type that is
+    # known, see `types_of_constant_tuple`, where the callee gives the `DataType` that they are all of)
     dynamic = dynamic_field_plan(arginfo.argtypes)
     dynamic === nothing || return redirect(interp, dynamic, Any[], 2, arginfo, si, vtypes, sv; to = 3)
     # (a field that is made again where it is null: see above)
     make = field_remaker(compilation(), sv, arginfo.argtypes)
     make === nothing || return redirect(interp, remade_field, Any[make, Val(arginfo.argtypes[3].val)], 2, arginfo, si, vtypes, sv; to = 2)
-    call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
-                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
-    # (an element of a tuple that is a constant, that has types in it, by an index that is not known: `Type[Int, Float64][i]`: the types that it has, each a type that is known, and not the `DataType` that the field of the tuple is)
+    call = julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+    # (an element of a tuple that is a constant, that has types in it, by an index that is not known: `Type[Int,
+    # Float64][i]`: the types that it has, each a type that is known, and not the `DataType` that the field of the tuple
+    # is)
     T = types_of_constant_tuple(arginfo.argtypes)
     if T !== nothing && (sv isa CC.InferenceState || CC.isready(call))
         return after_call(result_of_type, call, interp, sv, T)
     end
     c = compilation()
-    # (an element of a tuple that is one of a few tuples: read as one of them, see `split_tuple` in dispatch.jl)
+    # (an element of a tuple that is one of a few tuples: read as one of them, see `split_tuple_read` in tuples.jl)
     split = split_tuple_read(interp, arginfo, si, vtypes, sv)
     split === nothing || return split
     # (a field of an object that is known, which the program does not change: what it has, see objects.jl)
-    arginfo.argtypes[2] isa Core.Const && depends!(c, sv, (:mode,)) # (see reuse.jl)
+    arginfo.argtypes[2] isa Core.Const && depends!(c, sv, (:mode,)) # (see passes.jl)
     if c.slots.mode === :on && (sv isa CC.InferenceState || CC.isready(call))
         folded = fold_field_read(c, arginfo.argtypes, sv)
         if folded !== nothing
@@ -367,7 +334,8 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
     if isempty(c.slots.types) && !c.dispatch.registered_used && c.slots.mode !== :off && length(arginfo.argtypes) == 3 && arginfo.argtypes[3] isa Core.Const && (arginfo.argtypes[3].val isa Symbol || arginfo.argtypes[3].val isa Integer)
         type_slot_read!(c, sv, field_slot_key(arginfo.argtypes[2], arginfo.argtypes[3].val))
     end
-    # (the box or the slot that is read is found whether or not any has types yet: what is read depends on it, see `depends!`)
+    # (the box or the slot that is read is found whether or not any has types yet: what is read depends on it, see
+    # `depends!`)
     argtypes = arginfo.argtypes
     length(argtypes) == 3 || return call
     t = argtypes[3]
@@ -383,26 +351,27 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
         key === nothing || (T = read_slot!(c, sv, key))
     end
     T === nothing && return call
-    # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
+    # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call
+    # that is ready is the one that it can change)
     (sv isa CC.InferenceState || CC.isready(call)) || return call
     mentions_type_value(T) && in_type_slot_read(sv) && return call
     if mentions_type_value(T) && length(argtypes) == 3 && t isa Core.Const
-        # (types as values: the read is the call of a check of them, see dispatch.jl)
+        # (types as values: the read is the call of a check of them, see types_as_values.jl)
         return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_field), argtypes[2], CC.Const(Val(t.val)), CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
     end
     return after_call(result_refined, call, interp, sv, T)
 end
 
-# What is read from the elements of a memory of an abstract type (`Memory{Any}`) is of the types that were stored in them (see slots.jl)
+# What is read from the elements of a memory of an abstract type (`Memory{Any}`) is of the types that were stored in
+# them (see slots.jl)
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.memoryrefget), arginfo::CC.ArgInfo, si::CC.StmtInfo,
-                                vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
-    call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
-                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+                                vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    call = julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
     c = compilation()
     length(arginfo.argtypes) >= 2 || return call
     key = elem_slot_key(arginfo.argtypes[2])
     T = key === nothing ? nothing : read_slot!(c, sv, key) # (asked whether or not there are types yet: see `depends!`)
-    T === nothing || depends!(c, sv, (:types_empty,)) # (a type that is stated is used only once some slot has types: see reuse.jl)
+    T === nothing || depends!(c, sv, (:types_empty,)) # (a type that is stated is used only once some slot has types: see passes.jl)
     if isempty(c.slots.types)
         type_slot_read!(c, sv, key)
         return call
@@ -411,7 +380,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.mem
     T === nothing && return call
     mentions_type_value(T) && in_type_slot_read(sv) && return call # (the read of a check of types: it is the slot itself)
     if mentions_type_value(T) && length(arginfo.argtypes) == 4 && arginfo.argtypes[3] == CC.Const(:not_atomic) && arginfo.argtypes[4] == CC.Const(false)
-        # (types as values: the read is the call of a check of them, see dispatch.jl)
+        # (types as values: the read is the call of a check of them, see types_as_values.jl)
         return typed_read(CC.abstract_call(interp, CC.ArgInfo(nothing, Any[CC.Const(type_slot_get), arginfo.argtypes[2], CC.Const(Val(T))]), si, vtypes, sv), T, interp, sv)
     end
     return after_call(result_refined, call, interp, sv, T)

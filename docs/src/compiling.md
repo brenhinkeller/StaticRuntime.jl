@@ -1,12 +1,108 @@
-# Strict mode and dynamic dispatch
+# Compiling: overrides, passes, and inference
 
-## Strict mode: unsupported code is rejected when compiling
+## How a compilation works
+
+`compile_executable(f, types)` runs these steps, in a compilation of its own (`src/inference/compilation.jl`):
+
+1. **Inference, in passes** (`src/inference/passes.jl`). Julia's type inference runs on the program with our interpreter,
+   whose hooks resolve what Julia would leave to the runtime: calls on abstract types and on `Any` (split over the types
+   that values can have), calls of functions that are not known, reads of slots of abstract types, boxes of closures,
+   constant objects. After each inference, analyses look at the code that the program reaches and record what it stores,
+   what functions it makes, and what objects it writes. If a pass finds something that it was not made with (a new
+   function type, different slot types, ...), another pass is made with it, until nothing changes. Later passes reuse
+   what earlier passes inferred, except for methods whose answers changed (`src/inference/passes.jl`).
+2. **Optimization.** Julia's optimizer runs, with our rewrites before and after it (`src/inference/optimize.jl`): replaced
+   calls are written into the code (see below), reads of slots are checked, and constructs that a binary can not run
+   are rewritten.
+3. **Code generation.** GPUCompiler and LLVM generate the code, with our LLVM passes (`src/llvm/`): type tags on the
+   objects that the program allocates, and the vectorizers.
+4. **Linking.** The runtime is linked into the module (`src/runtime/`): the allocator and the collector, the functions
+   of the runtime that the code calls, and the constants that the code refers to, copied into the binary. By default,
+   whatever still needs the Julia runtime is refused.
+
+Nothing of a compilation is left for the next one: what it inferred is removed when it ends.
+
+### What is done to help inference
+
+A binary has no runtime to look up what inference did not find, so the compiler works to make inference find more than
+Julia's own would. Most of it is in the hooks of our interpreter (`src/inference/`):
+
+- **Calls on abstract types and on `Any`** are given the union of the types that the argument can have (the subtypes of
+  the type, where they can all be listed; otherwise the registered types and the types that the program makes), which
+  Julia then splits into a call for each (see [Dynamic dispatch on abstract types and on `Any`](@ref)). Julia splits
+  unions of up to 4 types; ours, up to `SPLIT_LIMIT`.
+- **Slots of abstract types** (the elements of a `Vector{Any}`, a field of type `Any`) are given the types that the
+  program stores in them, found in its code and in its constants, and every read of them is checked by default.
+- **Slots that hold types** (`Vector{Type}`) are given the types they hold, each as a constant, and calls on what is
+  read from them are split over those (see [Types as values](@ref)).
+- **Boxes of closures** (variables a closure captures and that are assigned again) are given the types assigned to
+  them.
+- **Functions that are not known** (from a `Vector{Function}`, a callback, a listener of an `Observable`) are called as
+  a union of the function types that the program makes (see [Functions that are not known: closures in collections and
+  in boxes](@ref)).
+- **Constant objects** are known one by one: reads of their fields that the program never writes are constants, and a
+  package function called on one gets code of its own for that object, so a recursion over objects is known at each
+  level (see [Objects that the program has as constants](@ref)).
+- **Tuples, types and keywords of a few kinds** (a tuple with a `Union` element, `Vector{T}` of a `T` that is one of a
+  few types, keywords that are types, `NamedTuple`s of `Any` values) are split into one call for each case, or given an
+  exact type.
+- **Julia's own limits are relaxed** where they would leave a dynamic call: `@nospecializeinfer` methods are inferred
+  for the types of the call, functions that return a tuple with a `Union` element are inlined more readily, `invokelatest`
+  is the call it makes, and Base's `stdout`, `stderr` and `stdin` are the program's `STDOUT`, `STDERR` and `STDIN`.
+- **What cannot be found can be stated**: `@assume` gives the result type of a call, and `@assume_field` the type of a
+  field (see [Stating a type instead of copying code](@ref)).
+
+What these find depends on the whole program, which is why a compilation is made in passes.
+
+### Two ways of replacing code
+
+Code that a binary can not run is replaced in one of two ways.
+
+**`@device_override` replaces a method** (see [Writing overrides](usage.md#Writing-overrides)). It adds a method to this
+package's method table, which method lookup prefers to Base's for the argument types that it matches. It is plain
+Julia: every call that dispatches to that signature gets the replacement. Examples: `prod` of a tuple of integers,
+`print_to_string`, `time_ns`, `getproperty(::Nothing, ::Symbol)`.
+
+**A redirect replaces one call** (`src/inference/redirect.jl`). A hook of inference decides, for each call as it is
+inferred, to treat it as a call of another function: the replacement is inferred in its place (so the code after it
+is inferred with what the replacement gives), and the call is written into the code before it is optimized.
+
+|                    | `@device_override`                               | redirect                                                                                       |
+|:-------------------|:-------------------------------------------------|:-----------------------------------------------------------------------------------------------|
+| Decided by         | the argument types, by dispatch                  | anything inference knows of the call: constants, unions, the compilation's state (slot types, object keys) |
+| Can replace        | generic functions, which have methods            | also builtins and intrinsics (`getfield`, `tuple`, `apply_type`, `isdefined`), which have none |
+| Replacement        | a method of the same function                    | any function, with extra arguments made when compiling (`ObjectKey{N}`, `Val(name)`, a function) |
+| What the call gives | what the replacing method infers to             | can be adjusted (to keep a type that Julia would have merged)                                  |
+| Cost               | none beyond writing the method                   | a hook of inference and a rewrite of the code; only calls that are statements of their own     |
+| Applies to         | every call, in every program                     | only where the hook's conditions hold                                                          |
+
+The two combine: a redirect happens before methods are looked up, and the replacement is then looked up in the
+method table, overrides first, as any call is.
+
+Use `@device_override` when the argument types alone decide the replacement and the function is a generic one: it is
+simpler and needs no change to the compiler. A redirect is for what depends on more than the types of the call (whether
+an argument is a constant, which object it is, what the slots hold), for builtins, and for replacements that need
+arguments that only exist when compiling. The redirects of this package:
+
+| Call                                                                  | Made a call of                                   | Why                                                                         |
+|:----------------------------------------------------------------------|:-------------------------------------------------|:----------------------------------------------------------------------------|
+| `getfield(x, name)` with a `name` that is not a constant              | `struct_field`, `index_field`: a comparison with each name | otherwise `jl_f_getfield`, of the runtime                          |
+| a read of a pointer field that an extension makes again               | `remade_field`                                   | the field is null in the binary, and is made again when it is first read (FreeType faces, Cairo surfaces) |
+| `apply_type(F, A)` with `A` one of a few types                        | `split_apply_type`                               | a binary can not make types                                                 |
+| `tuple(...)`, and `getfield` of a tuple, with an element of a `Union` | `split_tuple`, `split_getfield`                  | otherwise `jl_f_tuple`, of the runtime                                      |
+| `isdefined(x, name)` with a `name` that is not a constant             | `struct_isdefined`                               | a builtin of the runtime                                                    |
+| a vector literal with a splat of something that is not a tuple        | `splat_vector`                                   | otherwise the runtime's apply                                               |
+| `show(io, T)` of a type that is a value (`DataType`)                  | `show_type_value`                                | the text of the type is in a table that the linker makes                    |
+| `setindex!` and `notify` of a constant object, where an extension says | the extension's function, with the object's key | code of its own for each object                                             |
+| `f(x, args...)` of a package function, with a constant object `x`     | `object_call(f, key, ...)`                       | code of its own for each object, so that a recursion over objects is known at each level |
+
+## Code that needs the Julia runtime is rejected
 
 A lot of Julia code can't work in a standalone binary because it needs the Julia runtime: most
 often *dynamic dispatch* (a call whose argument types are not known when compiling), but also
 anything that refers to a Julia object by its address in the compiling process. Left alone, such
 code compiles and links, and then crashes (or, worse, misbehaves) when it is run. So by default
-(`strict = true`) the functions of this package reject it when compiling, naming what is wrong:
+the functions of this package reject it when compiling, naming what is wrong:
 
 ```julia
 julia> compile_executable(main_that_prints, (Int, Ptr{Ptr{UInt8}}))
@@ -38,12 +134,12 @@ from it goes on with the rest of the program: the path ends in a `throw`, or an 
 prints is not what Julia prints, and an exception that would have been caught stops the program.
 `stub_errors = false` refuses these too. The same call on a path that goes on is refused.
 
-`strict = false` compiles all of the code anyway, defining those runtime functions to print
+With `strict = false`, all of the code is compiled anyway, with those runtime functions defined to print
 a message and abort if they are ever called (and the addresses will crash the program if used).
 `allow = ("function_name", ...)` accepts specific runtime functions, and keeps the check for the rest.
 Run with `JULIA_DEBUG=StaticRuntime` to see which are defined this way.
 
-With `strict = true` (the default) a read of the elements of a `Vector{Any}`, or of a field of an abstract type, that the compiler gave a narrower type than it declares (from the types that
+By default, a read of the elements of a `Vector{Any}`, or of a field of an abstract type, that the compiler gave a narrower type than it declares (from the types that
 the program stores there) is also checked when the program runs: a value of another type stops the program with a type error, where it would otherwise be treated as one of the types that
 were found. The compiler finds the stores in the code that it compiles and in the constants that this refers to, and this is for any that it does not find. It costs nothing that the benchmarks
 (`bench/dispatch.jl`) could measure. The environment variable `STATIC_RUNTIME_CHECK_TYPES` is `0` to leave the check out, or `1` to have it with `strict = false`.
@@ -63,7 +159,7 @@ looking at a compilation that takes long, or ends in "did not settle":
   where inference got a type wrong. `STATIC_RUNTIME_TRACE=embed` says why each object that can not be in the binary can not, with the way from it to the constant that the program refers to.
   `STATIC_RUNTIME_TRACE=ir:<text>` writes the code of each method whose name has the text in it (`ir:elliptical_arc_to_beziers(`), as it is optimized, after the changes of this package. The setting is read
   when a compilation starts: what is not traced costs nothing.
-- When strict mode refuses a program for references to objects of the process that compiled it, the message says what each object is (its type) and why it could not be copied into the binary. A part of a program that
+- When a program is refused for references to objects of the process that compiled it, the message says what each object is (its type) and why it could not be copied into the binary. A part of a program that
   needs the Julia runtime and is only on the way to an error stops the program with a message that says where in the Julia code it is (the file and line, and what that was inlined into).
 - `STATIC_RUNTIME_SLOTS_WHY=1` says why slots are given up, and what each pass found in them.
 

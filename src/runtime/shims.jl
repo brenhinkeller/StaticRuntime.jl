@@ -1,6 +1,7 @@
-# The runtime that compiled code links to, written in LLVM IR (`RUNTIME_SHIM_IR`): the functions of libjulia that the code that Julia generates calls (allocation of strings and boxes,
-# `jl_f_*` builtins, exceptions, ...), and the lists of the functions that it may call without them (the C library and the math library) or that are replaced (`LIBJULIA_ALIASES`).
-# A program is linked with the part of this that it uses (see `link_runtime!`).
+# The runtime that compiled code links to, written in LLVM IR (`RUNTIME_SHIM_IR`): the functions of libjulia that the
+# code that Julia generates calls (allocation of strings and boxes, `jl_f_*` builtins, exceptions, ...), and the lists
+# of the functions that it may call without them (the C library and the math library) or that are replaced
+# (`LIBJULIA_ALIASES`). A program is linked with the part of this that it uses (see `link_runtime!`).
 
 const RUNTIME_SHIM_IR = raw"""
 declare ptr @malloc(i64)
@@ -364,7 +365,7 @@ define linkonce_odr ptr @ijl_cstr_to_string(ptr %p) {
 }
 
 ; A finalizer that is a C function (`BigInt` has one, to free what GMP allocated): the heap has it called with the object when
-; a collection finds that nothing refers to the object (see `heap.jl`). (A finalizer that is a Julia function is not this: see `finalizers.jl`.)
+; a collection finds that nothing refers to the object (see `heap.jl`). (A finalizer that is a Julia function is not this: see `overrides/gc.jl`.)
 define linkonce_odr void @ijl_gc_add_ptr_finalizer(ptr %ptls, ptr %obj, ptr %f) {
   %fi = ptrtoint ptr %f to i64
   %oi = ptrtoint ptr %obj to i64

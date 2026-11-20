@@ -1,42 +1,47 @@
-# The object embedder: the objects of the process that compiles that the code refers to (a `const` array, a string, a type, ...) are copied into the binary, as globals, with the layout
-# that Julia gives them (`ObjectEmbedder`). Each object is one global, whatever refers to it, and what it refers to is copied too (`embed_global!`, `object_pieces`).
+# The object embedder: the objects of the process that compiles that the code refers to (a `const` array, a string, a
+# type, ...) are copied into the binary, as globals, with the layout that Julia gives them (`ObjectEmbedder`). Each
+# object is one global, whatever refers to it, and what it refers to is copied too (`embed_global!`, `object_pieces`).
 
-# ## The objects that are copied into the binary: what it has to be, and what is checked
+## The objects that are copied into the binary: what it has to be, and what is checked
 #
-# Code that is compiled from a Julia process refers to the objects of that process by their addresses (`inttoptr (i64 N)`): a string, a
-# `Vector`, a type, a `Dict` that is a `const`. A binary does not have the process, so the objects are copied into it (`embed_constants!`), and
-# each address is replaced by the copy. Nothing says which numbers are addresses of objects and which are only numbers, and the memory of
-# the process is not described anywhere that this can ask: so what is done is made of checks, each of which has to hold for an address to be
-# an object, and each of which is the reason for a failure that the messages say (`JULIA_DEBUG=StaticRuntime`):
+# Code that is compiled from a Julia process refers to the objects of that process by their addresses (`inttoptr (i64
+# N)`): a string, a `Vector`, a type, a `Dict` that is a `const`. A binary does not have the process, so the objects are
+# copied into it (`embed_constants!`), and each address is replaced by the copy. Nothing says which numbers are
+# addresses of objects and which are only numbers, and the memory of the process is not described anywhere that this can
+# ask: so what is done is made of checks, each of which has to hold for an address to be an object, and each of which is
+# the reason for a failure that the messages say (`JULIA_DEBUG=StaticRuntime`):
 #
-# 1. *An object is where its tag says.* The word before an address is its type tag: a small number (the builtin types), or the address of a
-#    `DataType`. That `DataType` has to have the tag of a `DataType`, a name with the tag of a `TypeName`, a supertype with the tag of a
-#    `DataType`, and `svec`s for its parameters and the types of its fields (`object_type`). Asking Julia anything about a "type" that does not
-#    have these (`<:`, `isconcretetype`) can crash the process that compiles, so nothing is asked before they are known. The objects that have
-#    no fields (a function, `nothing`) are 8 bytes after a 16-byte aligned cell, and are the `instance` of their type; symbols are 8-byte aligned too.
-# 2. *Memory is read only where the kernel says that it is readable* (`safe_load`, `check_readable`): a word that looks like a pointer may
-#    not be one.
-# 3. *An address that is an object is that object.* An address that is the start of an object is not looked for in an object before it
-#    (`find_objects`); only an address that is not (the data of a string, a field of a struct) is, up to `MAX_INTERIOR` bytes, and in an object
-#    only if the object is large enough to have it.
-# 4. *The objects are one each.* An object that is referred to twice (in two arrays, by two constants) is one object in the binary, by its
-#    address in this process (`e.globals`), so `===` and cycles are as in Julia. An object that is being copied is in `e.globals` before
-#    what it refers to is, which is how cycles are copied.
-# 5. *What a program never reads is not copied*: the supertype, wrapper and field names of a type, the method tables, the caches of a type name
-#    (`field_cut`). A program that reads them gets null, or an empty list.
-# 6. *A copy that fails fails whole.* If an object can't be copied (a `Module`, a task, something that is not an object), it and what refers to it are
-#    not, and the code that refers to its address stays as it was: strict mode refuses it, naming the address (`unresolved_pointer_uses`), and
-#    the embedder's `failures` has why.
+# 1. *An object is where its tag says.* The word before an address is its type tag: a small number (the builtin types),
+#    or the address of a `DataType`. That `DataType` has to have the tag of a `DataType`, a name with the tag of a
+#    `TypeName`, a supertype with the tag of a `DataType`, and `svec`s for its parameters and the types of its fields
+#    (`object_type`). Asking Julia anything about a "type" that does not have these (`<:`, `isconcretetype`) can crash
+#    the process that compiles, so nothing is asked before they are known. The objects that have no fields (a function,
+#    `nothing`) are 8 bytes after a 16-byte aligned cell, and are the `instance` of their type; symbols are 8-byte
+#    aligned too.
+# 2. *Memory is read only where the kernel says that it is readable* (`safe_load`, `check_readable`): a word that looks
+#    like a pointer may not be one.
+# 3. *An address that is an object is that object.* An address that is the start of an object is not looked for in an
+#    object before it (`find_objects`); only an address that is not (the data of a string, a field of a struct) is, up
+#    to `MAX_INTERIOR` bytes, and in an object only if the object is large enough to have it.
+# 4. *The objects are one each.* An object that is referred to twice (in two arrays, by two constants) is one object in
+#    the binary, by its address in this process (`e.globals`), so `===` and cycles are as in Julia. An object that is
+#    being copied is in `e.globals` before what it refers to is, which is how cycles are copied.
+# 5. *What a program never reads is not copied*: the supertype, wrapper and field names of a type, the method tables,
+#    the caches of a type name (`field_cut`). A program that reads them gets null, or an empty list.
+# 6. *A copy that fails fails whole.* If an object can't be copied (a `Module`, a task, something that is not an
+#    object), it and what refers to it are not, and the code that refers to its address stays as it was: strict mode
+#    refuses it, naming the address (`unresolved_pointer_uses`), and the embedder's `failures` has why.
 #
-# `test/testembedfuzz.jl` checks all of it together: random nested constants and what a program does to a copy of them, with what Julia computes
-# from them as the answer, also with the collector run as often as it can.
+# `test/testembedfuzz.jl` checks all of it together: random nested constants and what a program does to a copy of them,
+# with what Julia computes from them as the answer, also with the collector run as often as it can.
 
 # (the objects of the program that are in the binary, by the address that they have in this process)
 mutable struct ObjectEmbedder
     mod::LLVM.Module
     globals::Dict{UInt,Union{LLVM.GlobalVariable,Nothing}} # object address => its global
     egal::Bool # whether the code compares objects with `jl_egal__unboxed`, and so needs the plans of the types for it
-    # (what is found while one program is linked is its own: an address is of an object of this process now, and may be another's the next time, so none of it is kept for another program)
+    # (what is found while one program is linked is its own: an address is of an object of this process now, and may be
+    # another's the next time, so none of it is kept for another program)
     failures::Dict{UInt,String} # why the objects that could not be embedded could not (for the messages of the ones that refer to them)
     dangling::Vector{Tuple{Any,Symbol}} # the fields of the constants that hold an address of this process, which are null in the program: see `warn_dangling_pointer`
     well_known::Dict{UInt,Pair{String,Any}} # which of the well-known objects is at an address (found when the first is asked for: see `well_known_at`)
@@ -248,7 +253,8 @@ function object_pieces(e::ObjectEmbedder, T::DataType, addr::UInt)
         check_readable(addr, n)
         return LLVM.LLVMType[LLVM.ArrayType(LLVM.Int8Type(), n)], g -> LLVM.Constant[bytes_piece(addr, n)]
     elseif Base.issingletontype(T)
-        # the one instance of the type (a function, a tuple of singletons: `(Val(true),)` has a field, and no size), which has no contents: padding, so that the object has an address
+        # the one instance of the type (a function, a tuple of singletons: `(Val(true),)` has a field, and no size),
+        # which has no contents: padding, so that the object has an address
         pad = LLVM.ArrayType(LLVM.Int8Type(), 8)
         return LLVM.LLVMType[pad], g -> LLVM.Constant[LLVM.null(pad)]
     elseif fieldcount(T) > 0
@@ -439,8 +445,10 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 p = unsafe_load(Ptr{UInt}(base + off))
                 ET = T.parameters[2]
                 if (ET isa Union && Base.isbitsunion(ET)) || (ET isa DataType && Base.allocatedinline(ET) && sizeof(ET) == 0)
-                    # (for these it is the number of the element, and not a pointer: a union of types without references, and elements that have no size, `Vector{typeof(f)}`, whose data is nowhere. As a pointer the
-                    # number of an element with no size was an offset from the memory of about the whole address space, which the linker of macOS stops at with an assertion)
+                    # (for these it is the number of the element, and not a pointer: a union of types without
+                    # references, and elements that have no size, `Vector{typeof(f)}`, whose data is nowhere. As a
+                    # pointer the number of an element with no size was an offset from the memory of about the whole
+                    # address space, which the linker of macOS stops at with an assertion)
                     add!(LLVM.Int64Type(), g -> i64(p))
                 else
                     add!(LLVM.PointerType(), g -> embed_ref!(e, mem, 16 + Int(p) - Int(memdata)))
@@ -451,17 +459,20 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 add!(LLVM.PointerType(), g -> embed_ref!(e, mem))
                 pos = off + sizeof(Ptr)
             elseif T === BigInt && fieldname(T, i) === :d && unsafe_load(Ptr{Cint}(base)) > 0 && is_process_address(unsafe_load(Ptr{UInt}(base + off)))
-                # The limbs of a `BigInt` are memory that GMP allocated: they are data of the binary here, and `d` points to them (a constant is not written to: what GMP would
-                # reallocate, in a write, is memory that it did not allocate)
+                # The limbs of a `BigInt` are memory that GMP allocated: they are data of the binary here, and `d`
+                # points to them (a constant is not written to: what GMP would reallocate, in a write, is memory that it
+                # did not allocate)
                 limbs = unsafe_load(Ptr{UInt}(base + off))
                 n = Int(unsafe_load(Ptr{Cint}(base))) # (`alloc`: the number of limbs that there is room for)
                 add!(LLVM.PointerType(), g -> limbs_global!(e, limbs, n))
                 pos = off + sizeof(Ptr)
             elseif ft <: Ptr && is_process_address(unsafe_load(Ptr{UInt}(base + off)))
-                # An address in this process (of memory that a library allocated, of a function): it means nothing in the binary. Julia's own
-                # compiled code (a package image) writes these as null, which is what is done here: what has the pointer made again
-                # when it finds it null (a `Regex` compiles when its `regex` is null) goes on working, and what does not fails on the null.
-                # (a `BigInt` that has no limbs allocated (`alloc` is 0: zero, as `BigInt()` is) has GMP's own placeholder in `d`, which nothing reads, and GMP allocates when it is written: nothing is lost)
+                # An address in this process (of memory that a library allocated, of a function): it means nothing in
+                # the binary. Julia's own compiled code (a package image) writes these as null, which is what is done
+                # here: what has the pointer made again when it finds it null (a `Regex` compiles when its `regex` is
+                # null) goes on working, and what does not fails on the null. (a `BigInt` that has no limbs allocated
+                # (`alloc` is 0: zero, as `BigInt()` is) has GMP's own placeholder in `d`, which nothing reads, and GMP
+                # allocates when it is written: nothing is lost)
                 (T === BigInt && fieldname(T, i) === :d && unsafe_load(Ptr{Cint}(base)) == 0) || warn_dangling_pointer(e, T, fieldname(T, i))
                 add!(LLVM.PointerType(), g -> nullptr())
                 pos = off + sizeof(Ptr)
@@ -477,8 +488,11 @@ function struct_pieces(e::ObjectEmbedder, T::DataType, addr::UInt; n::Int=1)
                 end
                 pos = off + sizeof(ft)
             elseif T <: Function && (r = unsafe_load(Ptr{UInt}(base + off)); r != 0 && object_type(r) === Module)
-                # A module that a closure took (the listeners of the mouse and the keyboard of a Makie scene, which a program that has no events does not call: they are not among the listeners that the code compares
-                # with, see "Listeners" in src/inference/closures.jl): it is null in the binary, where it would be a structure of the runtime, as the closure is kept by what has it (the observable). Elsewhere a module fails whole.
+                # A module that a closure took (the listeners of the mouse and the keyboard of a Makie scene, which a
+                # program that has no events does not call: they are not among the listeners that the code compares
+                # with, see "Listeners" in src/inference/closures.jl): it is null in the binary, where it would be a
+                # structure of the runtime, as the closure is kept by what has it (the observable). Elsewhere a module
+                # fails whole.
                 add!(LLVM.PointerType(), g -> nullptr())
                 pos = off + sizeof(Ptr)
             else # reference to another object

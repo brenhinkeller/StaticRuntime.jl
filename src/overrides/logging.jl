@@ -1,21 +1,22 @@
 # Logging (`@warn`, `@info`, `@error`) without the logging machinery of Base.
 #
-# The macros of Julia look up the current logger (a scoped value, or the global logger, which has the sink that the user chose),
-# ask it whether the message is to be shown (through `invokelatest`, as the logger can be defined later than the code), and
-# give the message to it. None of that is a thing for a program that is compiled: the logger is not known, and it has to be
-# the same for the whole program. So the logger here is one: messages of the level `Info` and above are written to the
-# standard error as the default logger of Julia writes them to something that is not a terminal (`┌ Warning: message`, the keywords
-# as `│   key = value`, and the file and line); `@debug` messages are not written (as in Julia, without `JULIA_DEBUG`).
-# The macros decide this when the program is compiled, so the code of the messages of a lower level is not in the binary.
-# Not kept: `maxlog`, the `_module` and `group` of messages, the colors.
+# The macros of Julia look up the current logger (a scoped value, or the global logger, which has the sink that the user
+# chose), ask it whether the message is to be shown (through `invokelatest`, as the logger can be defined later than the
+# code), and give the message to it. None of that is a thing for a program that is compiled: the logger is not known,
+# and it has to be the same for the whole program. So the logger here is one: messages of the level `Info` and above are
+# written to the standard error as the default logger of Julia writes them to something that is not a terminal (`┌
+# Warning: message`, the keywords as `│   key = value`, and the file and line); `@debug` messages are not written (as in
+# Julia, without `JULIA_DEBUG`). The macros decide this when the program is compiled, so the code of the messages of a
+# lower level is not in the binary. Not kept: `maxlog`, the `_module` and `group` of messages, the colors.
 
 using Base.CoreLogging: AbstractLogger, LogLevel, Info, Warn, Error
 
 "The logger of compiled programs: writes to the standard error."
 struct StaticLogger <: AbstractLogger end
 
-# whether `with_logger(NullLogger())`, or `global_logger(NullLogger())`, is in effect: no message is written (the one other logger that a program can have: it is the
-# `Logging` of Base without the machinery that makes a logger of another kind work)
+# whether `with_logger(NullLogger())`, or `global_logger(NullLogger())`, is in effect: no message is written (the one
+# other logger that a program can have: it is the `Logging` of Base without the machinery that makes a logger of another
+# kind work)
 const LOG_SILENT = Ref(false)
 
 @device_override Base.CoreLogging.current_logger_for_env(level::LogLevel, group, _module) =
@@ -51,7 +52,8 @@ function write_log(level::LogLevel, msg, file, line, kwargs)
     return nothing
 end
 
-# (Base's version has a `try` that reports an error of the logger with another message, which is a lot of code for nothing)
+# (Base's version has a `try` that reports an error of the logger with another message, which is a lot of code for
+# nothing)
 @device_override Base.CoreLogging.handle_message_nothrow(::StaticLogger, level::LogLevel, msg, _module, group, id, file, line; kwargs...) =
     write_log(level, msg, file, line, kwargs)
 

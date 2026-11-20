@@ -1,4 +1,5 @@
-# CairoMakie in a program: a figure (made before the program is compiled, see the extension for Makie) drawn with Cairo, to an image that the program writes (`Cairo.write_to_png(screen.surface, path)`).
+# CairoMakie in a program: a figure (made before the program is compiled, see the extension for Makie) drawn with Cairo,
+# to an image that the program writes (`Cairo.write_to_png(screen.surface, path)`).
 
 module StaticRuntimeCairoMakieExt
 
@@ -8,8 +9,10 @@ using CairoMakie.Makie: Scene, Plot
 const Cairo = CairoMakie.Cairo
 const CP = Makie.ComputePipeline
 
-# The screen is of the type of what it draws to (`Screen{IMAGE}`, `Screen{PDF}`), which the package reads from the surface when the screen is made (`get_render_type(surface)`, a value of the library): a type that is made when
-# the program runs. A surface of an image is always one of `IMAGE`: the screen of one is made here with its type known (the same as the package's, otherwise).
+# The screen is of the type of what it draws to (`Screen{IMAGE}`, `Screen{PDF}`), which the package reads from the
+# surface when the screen is made (`get_render_type(surface)`, a value of the library): a type that is made when the
+# program runs. A surface of an image is always one of `IMAGE`: the screen of one is made here with its type known (the
+# same as the package's, otherwise).
 @device_override function CairoMakie.Screen(scene::Scene, config::CairoMakie.ScreenConfig, surface::Cairo.CairoSurfaceImage)
     dsf = CairoMakie.device_scaling_factor(CairoMakie.IMAGE, config)
     CairoMakie.surface_set_device_scale(surface, dsf)
@@ -22,12 +25,17 @@ end
 
 ## Drawing a scene
 #
-# What the package draws a plot with (`draw_atomic`) first adds to the plot's graph what it needs (`add_constant!`, `map!`, `extract_attributes!`, the nodes and edges of the drawing: done once, a graph that has them keeps them), and
-# then reads one node, a `NamedTuple` of all that it draws with, which it gives to a function of Cairo calls (`draw_lineplot(ctx, attributes)`). The plots are those of the scene and its children, in the order of their z
-# values (`cairo_draw`). The plots of a program are of many types, all of which are `AbstractPlot` in the scene, and the nodes are read from graphs whose edges and inputs are of all the types of the figure: a drawing is
-# made here before the program is compiled, as a list of steps, one for each plot, with its type, its scene and the node that it is drawn with (a `typed_node`), so that each is drawn with the types that it has.
+# What the package draws a plot with (`draw_atomic`) first adds to the plot's graph what it needs (`add_constant!`,
+# `map!`, `extract_attributes!`, the nodes and edges of the drawing: done once, a graph that has them keeps them), and
+# then reads one node, a `NamedTuple` of all that it draws with, which it gives to a function of Cairo calls
+# (`draw_lineplot(ctx, attributes)`). The plots are those of the scene and its children, in the order of their z values
+# (`cairo_draw`). The plots of a program are of many types, all of which are `AbstractPlot` in the scene, and the nodes
+# are read from graphs whose edges and inputs are of all the types of the figure: a drawing is made here before the
+# program is compiled, as a list of steps, one for each plot, with its type, its scene and the node that it is drawn
+# with (a `typed_node`), so that each is drawn with the types that it has.
 
-# (one plot: `draw` is given the context and what `attributes` reads; `visible` are the nodes of its visibility and those of the plots that it is in, which all have to be true for it to be drawn; `children`, the steps of the plots
+# (one plot: `draw` is given the context and what `attributes` reads; `visible` are the nodes of its visibility and
+# those of the plots that it is in, which all have to be true for it to be drawn; `children`, the steps of the plots
 # that it is made of, which are drawn after it, as `draw_plot` does: a `text` has the lines of its LaTeX)
 struct PlotStep{P<:Plot,F,N,V<:Tuple,C<:Tuple}
     plot::P
@@ -44,7 +52,8 @@ struct TypedDrawing{S<:Tuple}
     steps::S
 end
 
-# The function of Cairo calls that the package draws a plot of a type with, from the node `cairo_attributes` (see `draw_atomic` of each type): those of the types that are supported.
+# The function of Cairo calls that the package draws a plot of a type with, from the node `cairo_attributes` (see
+# `draw_atomic` of each type): those of the types that are supported.
 draw_function(::Union{Makie.Lines,Makie.LineSegments}) = CairoMakie.draw_lineplot
 draw_function(::Makie.Scatter) = CairoMakie.draw_atomic_scatter
 draw_function(::Makie.Text) = CairoMakie.draw_text
@@ -53,8 +62,10 @@ draw_function(p::Plot) = error("a `", Makie.plotkey(p), "` can not be drawn in a
 all_visible(::Tuple{}) = true
 all_visible(nodes::Tuple) = (first(nodes)[]::Bool) && all_visible(Base.tail(nodes))
 
-# A plot that the package draws by reading its attributes one at a time (`poly.color[]`, `poly.model[]`: `draw_poly`), each of which would be a read of a node of any of the graphs: the plot as the drawing functions see it, with
-# a `typed_node` for each of its attributes (`nodes`) and the same for the plots that it is made of (`plots`, `poly.plots[2]`); what else is read of it is read from the plot.
+# A plot that the package draws by reading its attributes one at a time (`poly.color[]`, `poly.model[]`: `draw_poly`),
+# each of which would be a read of a node of any of the graphs: the plot as the drawing functions see it, with a
+# `typed_node` for each of its attributes (`nodes`) and the same for the plots that it is made of (`plots`,
+# `poly.plots[2]`); what else is read of it is read from the plot.
 struct TypedPlot{P<:Plot,N<:NamedTuple,C<:Tuple,F}
     plot::P
     nodes::N
@@ -71,7 +82,8 @@ end
 Makie.get_scene(t::TypedPlot) = getfield(t, :scene)
 Makie.parent_scene(t::TypedPlot) = getfield(t, :scene)
 Makie.transform_func(t::TypedPlot) = getfield(t, :transform_func)
-# (the package's methods of these take the plot as `@nospecialize`, and what they call on it is chosen when the program runs: the same, with the stand-in known)
+# (the package's methods of these take the plot as `@nospecialize`, and what they call on it is chosen when the program
+# runs: the same, with the stand-in known)
 CairoMakie.project_position(t::TypedPlot, space, point, model, yflip::Bool = true) =
     CairoMakie.project_position(Makie.get_scene(t), Makie.transform_func(t), space, point, model, yflip)
 function CairoMakie.project_shape(t::TypedPlot, space, rect::Makie.Rect, model)
@@ -81,14 +93,16 @@ function CairoMakie.project_shape(t::TypedPlot, space, rect::Makie.Rect, model)
     return Makie.Rect(mini, maxi .- mini)
 end
 
-# (a `poly`, drawn with the method of `draw_poly` for what it was made of, `K` being `:args` or `:converted`: the package chooses it by the types, with `hasmethod`, which is done when the drawing is made)
+# (a `poly`, drawn with the method of `draw_poly` for what it was made of, `K` being `:args` or `:converted`: the
+# package chooses it by the types, with `hasmethod`, which is done when the drawing is made)
 struct PolyStep{K,P<:TypedPlot,V<:Tuple}
     poly::P
     scene::Scene
     visible::V
 end
 
-# (a plot that was hidden when the drawing was made, and that the program does not show: what it is shown with is checked, and a change of it stops the program, see `typed_node`)
+# (a plot that was hidden when the drawing was made, and that the program does not show: what it is shown with is
+# checked, and a change of it stops the program, see `typed_node`)
 struct HiddenStep{V<:Tuple}
     visible::V
 end
@@ -111,7 +125,8 @@ function draw_plot_step(screen::CairoMakie.Screen, s::PlotStep)
 end
 draw_plot_step(screen::CairoMakie.Screen, s::PolyStep{K}) where {K} = (CairoMakie.draw_poly(s.scene, screen, s.poly, CairoMakie.deref(getproperty(s.poly, K)[])...); nothing)
 
-# (`cairo_draw` and `draw_plot` of the package for one plot: the clipping and translation of its scene are set when the scene is not that of the plot before it)
+# (`cairo_draw` and `draw_plot` of the package for one plot: the clipping and translation of its scene are set when the
+# scene is not that of the plot before it)
 function draw_step!(screen::CairoMakie.Screen, s, last_scene::Scene)
     shown(s) || return last_scene
     scene = s.scene
@@ -165,7 +180,8 @@ function plot_graphs!(graphs::Vector{CP.ComputeGraph}, plot::Plot)
     return graphs
 end
 
-# (the visibility of a plot and of the plots that it is in: a plot whose graph has no node `visible` is visible, as `get(plot, :visible, true)` says)
+# (the visibility of a plot and of the plots that it is in: a plot whose graph has no node `visible` is visible, as
+# `get(plot, :visible, true)` says)
 function visible_nodes(plot, inputs)
     nodes = Any[]
     while plot isa Plot
@@ -187,7 +203,8 @@ function typed_plot(plot::Plot, inputs)
     return TypedPlot(plot, NamedTuple{Tuple(names)}(Tuple(nodes)), Tuple(typed_plot(p, inputs) for p in plot.plots), Makie.parent_scene(plot)::Scene, Makie.transform_func(plot))
 end
 
-# (what `draw_plot` of the package does with a `poly`: the method of `draw_poly` for its arguments as they were given, or for what they were converted to; otherwise it is drawn as the plots that it is made of)
+# (what `draw_plot` of the package does with a `poly`: the method of `draw_poly` for its arguments as they were given,
+# or for what they were converted to; otherwise it is drawn as the plots that it is made of)
 function poly_step(poly::Makie.Poly, inputs, visible)
     scene = Makie.parent_scene(poly)::Scene
     for key in (:args, :converted)
@@ -213,7 +230,8 @@ function plot_step(plot::Plot, inputs)
     return PlotStep(plot, scene, f, StaticRuntime.typed_node(plot.attributes, :cairo_attributes; inputs), visible, children)
 end
 
-# (a figure: what saving or showing it does first, `update_state_before_display!`, which sets the limits of its axes to what they show, and then its scene)
+# (a figure: what saving or showing it does first, `update_state_before_display!`, which sets the limits of its axes to
+# what they show, and then its scene)
 function StaticRuntime.typed_drawing(fig::Makie.Figure; kwargs...)
     Makie.update_state_before_display!(fig)
     return StaticRuntime.typed_drawing(fig.scene; kwargs...)
@@ -222,7 +240,8 @@ end
 function StaticRuntime.typed_drawing(scene::Scene; inputs = (), screen_config...)
     makie = Base.get_extension(StaticRuntime, :StaticRuntimeMakieExt)
     config = Makie.merge_screen_config(CairoMakie.ScreenConfig, Dict{Symbol,Any}(screen_config))
-    # (the nodes that are given a reference of their own type are made so before anything is resolved: see `declare_node_types!`)
+    # (the nodes that are given a reference of their own type are made so before anything is resolved: see
+    # `declare_node_types!`)
     foreach(makie.declare_node_types!, scene_graphs!(CP.ComputeGraph[], scene))
     # the drawing, done once: what it adds to the graphs of the plots is there for the program
     screen = CairoMakie.Screen(scene, config)

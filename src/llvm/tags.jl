@@ -26,10 +26,9 @@ function type_tag(addr::UInt)
     return Int64(addr)
 end
 
-# Write the type tag of each of the objects that the allocation intrinsic `julia.gc_alloc_obj(ptls, size, type)`
-# makes, in the 8 bytes before the object (which is where the tag goes: the runtime allocates a header
-# for them)
-# The global that stands for the type at `addr` while the code is optimized (see below, and `resolve_type_placeholders!`)
+# Write the type tag of each of the objects that the allocation intrinsic `julia.gc_alloc_obj(ptls, size, type)` makes,
+# in the 8 bytes before the object (which is where the tag goes: the runtime allocates a header for them). The global
+# that stands for the type at `addr` while the code is optimized (see below, and `resolve_type_placeholders!`)
 function type_placeholder(mod::LLVM.Module, addr::UInt)
     name = string(Runtime.TYPE_PLACEHOLDER, string(addr, base = 16))
     g = get(LLVM.globals(mod), name, nothing)
@@ -53,7 +52,8 @@ function tag_allocations!(mod::LLVM.Module)
         known = addr !== nothing
         @dispose builder = LLVM.IRBuilder() begin
             obj = call
-            # an object that can't refer to others is allocated as such (the lowering that would follow allocates them all alike)
+            # an object that can't refer to others is allocated as such (the lowering that would follow allocates them
+            # all alike)
             if known && Runtime.object_type(addr) === DataType &&
                Runtime.type_pointerfree(unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
                 ftype = LLVM.FunctionType(LLVM.value_type(call), [LLVM.Int64Type()])
@@ -66,7 +66,8 @@ function tag_allocations!(mod::LLVM.Module)
             LLVM.position!(builder, LLVM.after(obj))
             tag = if known
                 t = type_tag(addr)
-                # (a builtin type has a small number as its tag; the others the address of the type, which is the type in the binary)
+                # (a builtin type has a small number as its tag; the others the address of the type, which is the type
+                # in the binary)
                 t == Int64(addr) ? LLVM.const_ptrtoint(type_placeholder(mod, addr), LLVM.Int64Type()) : LLVM.ConstantInt(t)
             else
                 LLVM.ptrtoint!(builder, typ, LLVM.Int64Type()) # a type that is only known when running
@@ -86,13 +87,14 @@ const ModulePass = isdefined(LLVM, :NewPMModulePass) ? LLVM.NewPMModulePass : LL
 
 const TagAllocationsPass = ModulePass("StaticTagAllocations", tag_allocations!)
 
-# The addresses of type objects that the code that Julia generates compares the tags of objects with (`isa`, `typeof`), and passes on, as numbers, are those
-# of this process, which are not those in the binary (where the types are objects that are copied into it: see `embed_constants!`). They
-# are replaced after the code is optimized. But LLVM does arithmetic with such numbers while it optimizes: a chain of tests of a tag
-# against types becomes a `switch` on `(tag + C)` rotated, where `C` and the numbers of the cases are those of the *addresses of
-# this process*, and what the arithmetic gives for the tags of the binary is another thing. So the addresses are not numbers when it
-# is optimized: before that, each is a global that is declared (`static_type_<address>`), whose address LLVM can't know, and `embed_constants!`
-# makes them the objects.
+# The addresses of type objects that the code that Julia generates compares the tags of objects with (`isa`, `typeof`),
+# and passes on, as numbers, are those of this process, which are not those in the binary (where the types are objects
+# that are copied into it: see `embed_constants!`). They are replaced after the code is optimized. But LLVM does
+# arithmetic with such numbers while it optimizes: a chain of tests of a tag against types becomes a `switch` on `(tag +
+# C)` rotated, where `C` and the numbers of the cases are those of the *addresses of this process*, and what the
+# arithmetic gives for the tags of the binary is another thing. So the addresses are not numbers when it is optimized:
+# before that, each is a global that is declared (`static_type_<address>`), whose address LLVM can't know, and
+# `embed_constants!` makes them the objects.
 function placeholder_type_constants!(mod::LLVM.Module)
     i64 = LLVM.Int64Type()
     placeholder(addr::UInt) = type_placeholder(mod, addr)
@@ -105,8 +107,8 @@ function placeholder_type_constants!(mod::LLVM.Module)
         end
         changed = true
     end
-    # the types that are pointers, in the code and in the initializers of the globals that it loads them from (which LLVM folds into
-    # the code: a type is a `private constant` global that holds its address)
+    # the types that are pointers, in the code and in the initializers of the globals that it loads them from (which
+    # LLVM folds into the code: a type is a `private constant` global that holds its address)
     nodes = Dict{UInt,Vector{LLVM.Value}}()
     for (addr, ops) in Runtime.inttoptr_constants(mod)
         append!(get!(Vector{LLVM.Value}, nodes, addr), ops)

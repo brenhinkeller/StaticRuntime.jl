@@ -1,5 +1,6 @@
-# Linking the heap: the allocations of the program become calls of the allocator (and the collector), its roots are the objects that are copied into the binary, and the program has
-# the functions that run the finalizers (see `finalizers.jl`). The allocator itself is `heap.jl`.
+# Linking the heap: the allocations of the program become calls of the allocator (and the collector), its roots are the
+# objects that are copied into the binary, and the program has the functions that run the finalizers (see
+# `overrides/gc.jl`). The allocator itself is `heap.jl`.
 
 # Replace Julia's GC frame intrinsics (which have no runtime without a GC) by plain stack slots.
 function lower_gc_frames!(mod::LLVM.Module)
@@ -33,8 +34,10 @@ function lower_gc_frames!(mod::LLVM.Module)
             n = LLVM.operands(call)[1]
             LLVM.position!(builder, LLVM.before(call))
             frame = LLVM.array_alloca!(builder, ptrT, n, "gcframe")
-            # (aligned as Julia's frames are, 16: the optimizer has run, and the SLP vectorizer has made loads and stores of two slots at once that say so, `load <2 x ptr>, align 16`. An x86 processor faults
-            # on one of those at an address that is not a multiple of 16 (`vmovapd`), which the default alignment of an array of pointers, 8, allowed: a segfault on Linux, and not on an ARM processor, which does not check)
+            # (aligned as Julia's frames are, 16: the optimizer has run, and the SLP vectorizer has made loads and
+            # stores of two slots at once that say so, `load <2 x ptr>, align 16`. An x86 processor faults on one of
+            # those at an address that is not a multiple of 16 (`vmovapd`), which the default alignment of an array of
+            # pointers, 8, allowed: a segfault on Linux, and not on an ARM processor, which does not check)
             LLVM.alignment!(frame, 16)
             # zero it, as a GC frame would expect
             sz = LLVM.mul!(builder, LLVM.zext!(builder, n, LLVM.Int64Type()), LLVM.ConstantInt(Int64(sizeof(Ptr))))
@@ -49,10 +52,14 @@ function lower_gc_frames!(mod::LLVM.Module)
     return changed
 end
 
-# Julia marks the loads of the GC roots of a call (a function that returns an object that refers to others is given the slots for them, and the loads of them in the caller, and of those that it is given, are
-# `!invariant.load`) as if the memory did not change after it is read. That is so in Julia, where the slots are made and zeroed when the GC frames are lowered, after the optimizer has run. Here that was done above, so
-# the frame is zeroed, and a callee then stores the object: an optimizer that runs after this (the inliner and the passes that follow it, and any other) can take the zero that is stored first as what the load gives (the
-# slot's pointer is then null: `GVN` made `getelementptr null, 8` of the pointer to the characters of a `SubString`). The loads of globals (`jl_nothing`, ...) are what the metadata is true of.
+# Julia marks the loads of the GC roots of a call (a function that returns an object that refers to others is given the
+# slots for them, and the loads of them in the caller, and of those that it is given, are `!invariant.load`) as if the
+# memory did not change after it is read. That is so in Julia, where the slots are made and zeroed when the GC frames
+# are lowered, after the optimizer has run. Here that was done above, so the frame is zeroed, and a callee then stores
+# the object: an optimizer that runs after this (the inliner and the passes that follow it, and any other) can take the
+# zero that is stored first as what the load gives (the slot's pointer is then null: `GVN` made `getelementptr null, 8`
+# of the pointer to the characters of a `SubString`). The loads of globals (`jl_nothing`, ...) are what the metadata is
+# true of.
 function drop_invariant_root_loads!(mod::LLVM.Module)
     kind = LLVM.API.LLVMGetMDKindIDInContext(LLVM.context(mod), "invariant.load", 14)
     function underlying(v)
@@ -92,10 +99,10 @@ function inline_allocation!(mod::LLVM.Module, gc)
     return
 end
 
-# Whether the objects of the concrete type `T` have no references to other objects: the collector doesn't look inside the
-# objects that can't, and so a type that is one by mistake would have what it refers to freed. (A `Memory` of elements
-# stored inline that are plain data: it has a pointer, to its own data; objects with a Union of such, which are a few
-# bytes more, are not claimed to be.)
+# Whether the objects of the concrete type `T` have no references to other objects: the collector doesn't look inside
+# the objects that can't, and so a type that is one by mistake would have what it refers to freed. (A `Memory` of
+# elements stored inline that are plain data: it has a pointer, to its own data; objects with a Union of such, which are
+# a few bytes more, are not claimed to be.)
 function type_pointerfree(T)
     T isa DataType && isconcretetype(T) || return false
     if T <: Core.GenericMemory
@@ -105,16 +112,19 @@ function type_pointerfree(T)
     return Base.datatype_pointerfree(T)
 end
 
-# Whether the collector has no reason to look at an object of the type `T` as part of the data of the program: it can't refer to an object of the heap, as it is not changed to (strings, symbols and plain
-# data are not, and the objects that are types are never made when the program runs; a `const` array or struct of references can be, and is looked at). Also not looked at: what only refers to such objects.
+# Whether the collector has no reason to look at an object of the type `T` as part of the data of the program: it can't
+# refer to an object of the heap, as it is not changed to (strings, symbols and plain data are not, and the objects that
+# are types are never made when the program runs; a `const` array or struct of references can be, and is looked at).
+# Also not looked at: what only refers to such objects.
 function root_free(T)
     type_pointerfree(T) && return true
     return T === String || T === Symbol || T === DataType || T === Core.TypeName || T === Core.SimpleVector || T === Union || T === UnionAll || T === Core.TypeVar
 end
 
 # Allocations of objects that can't refer to others are made as such (the collector doesn't look inside them): a call
-# that is `julia.gc_alloc_bytes(ptls, size, type)` or `jl_alloc_genericmemory_unchecked(ptls, nbytes, type)` of a type that is a
-# constant. (Those of `julia.gc_alloc_obj` are made so by the pass that tags them, which sees the type: see `src/tags.jl`.)
+# that is `julia.gc_alloc_bytes(ptls, size, type)` or `jl_alloc_genericmemory_unchecked(ptls, nbytes, type)` of a type
+# that is a constant. (Those of `julia.gc_alloc_obj` are made so by the pass that tags them, which sees the type: see
+# `src/llvm/tags.jl`.)
 function classify_allocations!(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     ptrT = LLVM.PointerType()
@@ -164,8 +174,8 @@ end
 # the program calls, and its state, are internal to it, so that they can't clash with those of the program.
 const HEAP_IR = Dict{Tuple{Bool,Bool},String}()
 
-# The functions of the heap that run and register finalizers (`julia_` and then the name, and a number): a program that has no finalizers has them do nothing, so that they and what only they call
-# (several kilobytes) are not in it.
+# The functions of the heap that run and register finalizers (`julia_` and then the name, and a number): a program that
+# has no finalizers has them do nothing, so that they and what only they call (several kilobytes) are not in it.
 const FINALIZER_FUNCTIONS = ("julia_run_finalizers_", "julia_run_pending_finalizers_", "julia_add_finalizer_")
 
 function heap_ir(gc::Bool, finalizers::Bool = true)
@@ -203,14 +213,15 @@ function heap_ir(gc::Bool, finalizers::Bool = true)
     return HEAP_IR[key]
 end
 
-# What the collector looks at besides the stack: the data of the program that can refer to objects of the heap, which are
-# the objects that were copied into the binary (a `const` that is a container may be changed to refer to anything) and the
-# state of the runtime (the exceptions that are being handled); as { count, (address, bytes)... }
+# What the collector looks at besides the stack: the data of the program that can refer to objects of the heap, which
+# are the objects that were copied into the binary (a `const` that is a container may be changed to refer to anything)
+# and the state of the runtime (the exceptions that are being handled); as { count, (address, bytes)... }
 function define_gc_roots!(mod::LLVM.Module)
     dl = LLVM.datalayout(mod)
     words = LLVM.Constant[]
     for g in LLVM.globals(mod)
-        # (`LLVM.isconstant` is whether it is an LLVM constant, which every global is: whether the program can change it is this)
+        # (`LLVM.isconstant` is whether it is an LLVM constant, which every global is: whether the program can change it
+        # is this)
         (LLVM.isdeclaration(g) || LLVM.API.LLVMIsGlobalConstant(g) != 0) && continue
         haskey(LLVM.metadata(g), "static.pointerfree") && continue # (see `embed_new_global!`)
         name = LLVM.name(g)
@@ -247,7 +258,8 @@ function link_heap!(mod::LLVM.Module; gc = false, finalizers = true)
         run!(GlobalDCEPass(), mod) # (the roots refer to the objects, which would keep those that the code does not use)
         define_gc_roots!(mod)
         define_gc_stress!(mod, !(gc isa Bool) && gc isa Integer && gc > 0 ? gc : 0) # (`true` is an `Integer` too)
-        # (the heap refers to the function that runs finalizers: a program that has none gets one that does nothing, as a reference to a symbol that is not defined doesn't link)
+        # (the heap refers to the function that runs finalizers: a program that has none gets one that does nothing, as
+        # a reference to a symbol that is not defined doesn't link)
         if !haskey(LLVM.functions(mod), "static_run_finalizer")
             f = LLVM.Function(mod, "static_run_finalizer", LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int64Type(), LLVM.Int64Type()]))
             LLVM.@dispose builder = LLVM.IRBuilder() begin
@@ -265,20 +277,28 @@ end
 
 # Whether a program that has a collector would never use it: whether it never frees anything that it needs to.
 #
-# Always: when nothing that is thrown is caught (a `try` that only runs what is to be done after, and throws on, as `finally` does: the part of it that runs for an exception ends in
-# `unreachable`), and everything that the program allocates is allocated where it can only go on to throw (the message and the exception of an error: such a block ends in
-# `unreachable`, and the program stops; a loop that builds the message is fine, if it is in the part that only stops, and not where the function starts). What is allocated is then a few objects, and the allocator
-# that does not collect is enough. What makes the arguments of the command line is not counted (`ignored`, below).
+# Always: when nothing that is thrown is caught (a `try` that only runs what is to be done after, and throws on, as
+# `finally` does: the part of it that runs for an exception ends in `unreachable`), and everything that the program
+# allocates is allocated where it can only go on to throw (the message and the exception of an error: such a block ends
+# in `unreachable`, and the program stops; a loop that builds the message is fine, if it is in the part that only stops,
+# and not where the function starts). What is allocated is then a few objects, and the allocator that does not collect
+# is enough. What makes the arguments of the command line is not counted (`ignored`, below).
 #
-# With `bounded` (the program is one that runs once, as an executable does): when everything that it allocates is allocated a finite number of times. An allocation is not repeated if it is not
-# in a loop of its function, and the function is called, where it is, only from places that are not repeated either (not in a loop, in a function that is not repeated, and not in a function that calls
-# itself, directly or by others). A function that something refers to without calling it (a callback of a library) can be called any number of times. The memory that the program has
-# is then what it allocates in all, which is some number of objects, and not what it allocates for as long as it runs. (A catch that goes on is fine, if what it is in is not repeated.)
+# With `bounded` (the program is one that runs once, as an executable does): when everything that it allocates is
+# allocated a finite number of times. An allocation is not repeated if it is not in a loop of its function, and the
+# function is called, where it is, only from places that are not repeated either (not in a loop, in a function that is
+# not repeated, and not in a function that calls itself, directly or by others). A function that something refers to
+# without calling it (a callback of a library) can be called any number of times. The memory that the program has is
+# then what it allocates in all, which is some number of objects, and not what it allocates for as long as it runs. (A
+# catch that goes on is fine, if what it is in is not repeated.)
 function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     allocators = Set([INLINED_ALLOCATORS..., "static_alloc"])
-    # whether the program is about to stop where the block is: whether every way on from it ends in `unreachable` (an error that is thrown, or an abort), and none of it goes on to a `ret` or to anything that is not
-    # known. A loop on the way is fine if it is in the part of the program that only stops: what builds the message of an error (`show`, `escape_string`, `join`) is a loop, and runs once, for an
-    # error. It is not if that part is where the program starts: a loop that goes on until it throws, or exits, is the program, and what it allocates is allocated each time round.
+    # whether the program is about to stop where the block is: whether every way on from it ends in `unreachable` (an
+    # error that is thrown, or an abort), and none of it goes on to a `ret` or to anything that is not known. A loop on
+    # the way is fine if it is in the part of the program that only stops: what builds the message of an error (`show`,
+    # `escape_string`, `join`) is a loop, and runs once, for an error. It is not if that part is where the program
+    # starts: a loop that goes on until it throws, or exits, is the program, and what it allocates is allocated each
+    # time round.
     abort_only_cache = Dict{Ptr{Cvoid},Bool}() # (whether no way on from the block goes on, and one ends in `unreachable`: loops do not matter)
     function abort_only(bb::LLVM.BasicBlock)
         get!(abort_only_cache, Ptr{Cvoid}(bb.ref)) do
@@ -331,7 +351,8 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
             preds
         end
     end
-    # whether the way from the start of the function to the block is through blocks that only stop: whether the function begins with the part that it is about to stop in
+    # whether the way from the start of the function to the block is through blocks that only stop: whether the function
+    # begins with the part that it is about to stop in
     function starts_stopping(bb::LLVM.BasicBlock)
         fn = LLVM.parent(bb)
         entry = first(LLVM.blocks(fn))
@@ -351,7 +372,8 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
         return false
     end
     dies(bb::LLVM.BasicBlock) = abort_only(bb) && (!goes_round(bb) || !starts_stopping(bb))
-    # whether the block is in a loop of its function: whether it can be reached from itself (what is not known is taken to be)
+    # whether the block is in a loop of its function: whether it can be reached from itself (what is not known is taken
+    # to be)
     function in_loop(bb::LLVM.BasicBlock)
         seen = Set{Ptr{Cvoid}}()
         todo = LLVM.BasicBlock[]
@@ -374,8 +396,10 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
         end
         return false
     end
-    # Whether an exception that is thrown stops the program: whether what a `catch` runs for an exception ends in `unreachable`. (If it does not, a block that ends in `unreachable` can be followed by
-    # more of the program, and is no end.) A `try` is `sigsetjmp` and a branch on whether it is 0 (nothing was thrown): the other branch is what catches.
+    # Whether an exception that is thrown stops the program: whether what a `catch` runs for an exception ends in
+    # `unreachable`. (If it does not, a block that ends in `unreachable` can be followed by more of the program, and is
+    # no end.) A `try` is `sigsetjmp` and a branch on whether it is 0 (nothing was thrown): the other branch is what
+    # catches.
     stops_at_throw = true
     try_sites = Tuple{LLVM.Function,LLVM.BasicBlock}[]
     catches = Dict{Ptr{Cvoid},Vector{LLVM.BasicBlock}}() # (the blocks that catch, of each function: after a throw, control goes to one of them)
@@ -411,7 +435,8 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     calls = Dict{Ptr{Cvoid},Vector{Tuple{LLVM.Function,LLVM.BasicBlock}}}() # (where each is called from)
     called_only = Set{Ptr{Cvoid}}()  # (those that are only called: nothing refers to them otherwise)
     roots = Set{Ptr{Cvoid}}()        # (those that nothing refers to: the entry point)
-    # A call of a function of the runtime by `ccall` goes through a function of its own (`jlplt_name`), which refers to the function, and calls it by its address: it is a call of the function
+    # A call of a function of the runtime by `ccall` goes through a function of its own (`jlplt_name`), which refers to
+    # the function, and calls it by its address: it is a call of the function
     in_stub(inst) = LLVM.name(LLVM.parent(LLVM.parent(inst))) |> name -> startswith(name, "jlplt_")
     stub_got(user) = user isa LLVM.GlobalVariable && startswith(LLVM.name(user), "jlplt_") && endswith(LLVM.name(user), "_got") # (the table of the addresses of the stubs)
     stubs = Tuple{LLVM.Function,LLVM.Function}[] # (a stub, the function that it calls)
@@ -446,18 +471,21 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     for (stub, target) in stubs # (what calls the stub calls the function)
         haskey(calls, Ptr{Cvoid}(target.ref)) && haskey(calls, Ptr{Cvoid}(stub.ref)) && append!(calls[Ptr{Cvoid}(target.ref)], calls[Ptr{Cvoid}(stub.ref)])
     end
-    # What makes the arguments of the command line (`command_line_arguments`, `set_base_args`) allocates as much as there are arguments, which the system limits and the program does not
-    # decide: it is not counted, in any function that they call (that is only called from them, or where the program is about to stop) either
+    # What makes the arguments of the command line (`command_line_arguments`, `set_base_args`) allocates as much as
+    # there are arguments, which the system limits and the program does not decide: it is not counted, in any function
+    # that they call (that is only called from them, or where the program is about to stop) either
     ignored(fn) = startswith(LLVM.name(fn), "julia_command_line_arguments") || startswith(LLVM.name(fn), "julia_set_base_args")
     stops = Dict{Ptr{Cvoid},Bool}() # (the blocks that only lead to `unreachable`)
     dying_is_final = Ref(stops_at_throw) # (whether what is after a throw is no more of the program)
     block_dies(b) = dying_is_final[] && get!(() -> dies(b), stops, Ptr{Cvoid}(b.ref))
     loops = Dict{Ptr{Cvoid},Bool}()
-    # (the loop that makes the arguments of the command line is one that runs as many times as there are arguments, which is fixed when the program starts: see `command_line_arguments`)
+    # (the loop that makes the arguments of the command line is one that runs as many times as there are arguments,
+    # which is fixed when the program starts: see `command_line_arguments`)
     block_in_loop(b) = get!(loops, Ptr{Cvoid}(b.ref)) do
         startswith(LLVM.name(LLVM.parent(b)), "julia_command_line_arguments") ? false : in_loop(b)
     end
-    # The functions that run a finite number of times, from the entry point on (what is called from itself is not reached)
+    # The functions that run a finite number of times, from the entry point on (what is called from itself is not
+    # reached)
     function run_once()
         once = copy(roots)
         while true
@@ -476,14 +504,16 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     once = Set{Ptr{Cvoid}}()
     if bounded
         if !stops_at_throw
-            # A catch that goes on: what is thrown is not the end, but each throw is for a `try` that was run, so the throws are as many as the `try`s are run, which is finite if none is in a loop
-            # or in a function that is run again and again
+            # A catch that goes on: what is thrown is not the end, but each throw is for a `try` that was run, so the
+            # throws are as many as the `try`s are run, which is finite if none is in a loop or in a function that is
+            # run again and again
             once = run_once()
             dying_is_final[] = all(site -> Ptr{Cvoid}(site[1].ref) in once && !block_in_loop(site[2]), try_sites)
         end
         once = run_once()
     end
-    # The functions that are only called where the program is about to stop (the function that makes an exception, which its caller throws): what they allocate is allocated then too.
+    # The functions that are only called where the program is about to stop (the function that makes an exception, which
+    # its caller throws): what they allocate is allocated then too.
     doomed = copy(called_only)
     changed = true
     while changed
@@ -518,14 +548,16 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     return true
 end
 
-# Whether the code registers finalizers: a C function for an object (`BigInt` does), or `finalizer(f, x)`, which is marked for `link_finalizers!`
+# Whether the code registers finalizers: a C function for an object (`BigInt` does), or `finalizer(f, x)`, which is
+# marked for `link_finalizers!`
 function uses_finalizers(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     return any(name -> haskey(fns, name), ("ijl_gc_add_ptr_finalizer", "jl_gc_add_ptr_finalizer", "static_finalizer_marker"))
 end
 
-# The function that runs the finalizers of the program (see `finalizers.jl`): `static_run_finalizer(site, object)`, a `switch` on the number of the site that
-# calls the function of each. The functions are found by the marker that they have in them (`static_finalizer_marker(number)`), which is taken out.
+# The function that runs the finalizers of the program (see `overrides/gc.jl`): `static_run_finalizer(site, object)`, a
+# `switch` on the number of the site that calls the function of each. The functions are found by the marker that they
+# have in them (`static_finalizer_marker(number)`), which is taken out.
 function link_finalizers!(mod::LLVM.Module)
     fns = LLVM.functions(mod)
     haskey(fns, "static_finalizer_marker") || return false

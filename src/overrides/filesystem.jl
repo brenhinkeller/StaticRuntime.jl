@@ -1,9 +1,12 @@
-# The file system, with the functions of libc: `stat` and what is made of it (`isfile`, `isdir`, `ispath`, `filesize`, `mtime`), `mkdir`, `rm`, `readdir`, `rename` (so `mv`),
-# `cp`, `pwd`, `cd`, `homedir`, `tempdir`, `mktemp`, `mktempdir`, `tempname`, `realpath`, the process id, `errno`, and `ENV[name] = value`.
+# The file system, with the functions of libc: `stat` and what is made of it (`isfile`, `isdir`, `ispath`, `filesize`,
+# `mtime`), `mkdir`, `rm`, `readdir`, `rename` (so `mv`), `cp`, `pwd`, `cd`, `homedir`, `tempdir`, `mktemp`,
+# `mktempdir`, `tempname`, `realpath`, the process id, `errno`, and `ENV[name] = value`.
 #
-# Base does these with libuv (`uv_fs_*`), which needs the event loop. What is different: an error is a `SystemError` (with the message of `strerror`), where Base's is an
-# `IOError` that has the code of libuv; a program that catches `IOError` for a missing file catches `SystemError` here (and `isfile` and `ispath` don't throw for one that is missing, as in Base).
-# (`Mmap` is in `ext/StaticRuntimeMmapExt.jl`.) Not here: `symlink`, `chmod`, `touch`, and the others that Base has.
+# Base does these with libuv (`uv_fs_*`), which needs the event loop. What is different: an error is a `SystemError`
+# (with the message of `strerror`), where Base's is an `IOError` that has the code of libuv; a program that catches
+# `IOError` for a missing file catches `SystemError` here (and `isfile` and `ispath` don't throw for one that is
+# missing, as in Base). (`Mmap` is in `ext/StaticRuntimeMmapExt.jl`.) Not here: `symlink`, `chmod`, `touch`, and the
+# others that Base has.
 
 # `errno`, as libc has it (a function that gives where it is: its name is not the same on the systems)
 @static if Sys.isapple()
@@ -21,7 +24,8 @@ fs_error(what::AbstractString, path::AbstractString, code::Integer = unsafe_load
 
 ## stat
 
-# `struct stat` of the C library of each system: where the fields are (macOS has the layout with 64-bit inodes, and its `stat` of x86 is `stat$INODE64`)
+# `struct stat` of the C library of each system: where the fields are (macOS has the layout with 64-bit inodes, and its
+# `stat` of x86 is `stat$INODE64`)
 @static if Sys.isapple() && Sys.ARCH === :x86_64
     @eval stat_call(path, buf) = ccall($(QuoteNode(Symbol("stat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
     @eval lstat_call(path, buf) = ccall($(QuoteNode(Symbol("lstat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
@@ -56,7 +60,8 @@ function stat_struct(path::AbstractString, call)
     end
 end
 
-# (an error other than that the file is not there, or not a directory, or not allowed, is an error, as in Base's `checkstat`)
+# (an error other than that the file is not there, or not a directory, or not allowed, is an error, as in Base's
+# `checkstat`)
 function stat_checked(st)
     code = -Int(st.ioerrno)
     (code == 0 || code == 2 || code == 20 || code == 13 || code == 22 || code == 40) && return st # ENOENT, ENOTDIR, EACCES, EINVAL, ELOOP
