@@ -134,13 +134,7 @@ function stage_onchange!(graph::CP.ComputeGraph)
     return graph
 end
 
-"""
-    prepare!(graph::ComputeGraph)
-    prepare!(scene::Scene)
 
-Make a graph (the `compute` of a scene) that was made before the program is compiled ready for it: it is resolved, the typed edges have the names of their outputs (`name_outputs!`), what it does when its outputs change has the types of the
-observables of the graph (`stage_onchange!`). Call it once, after the observables that the program uses are asked for (`get_observable!`). (The listeners of the observables are found when the program is compiled.)
-"""
 # Makie keeps the value of some nodes in a `RefValue{Any}` (the `shading` of a scene is `Automatic`, or a `ShadingAlgorithm`, and the reference is of the type `Any` so that either can be stored), and what is read from a reference of
 # that type is a value of any type: the slot is one that all of the references of the type `Any` of the program share, and the callbacks that get the value are compiled for all the types that anything stores in one. The
 # nodes that are known to have a few types of value get a reference of the union of them: it is made again with the value that it has, before the graph is resolved (the typed edges keep the references that the nodes
@@ -178,6 +172,13 @@ function declare_node_types!(graph::CP.ComputeGraph)
     return graph
 end
 
+"""
+    prepare!(graph::ComputeGraph)
+    prepare!(scene::Scene)
+
+Make a graph (the `compute` of a scene) that was made before the program is compiled ready for it: it is resolved, the typed edges have the names of their outputs (`name_outputs!`), what it does when its outputs change has the types of the
+observables of the graph (`stage_onchange!`). Call it once, after the observables that the program uses are asked for (`get_observable!`). (The listeners of the observables are found when the program is compiled.)
+"""
 function StaticRuntime.prepare!(graph::CP.ComputeGraph)
     declare_node_types!(graph)
     for node in values(graph.outputs)

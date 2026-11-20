@@ -150,6 +150,21 @@ made from its parts, which is not the number that Julia gives (a table that is m
 What is not found is a type that is made by the program from values that are not types (`Vector{eltype(x)}` of a value `x` of a type that is not known is the call of `eltype` on the type of `x`, which is the same as above),
 and a type that reaches the program as a `Type` argument of a function that the compiler does not see the callers of (an entry point, a `@cfunction`).
 
+### Objects that the program has as constants
+
+An object that the program has as a constant (`const GRAPH = ...`, made before compiling) is known as that object where the code has it as a constant, and so is what is read of it where the program does not change that:
+
+- a field of it that the program never writes (of any object of its type) is what it holds when compiling;
+- a lookup in a `Dict` or a `Vector` that is a constant, with a key that is a constant (`d[:k]`, `get(d, :k, x)`, `haskey(d, :k)`, `v[2]`), is what the container holds, where the program never changes a container of its type (a
+  `Vector` only of elements that are not bits). The lookup is made by the program; its result is known.
+
+What the program writes is found in its code: the fields that it sets, the elements of memory that it sets, and the objects whose address it takes (`pointer_from_objref`, `pointer(v)`, a `Ref` given to C), whose fields
+or elements a write through a pointer may change.
+
+A function of a package that is called with such an object (`resolve!(node)`) is code of its own for that object (as if it had been written for it), and so is what it calls with the objects that it reads from it: a
+recursion over a graph of objects (a node that is resolved from the nodes that it comes from) is known at every level, where Julia would know the first one only. It is not done for functions of Julia, nor for an
+argument of a type that is not concrete, a type, or a function with more than eight other arguments.
+
 ### Functions that are not known: closures in collections and in boxes
 
 A call `f(x)` of an `f` whose type is not known when compiling (a `Function` from a `Vector{Function}`, a `Dict` of functions, a field of the

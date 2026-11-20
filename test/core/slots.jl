@@ -177,3 +177,50 @@ ot_stored() = (ot_store(opaque(2)); v = OT_KEEP[]; println(v === nothing ? "noth
 @testset "Objects that a method stores in without being given them" begin
     check_cases(["a store in a method that is called with a number" => ot_stored])
 end
+
+# A lookup in a container that is a constant, with a key that is a constant, is what the container has when the program never changes a container of its type (`container_frozen` in objects.jl): the cell that is read is then
+# known, and what its field holds (which the program does not write) too. A program that changes such a container has the lookups made as they are (a program of its own: a change is of all of the containers of the type).
+mutable struct FzCell; v::Any; end
+fz_value(x::Int) = x
+fz_value(x::Float64) = round(Int, 10x)
+fz_value(x::String) = ncodeunits(x)
+const FZ_TABLE = Dict(:a => FzCell(1), :b => FzCell(2.5), :c => FzCell("str"))
+const FZ_LIST = [FzCell(4), FzCell(5.5)]
+const FZ_CHANGED = Dict(:a => FzCell(1), :b => FzCell(2.5))
+@testset "Containers that the program does not change" begin
+    check_cases([
+        "a lookup in a Dict"     => () -> fz_value(FZ_TABLE[:b].v) + fz_value(FZ_TABLE[:c].v),
+        "get with a default"     => () -> (c = get(FZ_TABLE, :a, nothing); c === nothing ? -1 : fz_value(c.v)),
+        "haskey"                 => () -> Int(haskey(FZ_TABLE, :a)) + 10 * Int(haskey(FZ_TABLE, :zz)),
+        "an element of a Vector" => () -> fz_value(FZ_LIST[2].v) + fz_value(FZ_LIST[1].v),
+        "a key that is not known" => () -> fz_value(FZ_TABLE[(:a, :b, :c)[opaque(2)]].v),
+    ]; folded_ok = ("a lookup in a Dict", "get with a default", "haskey", "an element of a Vector"))
+    check_cases(["a Dict that the program changes" => () -> (FZ_CHANGED[:z] = FzCell(opaque(3)); fz_value(FZ_CHANGED[:b].v) + 100 * length(FZ_CHANGED))])
+end
+
+# A recursion over objects that are constants (a graph as Makie's: a node's value is made by its edge from the values of the edge's inputs, and resolving a node resolves what it comes from). Julia propagates a constant into the first
+# call and not into the second of a method that is being inferred with another; each call made for an object is code of its own for it (`object_call`, see "Any function, for each object" in objects.jl), so what each node gives
+# is known, two levels down and more.
+mutable struct ObNode
+    parent::Any # (an `ObEdge`, or `nothing` for an input)
+    value::Any
+    dirty::Bool
+end
+struct ObEdge{F,I<:Tuple}
+    f::F
+    inputs::I
+end
+ob_resolve!(n::ObNode) = (n.dirty && n.parent !== nothing && (n.value = ob_compute(n.parent)); n.dirty = false; n.value)
+ob_compute(e::ObEdge) = e.f(map(ob_resolve!, e.inputs)...)
+const OB_A = ObNode(nothing, 3, false)
+const OB_B = ObNode(ObEdge(x -> x * 2.5, (OB_A,)), nothing, true)
+const OB_C = ObNode(ObEdge((x, y) -> string(x, ":", y), (OB_A, OB_B)), nothing, true)
+const OB_D = ObNode(ObEdge((s, x) -> ncodeunits(s) + round(Int, x), (OB_C, OB_B)), nothing, true)
+const OB_GRAPH = Dict(:a => OB_A, :b => OB_B, :c => OB_C, :d => OB_D)
+@testset "Recursion over objects that are constants" begin
+    check_cases([
+        "one level"    => () -> round(Int, 10 * ob_resolve!(OB_GRAPH[:b])::Float64),
+        "two levels"   => () -> ncodeunits(ob_resolve!(OB_GRAPH[:c])::String),
+        "three levels" => () -> ob_resolve!(OB_GRAPH[:d])::Int,
+    ]; folded_ok = ("one level", "two levels", "three levels"))
+end

@@ -360,8 +360,29 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
         end
         return
     end
+    if call.head === :foreigncall
+        # (a function of C that is given a `Memory` (or a reference into one) may write its elements: `copyto!` of elements that are not bits is `jl_genericmemory_copyto`, see `container_frozen` in objects.jl. The address
+        # of an object, `jl_value_ptr` (`pointer_from_objref`, and a `Ref` that is given to C), is what a store through a pointer can write it with: all of its fields)
+        for a in call.args[6:end]
+            note_memory_written!(c, optype(a))
+        end
+        fname = call.args[1] isa QuoteNode ? call.args[1].value : call.args[1]
+        fname isa Tuple && !isempty(fname) && (fname = fname[1])
+        fname isa QuoteNode && (fname = fname.value)
+        if fname === :jl_value_ptr && length(call.args) >= 6
+            S = CC.widenconst(optype(call.args[6]))
+            S isa DataType && isconcretetype(S) && ismutabletype(S) && (S <: Core.GenericMemory ? note_memory_written!(c, S) : isstructtype(S) && note_written!(c, S, nothing))
+        end
+        return
+    end
     if call.head === :call && length(call.args) >= 3
         f = called(call.args[1])
+        if f in (Core.memoryrefset!, Core.memoryrefswap!, Core.memoryrefsetonce!, Core.memoryrefreplace!, Core.memoryrefmodify!)
+            note_memory_written!(c, optype(call.args[2])) # (see objects.jl)
+        elseif f === Core.getfield && const_field_name(call.args[3]) in (:ptr_or_offset, :ptr)
+            # (the address of the elements of a `Memory`, which a store through a pointer can write them with: `pointer(v)`, the memory of a `ccall`)
+            note_memory_written!(c, optype(call.args[2]))
+        end
         if f === Core.memoryrefset!
             key = elem_slot_key(optype(call.args[2]))
             key === nothing || store!(key, call.args[3])
@@ -395,8 +416,9 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
+            # (what it writes is an object whose address was taken, which says so where it is taken: `jl_value_ptr` and the address of a `Memory`, above. A write of bytes over a field that holds an object would not be seen
+            # by the collector, which a program can not do.)
             P = CC.widenconst(optype(call.args[2]))
-            P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && note_written!(c, P.parameters[1], nothing) # (a struct that is written through a pointer: any field of it)
             if P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && needs_slot_type(P.parameters[1])
                 note_slot_store!(c, (:elem, P.parameters[1], nothing), Any)
                 note_raw_store!(c, P.parameters[1])

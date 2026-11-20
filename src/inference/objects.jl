@@ -36,6 +36,17 @@ function note_written!(c::Compilation, @nospecialize(S), name)
     return
 end
 
+# The elements of a `Memory` are written (by `memoryrefset!` and the others, of a reference into it, or by a function of C that is given it): a fact of its type, `(M, :elements)`, as the fields of a struct are.
+function note_memory_written!(c::Compilation, @nospecialize(t))
+    T = CC.widenconst(t)
+    T isa DataType || return
+    if T <: Core.GenericMemoryRef && length(T.parameters) == 3
+        T = Core.GenericMemory{T.parameters...}
+    end
+    T isa DataType && T <: Core.GenericMemory && isconcretetype(T) && note_written!(c, T, :elements)
+    return
+end
+
 # At the end of a pass: what it found is what the next one uses. Whether that is different from what this pass used (another pass is then made, as for the types of the slots)
 function update_objects!(c::Compilation)
     o = c.objects
@@ -97,6 +108,77 @@ function fold_field_read(c::Compilation, argtypes::Vector{Any})
     c.objects.folds += 1
     c.settings.why && println(stderr, "   folded ", argtypes[2] isa Core.Const ? "constant " : "only object of ", S, ".", fieldname(S, i), " => ", first(repr(v), 120))
     return Core.Const(v)
+end
+
+## Containers that the program does not change
+#
+# A lookup in a container that is a constant, with a key that is a constant (`graph.outputs[:positions]`, a `Dict` of the nodes of a graph), is what the container has when compiling where the program never changes a
+# container of its type: the value, as a constant, which what the code does with it is then inferred for (the reads of its fields, the calls on it). The lookup itself is made by the program (it gives the same object).
+# What changes a container: for a `Dict`, a write of a field of its type (every change of the keys or the values writes `age` or `count`, or more), or of the elements of the memory of its values (`map!` over its values
+# writes them, and no field); for a `Vector`, a write of its `ref` or `size`, or of the elements of its memory (only of elements that are not bits: those are copied by `memmove` with pointers that are not typed, which the
+# facts do not see). A write through a pointer to any memory is a write of all (`written_any`). The facts are those of the pass before, as for the fields of objects (`fold_field_read`).
+function container_frozen(o::ObjectState, @nospecialize(x))
+    if x isa Dict
+        D = typeof(x)
+        for n in fieldnames(D)
+            field_written(o, D, n) && return false
+        end
+        return !field_written(o, typeof(getfield(x, :vals)), :elements)
+    elseif x isa Vector
+        isbitstype(eltype(x)) && return false
+        V = typeof(x)
+        (field_written(o, V, :ref) || field_written(o, V, :size)) && return false
+        return !field_written(o, typeof(getfield(x, :ref).mem), :elements)
+    end
+    return false
+end
+
+# What `f(container, key)` gives (`getindex`, `get` with a default, `haskey`), where the container is a constant that the program does not change and the key is a constant: as a constant, or `nothing`
+function fold_container_read(c::Compilation, @nospecialize(f), argtypes::Vector{Any})
+    c.settings.objects || return nothing
+    n = length(argtypes)
+    (n == 3 || (n == 4 && f === Base.get)) || return nothing
+    d, k = argtypes[2], argtypes[3]
+    (d isa Core.Const && k isa Core.Const && (d.val isa Dict || (d.val isa Vector && f === Base.getindex))) || return nothing
+    x, key = d.val, k.val
+    o = c.objects
+    if !o.ready
+        o.wanted = true # (another pass, with the facts of this one)
+        o.consulted = true
+        return nothing
+    end
+    o.consulted = true # (what is read depends on what the code writes: see `objects_hash`)
+    container_frozen(o, x) || return nothing
+    if x isa Dict
+        f === Base.haskey && return Core.Const(haskey(x, key))
+        if f === Base.get
+            haskey(x, key) || return nothing # (the default, which is what the call gives)
+        else
+            haskey(x, key) || return nothing # (a `KeyError`, which the call throws)
+        end
+        v = x[key]
+        ET = valtype(x)
+    else
+        (key isa Int && checkbounds(Bool, x, key) && isassigned(x, key)) || return nothing
+        v = x[key]
+        ET = eltype(x)
+    end
+    # (only what is worth knowing as a constant: an object, which is what the reads of its fields are known of, or a value of a container of an abstract type)
+    (tracked_object_type(typeof(v)) || !isconcretetype(ET)) || return nothing
+    o.folds += 1
+    c.settings.why && println(stderr, "   folded ", typeof(x), "[", repr(key), "] => ", first(repr(v), 120))
+    return Core.Const(v)
+end
+
+for F in (typeof(Base.getindex), typeof(Base.get), typeof(Base.haskey))
+    @eval function CC.abstract_call_known(interp::OverridesInterpreter, f::$F, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+        call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                              vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
+        (sv isa CC.InferenceState || CC.isready(call)) || return call
+        folded = fold_container_read(compilation(), f, arginfo.argtypes)
+        return folded === nothing ? call : after_call(result_of_type, call, interp, sv, folded)
+    end
 end
 
 ## Stores in objects
@@ -630,6 +712,185 @@ end
 function keyed_replacement(c::Compilation, @nospecialize(called), call::Expr, @nospecialize(info), @nospecialize(t))
     (called === object_for || called === known_object_keys) || return nothing
     return t isa CC.Const ? QuoteNode(t.val) : nothing
+end
+
+## Any function, for each object
+##
+## What a package does with the objects that the program has as constants is often a recursion over them (`resolve!(node)` resolves what the node comes from, which resolves what that comes from): Julia propagates the
+## constant into the first call, and not into the second, as the method is already being inferred with another constant (`is_constprop_edge_recursed`), and what it propagates is only used where the call is inlined. A call
+## `f(x, args...)` with an object `x` that is a constant is made `object_call(f, key, Val(T), Val(C), args...)` (see "Calls that are replaced" in dispatch.jl): a method of its own for each object (the key is a type of its own
+## for each), whose code is that of the method of `f` for the types (`ObjectCallGenerator`), with `x` read from the key (`object_for(key)`, the object as a constant). The other arguments that are constants that a type can
+## have as a parameter (a name, a number: `getproperty(x, :field)`) are in `C`, `(position, value)` for each, and are constants in the code too; the others are given as they are. Recursion over the objects is then an ordinary
+## one, of methods, as finite as the objects. The code that is made depends on the types only (and the world), not on the compilation: the object is the constant that `object_for` gives in it.
+const OBJECT_CALL_MAX_ARGS = 8
+
+struct ObjectCallGenerator <: Core.CachedGenerator end
+
+for n in 0:OBJECT_CALL_MAX_ARGS
+    args = [Symbol(:a, k) for k in 1:n]
+    @eval function object_call(f, key::ObjectKey, t::Val, c::Val, $(args...))
+        $(Expr(:meta, :generated, ObjectCallGenerator()))
+        $(Expr(:meta, :generated_only))
+    end
+end
+
+# (a constant that is put in the code as a parameter of the type of an argument: a name, or a value of bits that is not a type)
+bakeable(@nospecialize(v)) = v isa Symbol || (isbits(v) && !(v isa Type))
+
+# (the method of `f` for an object of the type `T` and the arguments, if its code can be the code of `object_call`: one method, that is not a generated one and takes no varargs. It is looked for as the compiler does: in the
+# overrides of this package (`method_table`, which the extensions add to), and then in Julia's)
+function object_call_method(@nospecialize(F), @nospecialize(T), args, world::UInt)
+    sig = Tuple{F,T,args...}
+    found = try CC.findsup(sig, CC.OverlayMethodTable(world, method_table)) catch; nothing end
+    found === nothing && return nothing
+    match = found[1]
+    match isa Core.MethodMatch || return nothing
+    m = match.method
+    (m.isva || isdefined(m, :generator) || m.nargs != length(args) + 2 || !isdefined(m, :source)) && return nothing
+    return match
+end
+
+function (::ObjectCallGenerator)(world::UInt, source, @nospecialize(self), @nospecialize(F), @nospecialize(K), @nospecialize(V), @nospecialize(CV), @nospecialize(given...))
+    T = V.parameters[1]
+    consts = CV.parameters[1]::Tuple
+    norig = length(given) + length(consts) # (the arguments of the method after the object)
+    # (the type of each argument of the method after the object, and where each is: a constant, or the one of `object_call` that it is given as)
+    types = Vector{Any}(undef, norig)
+    baked = Dict{Int,Any}(p => v for (p, v) in consts)
+    runtime = Int[]
+    for p in 1:norig
+        if haskey(baked, p)
+            types[p] = Core.Typeof(baked[p])
+        else
+            push!(runtime, p)
+            types[p] = given[length(runtime)]
+        end
+    end
+    match = object_call_method(F, T, types, world)
+    match === nothing && return object_call_fallback(source, consts, length(given))
+    orig = Base.uncompressed_ir(match.method)
+    no = 2 + norig                     # (the arguments of the method: itself, the object, the others)
+    nn = 5 + length(given)             # (those of `object_call`: itself, `f`, the key, the type, the constants, the others that are given)
+    bakedpos = sort!(collect(keys(baked)))
+    nlocal = 1 + length(bakedpos)      # (the variables that the first statements set: the object, and the constants)
+    function slotmap(i::Int)
+        i == 1 && return 2
+        i == 2 && return nn + 1
+        if i <= no
+            p = i - 2
+            k = findfirst(==(p), bakedpos)
+            k === nothing || return nn + 1 + k
+            return 5 + findfirst(==(p), runtime)
+        end
+        return i - no + nn + nlocal
+    end
+    shift = nlocal
+    sparams = match.sparams
+    function remap(@nospecialize(x))
+        if x isa Core.SlotNumber
+            return Core.SlotNumber(slotmap(x.id))
+        elseif x isa Core.SSAValue
+            return Core.SSAValue(x.id + shift)
+        elseif x isa Core.GotoNode
+            return Core.GotoNode(x.label + shift)
+        elseif x isa Core.GotoIfNot
+            return Core.GotoIfNot(remap(x.cond), x.dest + shift)
+        elseif x isa Core.ReturnNode
+            return isdefined(x, :val) ? Core.ReturnNode(remap(x.val)) : x
+        elseif x isa Core.EnterNode
+            dest = x.catch_dest == 0 ? 0 : x.catch_dest + shift
+            return isdefined(x, :scope) ? Core.EnterNode(dest, remap(x.scope)) : Core.EnterNode(dest)
+        elseif x isa Core.NewvarNode
+            return Core.NewvarNode(remap(x.slot))
+        elseif x isa Expr
+            if x.head === :static_parameter
+                v = sparams[x.args[1]]
+                return v isa Symbol || v isa Expr || v isa QuoteNode ? QuoteNode(v) : v
+            end
+            return Expr(x.head, Any[remap(a) for a in x.args]...)
+        end
+        return x
+    end
+    code = Any[Expr(:(=), Core.SlotNumber(nn + 1), Expr(:call, GlobalRef(@__MODULE__, :object_for), Core.SlotNumber(3)))]
+    for (k, p) in enumerate(bakedpos)
+        v = baked[p]
+        push!(code, Expr(:(=), Core.SlotNumber(nn + 1 + k), v isa Symbol ? QuoteNode(v) : v))
+    end
+    for st in orig.code
+        push!(code, remap(st))
+    end
+    ci = ccall(:jl_new_code_info_uninit, Ref{Core.CodeInfo}, ())
+    ci.code = code
+    nstmts = length(code)
+    # (the lines of the statements: those of the method's, after the ones that are put first)
+    stream = CC.DebugInfoStream(nothing, orig.debuginfo, length(orig.code))
+    stream.def = orig.debuginfo.def
+    stream.codelocs = vcat(zeros(Int32, 3 * shift), stream.codelocs)
+    ci.debuginfo = Core.DebugInfo(stream, nstmts)
+    ci.ssavaluetypes = nstmts
+    ci.ssaflags = vcat(zeros(UInt32, shift), orig.ssaflags)
+    names, flags = orig.slotnames, orig.slotflags
+    ci.slotnames = Symbol[Symbol("#self#"), :f, :key, :t, :c, (names[p + 2] for p in runtime)..., names[2], (names[p + 2] for p in bakedpos)..., names[no+1:end]...]
+    ci.slotflags = UInt8[0x00, 0x00, 0x00, 0x00, 0x00, (flags[p + 2] for p in runtime)..., flags[2] | CC.SLOT_ASSIGNEDONCE, (flags[p + 2] | CC.SLOT_ASSIGNEDONCE for p in bakedpos)..., flags[no+1:end]...]
+    ci.nargs = nn
+    ci.isva = false
+    ci.propagate_inbounds = orig.propagate_inbounds
+    ci.has_fcall = orig.has_fcall
+    ci.nospecializeinfer = orig.nospecializeinfer
+    ci.inlining = orig.inlining
+    ci.constprop = orig.constprop
+    ci.purity = orig.purity
+    ci.edges = Core.svec(CC.specialize_method(match))
+    ci.min_world = world
+    ci.max_world = world
+    return ci
+end
+
+# (a method whose code can not be taken: the call of `f` with the object, and the constants, as constants)
+function object_call_fallback(source, consts::Tuple, ngiven::Int)
+    given = [Symbol(:a, k) for k in 1:ngiven]
+    baked = Dict{Int,Any}(p => v for (p, v) in consts)
+    args, g = Any[], 0
+    for p in 1:(ngiven + length(consts))
+        haskey(baked, p) ? push!(args, baked[p] isa Symbol ? QuoteNode(baked[p]) : baked[p]) : push!(args, given[g += 1])
+    end
+    body = Expr(:call, :f, Expr(:call, GlobalRef(@__MODULE__, :object_for), :key), args...)
+    loc = LineNumberNode(Int(source.line), source.file)
+    lam = Expr(:lambda, [Symbol("#self#"), :f, :key, :t, :c, given...], Expr(:var"scope-block", Expr(:block, loc, Expr(:return, body))))
+    return Base.generated_body_to_codeinfo(Expr(:toplevel_pure, lam), @__MODULE__, false, loc)
+end
+
+# The arguments of `redirect` for a call `f(x, args...)` that is made for the object `x`, or `nothing`: `x` a constant that is an object (a struct that is not bits), `f` a function that is a constant, with one method for
+# the types, of a package (not Julia's, nor this one's: their methods on objects are the accessors that the objects are read with, which are known as they are). `(f, prefix, positions)`: the arguments that are given
+# (those that are not constants of `C`).
+function object_call_plan(c::Compilation, interp, @nospecialize(f), argtypes::Vector{Any})
+    (keys_on(c) && c.settings.objects) || return nothing
+    n = length(argtypes) - 2
+    0 <= n || return nothing
+    x = argtypes[2]
+    (x isa Core.Const && tracked_object_type(typeof(x.val))) || return nothing
+    # (not a type, nor another object of Julia's own (a binding, a `TypeVar`): what is called with those is chosen by the value, `::Type{T}`, and they are not what a package keeps its state in)
+    (x.val isa Type || parentmodule(typeof(x.val)) === Core) && return nothing
+    f isa Core.Builtin && return nothing
+    F = typeof(f)
+    Base.issingletontype(F) || return nothing
+    any(a -> a isa Core.TypeofVararg, argtypes) && return nothing
+    consts, positions, types = Tuple{Int,Any}[], Int[], Any[]
+    for (p, t) in enumerate(argtypes[3:end])
+        if t isa Core.Const && bakeable(t.val)
+            push!(consts, (p, t.val)); push!(types, Core.Typeof(t.val))
+        else
+            push!(positions, p + 2); push!(types, CC.widenconst(t))
+        end
+    end
+    length(positions) <= OBJECT_CALL_MAX_ARGS || return nothing
+    # (the arguments that are given are of types that are concrete: a method for an argument of an abstract type is called by the runtime's convention, `jl_invoke`)
+    all(i -> isconcretetype(types[i - 2]), positions) || return nothing
+    match = object_call_method(F, typeof(x.val), types, CC.get_inference_world(interp))
+    match === nothing && return nothing
+    mod = Base.moduleroot(match.method.module)
+    (mod === Base || mod === Core || mod === CC || mod === @__MODULE__) && return nothing
+    return (object_call, Any[f, object_key!(c, x.val), Val(typeof(x.val)), Val(Tuple(consts))], positions)
 end
 
 # (whether the signature of a call has a key in it: one of a method that is compiled for an object, see above, whose recursion is not limited)
