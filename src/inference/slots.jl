@@ -152,10 +152,15 @@ type_value_slot(@nospecialize(T)) = T isa Type && T !== Union{} && T <: Type && 
 stored_value_type(@nospecialize(x)) = x isa Type ? Type{x} : typeof(x)
 
 # whether a type is one that a slot can be said to hold: concrete, or a union of them
-closed_type(@nospecialize(T)) = all(closed_member, Base.uniontypes(T))
+# (A tuple of tuples of tuples ... is not closed beyond `TUPLE_DEPTH_LIMIT`: a store of a tuple of what a slot holds in the slot itself (`out.val = (a.val, b.val)` of objects of one type) makes a type of one more level at each pass,
+# without end, and the slot is given up. The key of what is inferred did not see it (`hash` of a `Union` is the same for all), so the passes that made the same key as the one before stopped, as if it had settled.)
+const TUPLE_DEPTH_LIMIT = 4
+closed_type(@nospecialize(T), depth::Int = 0) = all(t -> closed_member(t, depth), Base.uniontypes(T))
 # (a concrete type, a type that is one type as a value, or a tuple of such: `Tuple{Type{Int},Float64}`)
-closed_member(@nospecialize(t)) = isconcretetype(t) || exact_type_value(t) ||
-    (t isa DataType && t <: Tuple && !isempty(t.parameters) && all(p -> p isa Type && closed_type(p), t.parameters))
+closed_member(@nospecialize(t), depth::Int = 0) = (exact_type_value(t) || (isconcretetype(t) && tuple_depth(t) <= TUPLE_DEPTH_LIMIT - depth)) ||
+    (depth < TUPLE_DEPTH_LIMIT && t isa DataType && t <: Tuple && !isempty(t.parameters) && all(p -> p isa Type && closed_type(p, depth + 1), t.parameters))
+# (how many tuples are inside each other in the concrete type `t`)
+tuple_depth(@nospecialize(t)) = t isa DataType && t <: Tuple ? 1 + maximum((p isa DataType ? tuple_depth(p) : 0 for p in t.parameters); init = 0) : 0
 
 # The type of what is stored where the type of the value is `T`: a value of a type that is `Type{...}`, or `Type`, is a type object, which is a `DataType`, a `UnionAll` or a `Union` (a type that is not concrete otherwise)
 function stored_type(@nospecialize(T))
@@ -225,7 +230,7 @@ function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param:
         return
     end
     isempty(settings.blind) || (T = Union{(t for t in Base.uniontypes(T) if !(string(t) in settings.blind))...}; T === Union{} && return)
-    cur = get!(s.seen, key, Union{})
+    haskey(s.seen, key) || (s.seen[key] = Union{})
     if !closed_type(T)
         push!(s.seen_unknown, key)
         if settings.why
@@ -234,11 +239,36 @@ function note_slot_store!(c::Compilation, key::SlotKey, @nospecialize(T); param:
         end
         return
     end
-    new = Union{cur, T}
-    Base.unionlen(new) > settings.slot_limit ? push!(s.seen_unknown, key) : (s.seen[key] = new)
+    # (the members are kept, and the union is made of them once, when the stores of the pass are all known (`make_seen_unions!`): a union is made by comparing its members, and making it again for each store, of the many that
+    # are replayed, was most of the time of the analysis of a large program)
+    members = get!(Vector{Any}, s.seen_members, key)
     for t in Base.uniontypes(T)
+        any(m -> m === t, members) || push!(members, t)
         note_stored_type!(c, key, t)
     end
+    length(members) > 4 * settings.slot_limit && make_seen_union!(s, key, settings.slot_limit) # (not many more than a slot can have)
+    return
+end
+
+# The union of what was stored in the slot `key` in this pass (see `note_slot_store!`), or that it is not known, if it is of more types than a slot can have
+function make_seen_union!(s::SlotState, key, limit::Int)
+    members = get(s.seen_members, key, nothing)
+    members === nothing && return
+    new = Union{s.seen[key], members...}
+    if Base.unionlen(new) > limit
+        push!(s.seen_unknown, key)
+    else
+        s.seen[key] = new
+    end
+    empty!(members)
+    return
+end
+function make_seen_unions!(c::Compilation)
+    s = c.slots
+    for key in keys(s.seen_members)
+        make_seen_union!(s, key, c.settings.slot_limit)
+    end
+    empty!(s.seen_members)
     return
 end
 
@@ -361,17 +391,10 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
         return
     end
     if call.head === :foreigncall
-        # (a function of C that is given a `Memory` (or a reference into one) may write its elements: `copyto!` of elements that are not bits is `jl_genericmemory_copyto`, see `container_frozen` in objects.jl. The address
-        # of an object, `jl_value_ptr` (`pointer_from_objref`, and a `Ref` that is given to C), is what a store through a pointer can write it with: all of its fields)
+        # (a function of C that is given a `Memory` (or a reference into one) may write its elements: `copyto!` of elements that are not bits is `jl_genericmemory_copyto`, see `container_frozen` in objects.jl. A function
+        # of C that is given the address of an object may write its fields of bits, which are not what is known of the objects: see "What is not seen" in objects.jl)
         for a in call.args[6:end]
             note_memory_written!(c, optype(a))
-        end
-        fname = call.args[1] isa QuoteNode ? call.args[1].value : call.args[1]
-        fname isa Tuple && !isempty(fname) && (fname = fname[1])
-        fname isa QuoteNode && (fname = fname.value)
-        if fname === :jl_value_ptr && length(call.args) >= 6
-            S = CC.widenconst(optype(call.args[6]))
-            S isa DataType && isconcretetype(S) && ismutabletype(S) && (S <: Core.GenericMemory ? note_memory_written!(c, S) : isstructtype(S) && note_written!(c, S, nothing))
         end
         return
     end
@@ -416,8 +439,7 @@ function learn_statement!(c::Compilation, call::Expr, called, optype; precise::B
             end
         elseif f isa Core.IntrinsicFunction && nameof(f) in (:pointerset, :atomic_pointerset, :atomic_pointerswap, :atomic_pointermodify, :atomic_pointerreplace)
             # (a store through a pointer to values of an abstract type: into any memory that holds them, and any field of that type)
-            # (what it writes is an object whose address was taken, which says so where it is taken: `jl_value_ptr` and the address of a `Memory`, above. A write of bytes over a field that holds an object would not be seen
-            # by the collector, which a program can not do.)
+            # (not a write of the fields of objects, nor of the elements of a `Memory` that hold objects: a reference is not written through a pointer, see "What is not seen" in objects.jl)
             P = CC.widenconst(optype(call.args[2]))
             if P isa DataType && P <: Ptr && length(P.parameters) == 1 && P.parameters[1] isa Type && needs_slot_type(P.parameters[1])
                 note_slot_store!(c, (:elem, P.parameters[1], nothing), Any)
@@ -511,7 +533,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
     result = s.current_result
     c.objects.pending_facts = nothing; c.objects.pending_mi = nothing
     if result isa CC.InferenceResult && result.overridden_by_const === nothing
-        CC.stack_analysis_result!(result, SlotFactsResult(c.key, facts, mi in c.dispatch.used_in))
+        CC.stack_analysis_result!(result, SlotFactsResult(cache_key(c), facts, mi in c.dispatch.used_in))
         c.objects.pending_facts = facts; c.objects.pending_mi = mi # (the facts of the objects are added to these after the code is inlined, see objects.jl)
     end
     return
@@ -609,7 +631,7 @@ end
 function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
     s = c.slots
     r = slot_facts_of(ci)
-    (r === nothing || r.key != c.key) && return
+    (r === nothing || r.key != cache_key(c)) && return
     for (key, T) in r.facts
         k = key[1]
         if k === :raw
@@ -807,6 +829,7 @@ function analyze_slots!(c::Compilation, interp, root)
     resolve_object_stores!(c, root.def)
     c.settings.why && (s.store_context = "what the callers give to an argument that a method stores (see `resolve_argument_stores!`)")
     resolve_argument_stores!(c)
+    make_seen_unions!(c) # (the stores are all known: see `note_slot_store!`)
     if s.scan_truncated
         # If a constant is too large, the program is compiled as if there were no slots
         @debug "A constant exceeded the scan budget; slots disabled" _id = :static_slots_truncated
@@ -832,7 +855,8 @@ function analyze_slots!(c::Compilation, interp, root)
         add_stored_types!(c)
         new = Any[t for t in s.universe_seen if !(t in s.universe)]
         # (the ones that are kept when there are too many are the first by name: which they are does not depend on the order that they were found in)
-        length(s.universe) + length(new) > UNIVERSE_LIMIT && (new = sort!(new; by = string)[1:max(0, UNIVERSE_LIMIT - length(s.universe))])
+        # (each written once: `sort!` with `by = string` writes each type at each comparison, which was a large part of the analysis of a program that has more)
+        length(s.universe) + length(new) > UNIVERSE_LIMIT && (new = new[sortperm(map(string, new))][1:max(0, UNIVERSE_LIMIT - length(s.universe))])
         if !isempty(new)
             union!(s.universe, new)
             empty!(s.universe_extras)
@@ -895,10 +919,18 @@ function report_why(c::Compilation)
 end
 
 function GPUCompiler.drive_inference!(interp::OverridesInterpreter, mi::Core.MethodInstance)
+    t0 = time()
     root = @invoke GPUCompiler.drive_inference!(interp::CC.AbstractInterpreter, mi::Core.MethodInstance)
     if root isa Core.CodeInstance
-        replay_findings!(compilation(), interp, root) # (what inference found of the methods that were taken from the cache: see `InferenceFindings`)
-        analyze_slots!(compilation(), interp, root)
+        c = compilation()
+        t1 = time()
+        replay_findings!(c, interp, root) # (what inference found of the methods that were taken from the cache: see `InferenceFindings`)
+        t2 = time()
+        try
+            analyze_slots!(c, interp, root)
+        finally
+            trace_on() && trace("inference of ", mi.def isa Method ? mi.def.name : mi, ": ", round(t1 - t0; digits = 1), " s; findings replayed: ", round(t2 - t1; digits = 1), " s; slots analyzed: ", round(time() - t2; digits = 1), " s")
+        end
     end
     return root
 end
@@ -920,7 +952,7 @@ function update_slot_types!(c::Compilation)
             delete!(s.types, k)
             push!(s.open, k)
             changed = true
-        elseif T === Union{} || T === used
+        elseif T === Union{} || T == used # (equal, if not the same object: a union that is made again is not always the one that Julia has, and it is no change)
             continue
         elseif T <: used
             @debug "slot narrowed" key = k from = used to = T _id = :static_slot_changes
@@ -956,6 +988,9 @@ function refined_read(@nospecialize(T), @nospecialize(rt))
 end
 
 # the type that a read of a slot is given, or `nothing`
+# (the same, asked by inference in the frame `sv`: what it infers depends on the answer, see `depends!`)
+read_slot!(c::Compilation, @nospecialize(sv), key) = (depends!(c, sv, (:slot, key)); slot_read_type(c, key))
+
 function slot_read_type(c::Compilation, key)
     assumed = get(c.registered.fields, key, nothing) # (a type that is stated: see assume.jl)
     assumed === nothing || return assumed

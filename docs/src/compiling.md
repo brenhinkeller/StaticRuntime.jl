@@ -155,15 +155,17 @@ and a type that reaches the program as a `Type` argument of a function that the 
 An object that the program has as a constant (`const GRAPH = ...`, made before compiling) is known as that object where the code has it as a constant, and so is what is read of it where the program does not change that:
 
 - a field of it that the program never writes (of any object of its type) is what it holds when compiling;
-- a lookup in a `Dict` or a `Vector` that is a constant, with a key that is a constant (`d[:k]`, `get(d, :k, x)`, `haskey(d, :k)`, `v[2]`), is what the container holds, where the program never changes a container of its type (a
+- a lookup in a `Dict` or a `Vector` that is a constant, with a key that is a constant (`d[:k]`, `get(d, :k, x)`, `v[2]`), is what the container holds, where the program never changes a container of its type (a
   `Vector` only of elements that are not bits). The lookup is made by the program; its result is known.
 
-What the program writes is found in its code: the fields that it sets, the elements of memory that it sets, and the objects whose address it takes (`pointer_from_objref`, `pointer(v)`, a `Ref` given to C), whose fields
-or elements a write through a pointer may change.
+What the program writes is found in its code: the fields that it sets, and the elements of memory that it sets or whose address it takes (`pointer(v)`). What is known is only what the fields and the elements that hold
+references hold, and a reference is taken not to be written through a pointer (`unsafe_store!` of an address of an object into a field of another, which Julia's collector does not see either): a function of C that fills
+in a struct writes its fields of bits, which are not what is known.
 
 A function of a package that is called with such an object (`resolve!(node)`) is code of its own for that object (as if it had been written for it), and so is what it calls with the objects that it reads from it: a
 recursion over a graph of objects (a node that is resolved from the nodes that it comes from) is known at every level, where Julia would know the first one only. It is not done for functions of Julia, nor for an
-argument of a type that is not concrete, a type, or a function with more than eight other arguments.
+object with no field of an abstract type and none that holds another object (there is nothing more to know of it), nor for an argument of a type that is not concrete, a type, or a function with more than eight other
+arguments.
 
 ### Functions that are not known: closures in collections and in boxes
 

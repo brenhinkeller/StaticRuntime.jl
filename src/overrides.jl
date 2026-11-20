@@ -26,7 +26,7 @@ struct OverridesParams <: GPUCompiler.AbstractCompilerParams
     split_limit::Int
     id::Int          # the cache of the compilation (`Compilation.id`): its own, so that what another compilation inferred is not found
 end
-OverridesParams(c) = OverridesParams(c.key, c.settings.split_limit, c.id) # (the compilation `c`: see compilation.jl)
+OverridesParams(c) = OverridesParams(cache_key(c), c.settings.split_limit, c.id) # (the compilation `c`: see compilation.jl and reuse.jl)
 OverridesParams() = OverridesParams(Compilation())                 # (of a compilation that has just begun)
 
 Base.Experimental.@MethodTable(method_table)
@@ -110,17 +110,22 @@ end
 # (`rooted`: the one that has the targets of the `@cfunction`s), without making its code: if the types of the slots are others then, the pass is made again with them (`SlotsChanged`, which is thrown from there), and if
 # they are what they were, the check is made again, and says what it found.
 function early_entry_check(c, args, rooted; method_table, params, target)
+    started = time()
     try
         check_entry(args[1], args[2]; method_table, params, target)
+        trace_on() && trace("check of the entry point: ", round(time() - started; digits = 1), " s")
         return
     catch e
         # (in any pass that the slots are still analyzed in: what one pass finds of them can make what is read from others be known in the next, `model.moi_backend` of JuMP, a `CachingOptimizer` that is made
         # of what is read from the one that was there)
         (e isa InferenceError && c.slots.mode === :on && c.slots.passes < SLOT_PASS_LIMIT) || rethrow()
     end
+    trace_on() && trace("check of the entry point (not settled): ", round(time() - started; digits = 1), " s")
     job, _ = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
     Base.invokelatest(precompile, job)
+    started = time()
     check_entry(args[1], args[2]; method_table, params, target)
+    trace_on() && trace("check of the entry point, again: ", round(time() - started; digits = 1), " s")
     return
 end
 

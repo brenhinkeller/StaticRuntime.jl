@@ -51,8 +51,11 @@ end
 function update_objects!(c::Compilation)
     o = c.objects
     o.written_any && push!(o.written, (nothing, :*))
-    changed = !o.ready ? o.wanted : (o.written != o.use_written ||
-                                     o.stores != o.use_stores || o.unattributed != o.use_unattributed || o.unknown != o.use_unknown)
+    # (another pass only where an answer to what inference asked is different with what this pass found: a fact that nothing asked about changes nothing that is inferred)
+    o.once_wanted |= o.wanted
+    changed = !o.ready ? o.wanted :
+              (any(((S, name),) -> written_in(o.written, S, name) != written_in(o.use_written, S, name), o.asked_written) ||
+               any(((r, name),) -> field_answer(o.stores, o.unattributed, o.unknown, r, name) != field_answer(o.use_stores, o.use_unattributed, o.use_unknown, r, name), o.asked_fields))
     trace_on() && trace("objects: ", o.folds, " reads known; ", length(o.written), " fields written; stores in ", length(o.stores), " fields of objects", changed ? " (changed)" : "")
     if c.settings.why # (`STATIC_RUNTIME_SLOTS_WHY`: what is stored in the objects)
         describe(k) = k[1] isa ObjRef ? string(typeof(k[1].x), " @", string(objectid(k[1].x); base = 16)[1:6], ".", k[2]) : string(k[1], ".", k[2])
@@ -76,20 +79,29 @@ function known_object(c::Compilation, @nospecialize(a))
     return nothing
 end
 
-field_written(o::ObjectState, @nospecialize(S), name::Symbol) =
-    (S, name) in o.use_written || (S, :*) in o.use_written || (nothing, name) in o.use_written || (nothing, :*) in o.use_written
+# (whether a field is written, by the facts `written`)
+written_in(written, @nospecialize(S), name::Symbol) = (S, name) in written || (S, :*) in written || (nothing, name) in written || (nothing, :*) in written
 
-# What is read of a field of an object that is known, if it is known: the value of the field, as a constant (`nothing` where it is not known)
-function fold_field_read(c::Compilation, argtypes::Vector{Any})
+# (the same, by the facts that this pass uses, asked by inference in the frame `sv`: the answer is part of what it infers with, see `objects_hash` and `depends!`)
+function field_written(c::Compilation, @nospecialize(sv), @nospecialize(S), name::Symbol)
+    o = c.objects
+    push!(o.asked_written, (S, name))
+    depends!(c, sv, (:written, S, name))
+    return written_in(o.use_written, S, name)
+end
+
+# (what is stored in a field of an object, by the facts: `nothing` where something of a type that is not known is, or the union of what is stored in it and in the objects of its type that are not known)
+function field_answer(stores, unattributed, unknown, r::ObjRef, name::Symbol)
+    S = typeof(r.x)
+    ((r, name) in unknown || (S, name) in unknown) && return nothing
+    return Union{get(stores, (r, name), Union{}), get(unattributed, (S, name), Union{})}
+end
+
+# What is read of a field of an object that is known, if it is known: the value of the field, as a constant (`nothing` where it is not known). `sv` is the frame of inference that reads it (`nothing`: not inference)
+function fold_field_read(c::Compilation, argtypes::Vector{Any}, @nospecialize(sv) = nothing)
     length(argtypes) == 3 || return nothing
     t = argtypes[3]
     (t isa Core.Const && (t.val isa Symbol || t.val isa Integer)) || return nothing
-    o = c.objects
-    if !o.ready
-        # (another pass is made for the facts only where a read could be known and would tell inference something: a field of an abstract type of a mutable object that is a constant)
-        c.settings.objects && worth_knowing(argtypes[2], t.val) && (o.wanted = true; o.consulted = true)
-        return nothing
-    end
     r = known_object(c, argtypes[2])
     r === nothing && return nothing
     x = r.x
@@ -101,11 +113,15 @@ function fold_field_read(c::Compilation, argtypes::Vector{Any})
     v = getfield(x, i)
     # (only what is worth knowing as a constant: an object, which is what the reads of its fields are known of, or what a field of an abstract type holds)
     (tracked_object_type(typeof(v)) || !isconcretetype(fieldtype(S, i))) || return nothing
-    if ismutabletype(S)
-        o.consulted = true # (what is read depends on what the code writes: see `objects_hash`)
-        field_written(o, S, fieldname(S, i)) && return nothing
+    o = c.objects
+    depends!(c, sv, (:objready,)) # (what is read is known once the facts are there: see reuse.jl)
+    if !o.ready
+        # (another pass is made for the facts only where a read could be known and would tell inference something: a field of an abstract type of a mutable object that is a constant)
+        worth_knowing(argtypes[2], t.val) && (o.wanted = true)
+        return nothing
     end
-    c.objects.folds += 1
+    ismutabletype(S) && field_written(c, sv, S, fieldname(S, i)) && return nothing # (what is read depends on what the code writes: see `objects_hash`)
+    o.folds += 1
     c.settings.why && println(stderr, "   folded ", argtypes[2] isa Core.Const ? "constant " : "only object of ", S, ".", fieldname(S, i), " => ", first(repr(v), 120))
     return Core.Const(v)
 end
@@ -116,46 +132,39 @@ end
 # container of its type: the value, as a constant, which what the code does with it is then inferred for (the reads of its fields, the calls on it). The lookup itself is made by the program (it gives the same object).
 # What changes a container: for a `Dict`, a write of a field of its type (every change of the keys or the values writes `age` or `count`, or more), or of the elements of the memory of its values (`map!` over its values
 # writes them, and no field); for a `Vector`, a write of its `ref` or `size`, or of the elements of its memory (only of elements that are not bits: those are copied by `memmove` with pointers that are not typed, which the
-# facts do not see). A write through a pointer to any memory is a write of all (`written_any`). The facts are those of the pass before, as for the fields of objects (`fold_field_read`).
-function container_frozen(o::ObjectState, @nospecialize(x))
+# facts do not see). The facts are those of the pass before, as for the fields of objects (`fold_field_read`).
+#
+# What is not seen: a write through a pointer (`unsafe_store!`, a function of C that is given an address). What is known of an object is what its fields that hold references hold (an object, or a value of a field of an
+# abstract type), and of a container the references in it; a reference is not written through a pointer (that is not seen by the collector: Julia has no write barrier there, and the types of the slots assume the same).
+# The address of the elements of a `Memory` is a write of them all the same (`note_memory_written!` of `getfield(m, :ptr)`), as Julia's own copies of references are made through it.
+function container_frozen(c::Compilation, @nospecialize(sv), @nospecialize(x))
     if x isa Dict
         D = typeof(x)
         for n in fieldnames(D)
-            field_written(o, D, n) && return false
+            field_written(c, sv, D, n) && return false
         end
-        return !field_written(o, typeof(getfield(x, :vals)), :elements)
+        return !field_written(c, sv, typeof(getfield(x, :vals)), :elements)
     elseif x isa Vector
         isbitstype(eltype(x)) && return false
         V = typeof(x)
-        (field_written(o, V, :ref) || field_written(o, V, :size)) && return false
-        return !field_written(o, typeof(getfield(x, :ref).mem), :elements)
+        (field_written(c, sv, V, :ref) || field_written(c, sv, V, :size)) && return false
+        return !field_written(c, sv, typeof(getfield(x, :ref).mem), :elements)
     end
     return false
 end
 
-# What `f(container, key)` gives (`getindex`, `get` with a default, `haskey`), where the container is a constant that the program does not change and the key is a constant: as a constant, or `nothing`
-function fold_container_read(c::Compilation, @nospecialize(f), argtypes::Vector{Any})
+# What `f(container, key)` gives (`getindex`, `get` with a default), where the container is a constant that the program does not change and the key is a constant: as a constant, or `nothing`
+function fold_container_read(c::Compilation, @nospecialize(f), argtypes::Vector{Any}, @nospecialize(sv))
     c.settings.objects || return nothing
     n = length(argtypes)
     (n == 3 || (n == 4 && f === Base.get)) || return nothing
     d, k = argtypes[2], argtypes[3]
     (d isa Core.Const && k isa Core.Const && (d.val isa Dict || (d.val isa Vector && f === Base.getindex))) || return nothing
     x, key = d.val, k.val
-    o = c.objects
-    if !o.ready
-        o.wanted = true # (another pass, with the facts of this one)
-        o.consulted = true
-        return nothing
-    end
-    o.consulted = true # (what is read depends on what the code writes: see `objects_hash`)
-    container_frozen(o, x) || return nothing
+    # (what the lookup gives now, and whether it is worth knowing as a constant: an object, which is what the reads of its fields are known of, or a value of a container of an abstract type.
+    # A key that is not there gives the default, or a `KeyError`, which the call gives itself)
     if x isa Dict
-        f === Base.haskey && return Core.Const(haskey(x, key))
-        if f === Base.get
-            haskey(x, key) || return nothing # (the default, which is what the call gives)
-        else
-            haskey(x, key) || return nothing # (a `KeyError`, which the call throws)
-        end
+        haskey(x, key) || return nothing
         v = x[key]
         ET = valtype(x)
     else
@@ -163,20 +172,26 @@ function fold_container_read(c::Compilation, @nospecialize(f), argtypes::Vector{
         v = x[key]
         ET = eltype(x)
     end
-    # (only what is worth knowing as a constant: an object, which is what the reads of its fields are known of, or a value of a container of an abstract type)
     (tracked_object_type(typeof(v)) || !isconcretetype(ET)) || return nothing
+    o = c.objects
+    depends!(c, sv, (:objready,)) # (see reuse.jl)
+    if !o.ready
+        o.wanted = true # (another pass, with the facts of this one)
+        return nothing
+    end
+    container_frozen(c, sv, x) || return nothing
     o.folds += 1
     c.settings.why && println(stderr, "   folded ", typeof(x), "[", repr(key), "] => ", first(repr(v), 120))
     return Core.Const(v)
 end
 
-for F in (typeof(Base.getindex), typeof(Base.get), typeof(Base.haskey))
+for F in (typeof(Base.getindex), typeof(Base.get))
     @eval function CC.abstract_call_known(interp::OverridesInterpreter, f::$F, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
         call = @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                               vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
         (sv isa CC.InferenceState || CC.isready(call)) || return call
-        folded = fold_container_read(compilation(), f, arginfo.argtypes)
+        folded = fold_container_read(compilation(), f, arginfo.argtypes, sv)
         return folded === nothing ? call : after_call(result_of_type, call, interp, sv, folded)
     end
 end
@@ -373,7 +388,7 @@ function follow_fields(c::Compilation, @nospecialize(x), path)
     for name in path
         T = typeof(x)
         (isstructtype(T) && Base.fieldindex(T, name, false) != 0 && isdefined(x, name)) || return nothing
-        ismutabletype(T) && field_written(c.objects, T, name) && return nothing
+        ismutabletype(T) && written_in(c.objects.use_written, T, name) && return nothing # (not asked by inference: see `field_written`)
         x = getfield(x, name)
     end
     return x
@@ -412,9 +427,8 @@ function receiver_path(ir::CC.IRCode, @nospecialize(x))
 end
 
 # What is read of a field of an object that is known and that the code writes: what it has when compiling, and what is stored in it (in it, and in an object of its type that is not known), or `nothing` where that is not known
-function object_field_type(c::Compilation, argtypes::Vector{Any})
+function object_field_type(c::Compilation, argtypes::Vector{Any}, @nospecialize(sv) = nothing)
     o = c.objects
-    o.ready || return nothing
     length(argtypes) == 3 || return nothing
     t = argtypes[3]
     (t isa Core.Const && t.val isa Symbol) || return nothing
@@ -424,10 +438,14 @@ function object_field_type(c::Compilation, argtypes::Vector{Any})
     S = typeof(x)
     name = t.val
     object_slot(S, name) || return nothing
-    o.consulted = true
-    ((r, name) in o.use_unknown || (S, name) in o.use_unknown) && return nothing
+    depends!(c, sv, (:objready,)) # (see reuse.jl)
+    o.ready || return nothing
+    push!(o.asked_fields, (r, name)) # (see `objects_hash`)
+    depends!(c, sv, (:objfield, r, name))
+    stored = field_answer(o.use_stores, o.use_unattributed, o.use_unknown, r, name)
+    stored === nothing && return nothing
     T = isdefined(x, name) ? stored_value_type(getfield(x, name)) : Union{}
-    T = Union{T, get(o.use_stores, (r, name), Union{}), get(o.use_unattributed, (S, name), Union{})}
+    T = Union{T, stored}
     T === Union{} && return nothing
     (closed_type(T) && Base.unionlen(T) <= c.settings.slot_limit) || return nothing
     return T
@@ -475,10 +493,12 @@ end
 function CC.maybe_get_const_prop_profitable(interp::OverridesInterpreter, result::CC.MethodCallResult, @nospecialize(f), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                             match::Core.MethodMatch, sv::CC.AbsIntState)
     c = CURRENT_COMPILATION[]
-    if c !== nothing && c.settings.objects && c.objects.ready && c.slots.mode === :on && !result.edgecycle &&
-       any(a -> a isa Core.Const && leads_to_object_slots(c, a.val), arginfo.argtypes)
-        mi = CC.specialize_method(match; preexisting = false)
-        mi isa Core.MethodInstance && return mi
+    if c !== nothing && c.settings.objects && !result.edgecycle && any(a -> a isa Core.Const && leads_to_object_slots(c, a.val), arginfo.argtypes)
+        depends!(c, sv, (:objready,)); depends!(c, sv, (:mode,)) # (see reuse.jl)
+        if c.objects.ready && c.slots.mode === :on
+            mi = CC.specialize_method(match; preexisting = false)
+            mi isa Core.MethodInstance && return mi
+        end
     end
     return @invoke CC.maybe_get_const_prop_profitable(interp::CC.AbstractInterpreter, result::CC.MethodCallResult, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                                       match::Core.MethodMatch, sv::CC.AbsIntState)
@@ -656,6 +676,7 @@ end
 function keyed_call(interp::OverridesInterpreter, @nospecialize(f), arginfo::CC.ArgInfo, si::CC.StmtInfo, vtypes, sv::CC.AbsIntState)
     argtypes = arginfo.argtypes
     (length(argtypes) >= 2 && argtypes[2] isa Core.Const) || return nothing
+    arginfo.fargs === nothing && return nothing # (as for `object_call_plan`: only a call that is a statement is replaced)
     c = CURRENT_COMPILATION[]
     (c !== nothing && keys_on(c)) || return nothing
     x = argtypes[2].val
@@ -699,6 +720,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(known_ob
     argtypes = arginfo.argtypes
     c = CURRENT_COMPILATION[]
     if c !== nothing && keys_on(c) && length(argtypes) == 3 && argtypes[3] isa Core.Const && (g = CC.singleton_type(argtypes[2])) !== nothing
+        depends!(c, sv, (:closures,)) # (what `g` gives is of the compilation: the listeners that are compared with, see closures.jl and reuse.jl)
         t = try Base.invokelatest(g, argtypes[3].val) catch; nothing end
         # (a value of bits that has a size has no key: it is not an object of the program that code refers to, but a value, which the code would have as one of this process. Then there are none, and the code does without)
         t isa Tuple && !any(keyless, t) && return const_call(map(x -> object_key!(c, x), t))
@@ -734,11 +756,12 @@ for n in 0:OBJECT_CALL_MAX_ARGS
     end
 end
 
-# (a constant that is put in the code as a parameter of the type of an argument: a name, or a value of bits that is not a type)
-bakeable(@nospecialize(v)) = v isa Symbol || (isbits(v) && !(v isa Type))
+# (a constant that is put in the code as a parameter of the type of an argument: a name only. A name is one that the code has, of which there are as many as the code says; a number is not (`walk(x.next, depth + 1)`
+# is a number of its own at each level, and so a method of its own at each level, without end where the objects are a cycle): it is given as an argument, which Julia propagates as a constant, within its limits)
+bakeable(@nospecialize(v)) = v isa Symbol
 
-# (the method of `f` for an object of the type `T` and the arguments, if its code can be the code of `object_call`: one method, that is not a generated one and takes no varargs. It is looked for as the compiler does: in the
-# overrides of this package (`method_table`, which the extensions add to), and then in Julia's)
+# (the method of `f` for an object of the type `T` and the arguments, if its code can be the code of `object_call`: one method, that is not a generated one and takes no varargs, whose code does not depend on its static
+# parameters in ways that the code of another method can not have (`transplantable`). It is looked for as the compiler does: in the overrides of this package (`method_table`, which the extensions add to), and then in Julia's)
 function object_call_method(@nospecialize(F), @nospecialize(T), args, world::UInt)
     sig = Tuple{F,T,args...}
     found = try CC.findsup(sig, CC.OverlayMethodTable(world, method_table)) catch; nothing end
@@ -747,8 +770,31 @@ function object_call_method(@nospecialize(F), @nospecialize(T), args, world::UIn
     match isa Core.MethodMatch || return nothing
     m = match.method
     (m.isva || isdefined(m, :generator) || m.nargs != length(args) + 2 || !isdefined(m, :source)) && return nothing
+    transplantable(m, match.sparams) || return nothing
     return match
 end
+
+# (the same, once for each signature in a compilation: inference visits a call many times, in each pass)
+function object_call_method(c::Compilation, @nospecialize(F), @nospecialize(T), args, world::UInt)
+    key = (Tuple{F,T,args...}, world)
+    cache = c.objects.call_methods
+    haskey(cache, key) && return cache[key]
+    return cache[key] = object_call_method(F, T, args, world)
+end
+
+# Whether the code of `m`, with the values `sparams` of its static parameters, can be the code of a method that has no static parameters (`object_call`): each is a value (one that is not is a parameter that
+# the arguments do not determine, `f(x, y::Union{S,Nothing}) where S` given `nothing`, which the code throws on, and does not have as a value), and the code does not refer to them where they are not values that it computes
+# with, but are part of what a statement is: the types of a call of C (`ccall(..., (Ptr{T},), v)`, which the compiler finds the parameters of in the method that it is compiling), a `@cfunction`, `@isdefined T`.
+function transplantable(m::Method, sparams::Core.SimpleVector)
+    isempty(sparams) && return true
+    any(p -> p isa TypeVar || p isa Core.SimpleVector, sparams) && return false # (a parameter that is not determined: a `TypeVar`, or as Julia 1.14 has it in a match, `svec(S, false)`)
+    for st in Base.uncompressed_ir(m).code
+        refers_to_parameters(st) && return false
+    end
+    return true
+end
+refers_to_parameters(@nospecialize(x)) =
+    x isa Expr && (x.head === :foreigncall || x.head === :cfunction || x.head === :isdefined || x.head === :new_opaque_closure || x.head === :method || any(refers_to_parameters, x.args))
 
 function (::ObjectCallGenerator)(world::UInt, source, @nospecialize(self), @nospecialize(F), @nospecialize(K), @nospecialize(V), @nospecialize(CV), @nospecialize(given...))
     T = V.parameters[1]
@@ -841,6 +887,9 @@ function (::ObjectCallGenerator)(world::UInt, source, @nospecialize(self), @nosp
     ci.constprop = orig.constprop
     ci.purity = orig.purity
     ci.edges = Core.svec(CC.specialize_method(match))
+    # (what the limits of recursion take it to be: the method of `f`, as for the code of any generated function. All of these are methods of `object_call`, and calls of different functions for the same object, `viewport(scene)` and
+    # `getproperty(scene, :viewport)` in it, would otherwise be one method that calls itself, which Julia limits)
+    ci.method_for_inference_limit_heuristics = match.method
     ci.min_world = world
     ci.max_world = world
     return ci
@@ -860,17 +909,39 @@ function object_call_fallback(source, consts::Tuple, ngiven::Int)
     return Base.generated_body_to_codeinfo(Expr(:toplevel_pure, lam), @__MODULE__, false, loc)
 end
 
+# (whether code of its own for an object of the type `T` can know more than code for any of them, with the object as a constant, which is what Julia makes: only where it holds something that is known of an object, see
+# `fold_field_read`: a field of an abstract type, or one that holds an object (which leads to more). Code for a struct of bits and arrays would be the same for each object, made again for each)
+function keyable_type(c::Compilation, @nospecialize(T))
+    cache = c.objects.keyable
+    k = get(cache, T, nothing)
+    k === nothing || return k::Bool
+    found = false
+    for i in 1:fieldcount(T) # (a loop: see `meets_any`)
+        FT = fieldtype(T, i)
+        if !isconcretetype(FT) || tracked_object_type(FT)
+            found = true
+            break
+        end
+    end
+    cache[T] = found
+    return found
+end
+
 # The arguments of `redirect` for a call `f(x, args...)` that is made for the object `x`, or `nothing`: `x` a constant that is an object (a struct that is not bits), `f` a function that is a constant, with one method for
 # the types, of a package (not Julia's, nor this one's: their methods on objects are the accessors that the objects are read with, which are known as they are). `(f, prefix, positions)`: the arguments that are given
 # (those that are not constants of `C`).
-function object_call_plan(c::Compilation, interp, @nospecialize(f), argtypes::Vector{Any})
+function object_call_plan(c::Compilation, interp, @nospecialize(f), arginfo::CC.ArgInfo)
     (keys_on(c) && c.settings.objects) || return nothing
+    # (only a call that is a statement, whose arguments are those of the statement, which is what is replaced: not one that a splat makes (`f(x, t...)`, inferred from `Core._apply_iterate`), nor one that a replacement makes)
+    arginfo.fargs === nothing && return nothing
+    argtypes = arginfo.argtypes
     n = length(argtypes) - 2
     0 <= n || return nothing
     x = argtypes[2]
     (x isa Core.Const && tracked_object_type(typeof(x.val))) || return nothing
     # (not a type, nor another object of Julia's own (a binding, a `TypeVar`): what is called with those is chosen by the value, `::Type{T}`, and they are not what a package keeps its state in)
     (x.val isa Type || parentmodule(typeof(x.val)) === Core) && return nothing
+    keyable_type(c, typeof(x.val)) || return nothing
     f isa Core.Builtin && return nothing
     F = typeof(f)
     Base.issingletontype(F) || return nothing
@@ -886,7 +957,7 @@ function object_call_plan(c::Compilation, interp, @nospecialize(f), argtypes::Ve
     length(positions) <= OBJECT_CALL_MAX_ARGS || return nothing
     # (the arguments that are given are of types that are concrete: a method for an argument of an abstract type is called by the runtime's convention, `jl_invoke`)
     all(i -> isconcretetype(types[i - 2]), positions) || return nothing
-    match = object_call_method(F, typeof(x.val), types, CC.get_inference_world(interp))
+    match = object_call_method(c, F, typeof(x.val), types, CC.get_inference_world(interp))
     match === nothing && return nothing
     mod = Base.moduleroot(match.method.module)
     (mod === Base || mod === Core || mod === CC || mod === @__MODULE__) && return nothing
@@ -896,3 +967,20 @@ end
 # (whether the signature of a call has a key in it: one of a method that is compiled for an object, see above, whose recursion is not limited)
 is_key_type(@nospecialize(p)) = p isa DataType && p <: ObjectKey
 has_object_key(@nospecialize(sig)) = sig isa DataType && any(p -> is_key_type(p) || (p isa DataType && p <: Tuple && !(p <: Tuple{}) && any(is_key_type, p.parameters)), sig.parameters)
+
+# The keys of a signature, in order (those of its arguments, and of the elements of a tuple that is one). A recursion of a method from a frame for other objects to these is not limited: what it can reach is as finite as the
+# objects, as long as it is limited where it comes back to the same objects with other arguments (a number that changes, a tuple that grows at each level, over a cycle of objects), which Julia does as it does for any recursion.
+# (The other arguments may change from one object to the next: the update of an observable sets another, of another type of value.)
+function object_keys(@nospecialize(sig), out::Vector{Any} = Any[])
+    sig isa DataType || return out
+    # (for `object_call`, the names that are constants too (`Val{C}`): there are as many as the code has, and `setproperty!(graph, :a, x)` that sets `graph.b` is not a recursion that grows)
+    length(sig.parameters) >= 5 && sig.parameters[1] === typeof(object_call) && push!(out, sig.parameters[5])
+    for p in sig.parameters
+        if is_key_type(p)
+            push!(out, p)
+        elseif p isa DataType && p <: Tuple && !(p <: Tuple{})
+            object_keys(p, out)
+        end
+    end
+    return out
+end

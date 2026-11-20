@@ -50,6 +50,7 @@ include("inference/objects.jl")     # the objects that the program has as consta
 include("inference/assume.jl")      # types that are stated: `@assume f(::A)::R`, `@assume_field S.x::T`
 include("inference/cfunctions.jl")  # @cfunction: C functions that call functions of the program
 include("inference/diagnostics.jl") # Why an entry point does not infer to a concrete type
+include("inference/reuse.jl")       # what a pass of a compilation takes from what the passes before inferred
 
 # Testing programs: differential testing against Julia, and what the code of a program needs
 include("testing.jl")    # Differential testing: compiled executable vs. ordinary Julia

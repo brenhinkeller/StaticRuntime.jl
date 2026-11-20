@@ -228,8 +228,9 @@ function box_slots(bx::BoxState, src::Core.CodeInfo, mi::Core.MethodInstance)
 end
 
 # The type of what is read from a box, `getfield(box, :contents)`, where it is known: `x` is the box as the statement has it (a slot of the method that made it, or a field of the closure that took it)
-function box_content_type(bx::BoxState, sv, @nospecialize(x))
-    isempty(bx.types) && return nothing
+# (the key is asked about whether or not there are types of boxes yet: what is read depends on it, see `depends!`)
+function box_content_type(c::Compilation, sv, @nospecialize(x))
+    bx = c.boxes
     src = sv.src
     code = src.code
     mi = sv.linfo
@@ -238,16 +239,17 @@ function box_content_type(bx::BoxState, sv, @nospecialize(x))
     if e isa Core.SlotNumber
         n = get(box_slots(bx, src, mi), e.id, 0)
         n > 0 || return nothing
-        T = get(bx.types, (mi.specTypes, n), nothing)
-        return T === Any ? nothing : T
+        key = (mi.specTypes, n)
     elseif e isa Expr && e.head === :call && length(e.args) == 3 && e.args[3] isa QuoteNode && called_function(code, e.args[1]) === Core.getfield
         self = e.args[2]
         (self isa Core.SlotNumber && self.id == 1) || (self isa Core.Argument && self.n == 1) || return nothing
-        C = mi.specTypes.parameters[1]
-        T = get(bx.types, (C, e.args[3].value), nothing)
-        return T === Any ? nothing : T
+        key = (mi.specTypes.parameters[1], e.args[3].value)
+    else
+        return nothing
     end
-    return nothing
+    depends!(c, sv, (:box, key))
+    T = get(bx.types, key, nothing)
+    return T === Any ? nothing : T
 end
 
 # the type of `t[i]` for a tuple `t` that is a constant with a type in it, and an `i::Int` that is not a constant: a union of the types of its elements, with `Type{x}` for each that is a type; or `nothing`
@@ -350,13 +352,14 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
     split = split_tuple_read(interp, arginfo, si, vtypes, sv)
     split === nothing || return split
     # (a field of an object that is known, which the program does not change: what it has, see objects.jl)
+    arginfo.argtypes[2] isa Core.Const && depends!(c, sv, (:mode,)) # (see reuse.jl)
     if c.slots.mode === :on && (sv isa CC.InferenceState || CC.isready(call))
-        folded = fold_field_read(c, arginfo.argtypes)
+        folded = fold_field_read(c, arginfo.argtypes, sv)
         if folded !== nothing
             return after_call(result_of_type, call, interp, sv, folded)
         end
         # (a field of an object that is known, which the program writes: what it has, and what is stored in it)
-        OT = object_field_type(c, arginfo.argtypes)
+        OT = object_field_type(c, arginfo.argtypes, sv)
         if OT !== nothing
             return after_call(result_refined, call, interp, sv, OT)
         end
@@ -364,9 +367,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
     if isempty(c.slots.types) && !c.dispatch.registered_used && c.slots.mode !== :off && length(arginfo.argtypes) == 3 && arginfo.argtypes[3] isa Core.Const && (arginfo.argtypes[3].val isa Symbol || arginfo.argtypes[3].val isa Integer)
         type_slot_read!(c, sv, field_slot_key(arginfo.argtypes[2], arginfo.argtypes[3].val))
     end
-    isempty(c.boxes.types) && isempty(c.slots.types) && isempty(c.registered.fields) && isempty(c.registered.embedded) && return call
-    # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
-    (sv isa CC.InferenceState || CC.isready(call)) || return call
+    # (the box or the slot that is read is found whether or not any has types yet: what is read depends on it, see `depends!`)
     argtypes = arginfo.argtypes
     length(argtypes) == 3 || return call
     t = argtypes[3]
@@ -375,13 +376,15 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.get
         sv isa CC.InferenceState || return call
         (t isa Core.Const && t.val === :contents) || return call
         arginfo.fargs === nothing && return call
-        T = box_content_type(c.boxes, sv, arginfo.fargs[2])
+        T = box_content_type(c, sv, arginfo.fargs[2])
     elseif t isa Core.Const && (t.val isa Symbol || t.val isa Integer)
         # (a field of an abstract type: what has been stored in it, see slots.jl)
         key = field_slot_key(argtypes[2], t.val)
-        key === nothing || (T = slot_read_type(c, key))
+        key === nothing || (T = read_slot!(c, sv, key))
     end
     T === nothing && return call
+    # (the interpretation of code that was inferred (`IRInterpretationState`) can not wait for what a call gives: a call that is ready is the one that it can change)
+    (sv isa CC.InferenceState || CC.isready(call)) || return call
     mentions_type_value(T) && in_type_slot_read(sv) && return call
     if mentions_type_value(T) && length(argtypes) == 3 && t isa Core.Const
         # (types as values: the read is the call of a check of them, see dispatch.jl)
@@ -397,14 +400,14 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.mem
                                           vtypes::Union{Nothing,Vector{CC.VarState}}, sv::CC.AbsIntState, max_methods::Int)
     c = compilation()
     length(arginfo.argtypes) >= 2 || return call
+    key = elem_slot_key(arginfo.argtypes[2])
+    T = key === nothing ? nothing : read_slot!(c, sv, key) # (asked whether or not there are types yet: see `depends!`)
+    T === nothing || depends!(c, sv, (:types_empty,)) # (a type that is stated is used only once some slot has types: see reuse.jl)
     if isempty(c.slots.types)
-        type_slot_read!(c, sv, elem_slot_key(arginfo.argtypes[2]))
+        type_slot_read!(c, sv, key)
         return call
     end
     (sv isa CC.InferenceState || CC.isready(call)) || return call
-    key = elem_slot_key(arginfo.argtypes[2])
-    key === nothing && return call
-    T = slot_read_type(c, key)
     T === nothing && return call
     mentions_type_value(T) && in_type_slot_read(sv) && return call # (the read of a check of types: it is the slot itself)
     if mentions_type_value(T) && length(arginfo.argtypes) == 4 && arginfo.argtypes[3] == CC.Const(:not_atomic) && arginfo.argtypes[4] == CC.Const(false)

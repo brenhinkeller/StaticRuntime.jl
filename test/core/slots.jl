@@ -224,3 +224,24 @@ const OB_GRAPH = Dict(:a => OB_A, :b => OB_B, :c => OB_C, :d => OB_D)
         "three levels" => () -> ob_resolve!(OB_GRAPH[:d])::Int,
     ]; folded_ok = ("one level", "two levels", "three levels"))
 end
+
+# What is not made code of its own for each object, or is limited as Julia limits it: a recursion over a cycle of objects with a number that changes at each level (a method of its own for each number was made, without end),
+# a call with a splat (the call that is inferred is not the statement, which was left as a call that is dispatched when the program runs), and a method whose code needs its static parameters (the types of a call of C;
+# a parameter that the arguments do not determine, which the code would have had as a `TypeVar`).
+mutable struct ObRing; next::Any; val::Int; end
+const OB_RING1 = ObRing(nothing, 1)
+const OB_RING2 = ObRing(OB_RING1, 2)
+OB_RING1.next = OB_RING2
+ob_walk(n::ObRing, depth::Int, limit::Int) = depth >= limit ? 0 : n.val + ob_walk(n.next, depth + 1, limit)
+ob_add(n::ObRing, a::Int, b::Int) = n.val + a + b
+ob_strlen(n::ObRing, v::Vector{T}) where {T} = Int(ccall(:strlen, Csize_t, (Ptr{T},), v)) + n.val
+ob_param(n::ObRing, y::Union{S,Nothing}) where {S} = S
+@testset "Calls for objects that are not made code of their own" begin
+    check_cases([
+        "a number that changes over a cycle" => () -> ob_walk(OB_RING1, 0, opaque(7)),
+        "a splat"                            => () -> (t = (opaque(1), opaque(2)); ob_add(OB_RING2, t...)),
+        "a call of C with a type parameter"  => () -> ob_strlen(OB_RING1, UInt8[0x41, 0x42, 0x00]),
+    ])
+    @test StaticRuntime.object_call_method(typeof(ob_param), ObRing, Any[Int], Base.get_world_counter()) !== nothing
+    @test StaticRuntime.object_call_method(typeof(ob_param), ObRing, Any[Nothing], Base.get_world_counter()) === nothing
+end

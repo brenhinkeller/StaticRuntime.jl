@@ -142,6 +142,9 @@ function registered_union(c::Compilation, @nospecialize(T), show::Bool = false; 
     cached === missing || return cached
     return c.dispatch.unions[key] = registered_union_(c, T, show, universe)
 end
+# (whether `registered_union(c, T, show)` reads the universe: the types that the program makes, which change between passes)
+reads_universe(c::Compilation, @nospecialize(T), show::Bool) = !show && c.settings.universe && T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll)
+
 function registered_union_(c::Compilation, @nospecialize(T), show::Bool, universe::Bool)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its instances are of the types of it that were registered)
     T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll) || return nothing # (`Type{X}` is not an abstract type of objects)
@@ -163,7 +166,7 @@ end
 
 # The arguments of a call with the abstract types made unions, and the `Tuple` of their types (that of the function comes first, and
 # is not changed), or `nothing` if there is none to change; and whether one of them was made of the registered types
-function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, max_methods::Int)
+function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, max_methods::Int, @nospecialize(sv) = nothing)
     argtypes = copy(arginfo.argtypes)
     changed = false
     registered = false
@@ -173,7 +176,7 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
         T = CC.widenconst(argtypes[i]) # (a constant is of a concrete type; the rest of what is known of an argument is lost)
         # (a type that is not known (`Type`, `DataType`) in a program that has slots of types: one of the types that they hold, where what was read from one went through what does not keep its type, a tuple that a
         # function returns (`iterate`). The call is made over them, as over the registered types: a type of another kind is a `MethodError`)
-        if c.slots.type_slots && (T === DataType || T === UnionAll || type_value_slot(T))
+        if (T === DataType || T === UnionAll || type_value_slot(T)) && (depends!(c, sv, (:type_values,)); c.slots.type_slots) # (see reuse.jl)
             u = type_values_union(c, T)
             if u !== nothing
                 argtypes[i] = with_methods(c, interp, arginfo, i, u, max_methods)
@@ -185,6 +188,7 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
         u = listed_union(c, T)
         reg = false
         if u === nothing
+            reads_universe(c, T, isshow) && depends!(c, sv, (:universe,)) # (see reuse.jl)
             u = registered_union(c, T, isshow)
             u === nothing && continue
             reg = true
@@ -307,12 +311,12 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     c = compilation()
     # (a call that is made for an object that is a constant: code of its own for the object, see "Any function, for each object" in objects.jl)
     if sv isa CC.InferenceState
-        plan = object_call_plan(c, interp, f, arginfo.argtypes)
+        plan = object_call_plan(c, interp, f, arginfo)
         plan === nothing || return redirect(interp, plan[1], plan[2], 0, arginfo, si, vtypes, sv; positions = plan[3])
     end
     registered = false
     slot_argtypes = arginfo.argtypes # (what the arguments were before they were closed: see below)
-    closed = close_abstract_arguments(c, interp, arginfo, max_methods)
+    closed = close_abstract_arguments(c, interp, arginfo, max_methods, sv)
     # (a call that none of the types that the arguments are closed to has a method for is left as it is: it is not known what the
     # arguments are, and the result of the call is not that it is an error, which would make what calls it one too)
     closed === nothing || some_method_fits(c, interp, closed[1], closed[2], max_methods) || (closed = nothing)
@@ -347,7 +351,8 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     end
     # (a call on a type that is one of a few types, which are the cases that it is split in: Julia does not follow a call that has more methods than `max_methods`, which there can be for a function of types)
     # (only where the program has slots of types, whose reads are such unions: a union of a few types is in much of the code of Base, `convert(::Union{Type{Bool},Type{Int}}, x)`, which more methods would be looked up for)
-    if c.slots.type_slots && any(a -> !(a isa Core.TypeofVararg) && (T = CC.widenconst(a); T isa Union && all(exact_type_value, Base.uniontypes(T))), arginfo.argtypes[2:end])
+    if any(a -> !(a isa Core.TypeofVararg) && (T = CC.widenconst(a); T isa Union && all(exact_type_value, Base.uniontypes(T))), arginfo.argtypes[2:end]) &&
+       (depends!(c, sv, (:type_values,)); c.slots.type_slots) # (see reuse.jl)
         max_methods = max(max_methods, c.settings.split_limit)
     end
     call = @invoke CC.abstract_call_gf_by_type(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo, si::CC.StmtInfo, atype::Any,

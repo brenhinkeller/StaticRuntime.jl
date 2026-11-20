@@ -48,8 +48,9 @@ mutable struct InferenceFindings
     union_used::Bool
     callback_call_requested::Bool
     box_function_seen::Bool
+    deps::Union{Nothing,Dict{Any,Any}}  # what inference of the method asked of the state of the compilation, with the answers (see "What a pass takes from the one before" in reuse.jl)
 end
-InferenceFindings() = InferenceFindings(Type[], Tuple{Type,Type}[], Tuple{DataType,Vector{DataType},DataType,Any}[], Tuple{Core.CodeInfo,Core.MethodInstance}[], false, false, false, false)
+InferenceFindings() = InferenceFindings(Type[], Tuple{Type,Type}[], Tuple{DataType,Vector{DataType},DataType,Any}[], Tuple{Core.CodeInfo,Core.MethodInstance}[], false, false, false, false, nothing)
 
 findings_of(x) = CC.traverse_analysis_results(x) do @nospecialize result
     result isa InferenceFindings ? result : nothing
@@ -422,6 +423,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
         c = compilation()
         c.closures.callback_call_requested = true
         note_flag!(sv, :callback_call_requested)
+        depends!(c, sv, (:closures,)) # (the callbacks and the listeners: see reuse.jl)
         V = callback_value_type(arginfo.argtypes[2])
         inner = copy(arginfo.argtypes[3:end])
         T = CC.widenconst(inner[1])
@@ -468,15 +470,17 @@ end
 # finite many types (those registered), so the inference ends without the limit.
 function CC.edge_matches_sv(interp::OverridesInterpreter, frame::CC.AbsIntState, method::Method, @nospecialize(sig), sparams::Core.SimpleVector,
                             hardlimit::Bool, sv::CC.AbsIntState)
-    cl = compilation().closures
+    c = compilation()
+    cl = c.closures
     callbacks = cl.callbacks
     if !hardlimit && sig isa DataType && isconcretetype(sig)
+        depends!(c, sv, (:closures,)) # (whether the recursion is limited depends on the callbacks and listeners: see reuse.jl)
         if !(isempty(callbacks) && isempty(cl.listener_types))
             F = sig.parameters[1]
             (F in cl.listener_types || noted_for_any(cl, F)) && return false
         end
-        # (code for an object, see "Code for each object" in objects.jl: as finite as the objects)
-        has_object_key(sig) && return false
+        # (code for an object, see "Code for each object" in objects.jl: as finite as the objects, from a frame for other objects; one for the same objects is limited as Julia limits it, see `object_keys`)
+        has_object_key(sig) && object_keys(sig) != object_keys(CC.frame_instance(frame).specTypes) && return false
     end
     return @invoke CC.edge_matches_sv(interp::CC.AbstractInterpreter, frame::CC.AbsIntState, method::Method, sig::Any, sparams::Core.SimpleVector,
                                       hardlimit::Bool, sv::CC.AbsIntState)
@@ -496,6 +500,7 @@ function CC.abstract_call_unknown(interp::OverridesInterpreter, @nospecialize(ft
     if unknown_function_type(T) && !(ft isa CC.PartialOpaque)
         c = compilation()
         c.closures.dispatch_requested = true
+        depends!(c, sv, (:closures,)) # (the functions that it is made over: see reuse.jl)
         u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes)
         if u !== nothing
             c.closures.union_used = true
@@ -581,6 +586,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.kwc
             c = compilation()
             c.closures.dispatch_requested = true
             note_flag!(sv, :dispatch_requested)
+            depends!(c, sv, (:closures,)) # (the functions that it is made over: see reuse.jl)
             u = isempty(c.closures.functions) ? nothing : function_union(c, T, arginfo.argtypes, 3)
             if u !== nothing
                 c.closures.union_used = true

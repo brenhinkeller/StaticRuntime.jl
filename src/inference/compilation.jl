@@ -43,6 +43,7 @@ struct Settings
     slot_limit::Int
     share_cache::Bool               # `STATIC_RUNTIME_CACHE=1`: what is inferred is kept for the compilations that follow (faster; not what compiling is for: see `Compilation.id`)
     objects::Bool                   # the objects that are constants are known one by one (objects.jl; `STATIC_RUNTIME_OBJECTS=0`: not)
+    reuse::Bool                     # a pass takes from what the passes before inferred what is still right (reuse.jl; `STATIC_RUNTIME_REUSE=0`: each pass infers everything again)
 end
 
 function Settings(; strict::Bool = true)
@@ -59,7 +60,8 @@ function Settings(; strict::Bool = true)
                     String[s for s in split(get(ENV, "STATIC_RUNTIME_SLOTS_BLIND", ""), ',') if !isempty(s)],
                     SPLIT_LIMIT[], DISPATCH_LIMIT[], SLOT_LIMIT[],
                     get(ENV, "STATIC_RUNTIME_CACHE", "0") == "1",
-                    get(ENV, "STATIC_RUNTIME_OBJECTS", "1") != "0")
+                    get(ENV, "STATIC_RUNTIME_OBJECTS", "1") != "0",
+                    get(ENV, "STATIC_RUNTIME_REUSE", "1") != "0")
 end
 
 # (`hash` of a struct that has a `Vector` is not that of what is in it)
@@ -145,6 +147,7 @@ mutable struct SlotState
     universe_extras::Dict{Any,Vector{Any}}   # (those that are subtypes of a type, once asked)
     # found in this pass
     seen::Dict{SlotKey,Any}                  # the types that were stored in each slot: the union of them, or `Any` when something of a type that is not known was
+    seen_members::Dict{SlotKey,Vector{Any}}  # (the types that were stored in each slot that are not in `seen` yet: see `note_slot_store!`)
     seen_unknown::Set{SlotKey}               # the slots that something of a type that is not known was stored in
     universe_seen::Set{Any}
     stored_by_slot::Dict{SlotKey,Set{Any}}   # the types that were stored in each slot (those of the slots that are open are in the universe: see `note_stored_type!`)
@@ -168,7 +171,7 @@ mutable struct SlotState
     callargs::Dict{Any,Vector{Any}}          # (method instance, n) => the types that calls give it
 end
 SlotState(mode::Symbol) = SlotState(mode, false, 0, Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{Any,Vector{Any}}(),
-                                    Dict{SlotKey,Any}(), Set{SlotKey}(), Set{Any}(), Dict{SlotKey,Set{Any}}(), Set{Any}(), false,
+                                    Dict{SlotKey,Any}(), Dict{SlotKey,Vector{Any}}(), Set{SlotKey}(), Set{Any}(), Dict{SlotKey,Set{Any}}(), Set{Any}(), false,
                                     IdDict{Any,Vector{Tuple{SlotKey,Any}}}(), nothing,
                                     Dict{SlotKey,Vector{String}}(), Tuple{SlotKey,Bool,String}[], nothing, nothing, nothing, false, Dict{SlotKey,Bool}(), Any[], nothing, Dict{Any,Set{Any}}(), Dict{Any,Set{Any}}(), Dict{Any,Vector{Any}}())
 
@@ -187,7 +190,8 @@ mutable struct ObjectState
     use_written::Set{Tuple{Any,Symbol}}      # (what the pass before found, used in this one)
     ready::Bool                              # whether there was a pass before (that found what is used): before, nothing is known of the objects
     wanted::Bool                             # what was read in this pass could have been known with the facts of a pass before
-    consulted::Bool                          # (for the whole compilation) inference has read an object that is known, or one that could be: what it infers depends on the facts of the objects, which are then in its key
+    asked_written::Set{Tuple{Any,Symbol}}    # (for the whole compilation) what inference asked of the fields that are written (`field_written`): what it infers depends on the answers, which are its key (`objects_hash`)
+    asked_fields::Set{Tuple{ObjRef,Symbol}}  # (for the whole compilation) the fields of objects whose stores inference asked about (`object_field_type`)
     folds::Int                               # (the reads that were known in this pass, for `STATIC_RUNTIME_TRACE`)
     # what is stored in the fields of the objects, found in this pass (see "Stores in objects" in objects.jl)
     stores::Dict{Tuple{ObjRef,Symbol},Any}   # (object, field) => the union of the types stored in it
@@ -211,11 +215,14 @@ mutable struct ObjectState
     keyed_objects::Vector{Any}
     key_index::IdDict{Any,Int}
     remakers::Dict{Tuple{Any,Symbol},Any}     # (for the whole compilation) `remade_by` of each field of a pointer that was read, once asked: the function, or `nothing` (see "Fields that are made again" in boxes.jl)
+    call_methods::Dict{Tuple{Any,UInt},Any}   # (for the whole compilation) `object_call_method` of each signature and world, once asked: the match, or `nothing` (see "Any function, for each object" in objects.jl)
+    keyable::IdDict{Any,Bool}                # (for the whole compilation) `keyable_type` of each type, once asked
+    once_wanted::Bool                        # (for the whole compilation) a read could have been known with the facts (`wanted` in some pass): until then, what is inferred does not depend on them
 end
-ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbol}}(), false, false, false, 0,
+ObjectState() = ObjectState(Set{Tuple{Any,Symbol}}(), false, Set{Tuple{Any,Symbol}}(), false, false, Set{Tuple{Any,Symbol}}(), Set{Tuple{ObjRef,Symbol}}(), 0,
                             Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), Dict{Tuple{Any,Int},Vector{Tuple{Any,Symbol,Any}}}(),
                             Dict{Any,Vector{Tuple{Any,Vector{Any},Vector{Any}}}}(), Set{Any}(), Dict{Tuple{ObjRef,Symbol},Any}(), Dict{Tuple{Any,Symbol},Any}(), Set{Any}(), IdDict{Any,Bool}(), IdDict{Any,Bool}(),
-                            false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Dict{Tuple{Any,Symbol},Any}())
+                            false, nothing, nothing, nothing, Dict{Any,Vector{Tuple{Symbol,Any,Any,Any}}}(), Any[], IdDict{Any,Int}(), Dict{Tuple{Any,Symbol},Any}(), Dict{Tuple{Any,UInt},Any}(), IdDict{Any,Bool}(), false)
 
 "The calls over the registered types (dispatch.jl): whether this pass made any, and which, for the message that says so; and what was looked up to make them."
 mutable struct DispatchState
@@ -248,10 +255,13 @@ mutable struct Compilation
     julia_owned::Dict{Module,Bool}           # whether a module is one of Julia's own (see `julia_owned_module`)
     warnings::Vector{Pair{Any,String}}       # what inference has to say to the user (each once, by its key): said when the compilation ends, and not where it is found (see `compile_warning!`)
     trace::Trace                             # what `STATIC_RUNTIME_TRACE` says to write, when the compilation started
+    answers::Any                             # the answers to the questions about the state that are the same for a whole pass (`PassAnswers`, see reuse.jl)
+    deps_lost::Bool                          # a question about the state was asked where no method is known to give it to (see `depends!`): the next pass infers everything again
+    orphan_deps::IdDict{Any,Dict{Any,Any}}   # the questions of the methods whose frames of constants had no caller, with the answers (see `depends!`)
 end
 
 function Compilation(settings::Settings = Settings(), registered::Registered = Registered())
-    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), ObjectState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[], Trace())
+    c = Compilation(settings, registered, 0, 0, ClosureState(), BoxState(), SlotState(settings.slots), DispatchState(), ObjectState(), Method[], Ref(Runtime.LibraryPlan()), new_compilation_id(settings), Tuple{Core.MethodInstance,Any}[], Dict{Tuple{Any,UInt,Int},Any}(), Dict{Module,Bool}(), Dict{Module,Bool}(), Pair{Any,String}[], Trace(), nothing, false, IdDict{Any,Dict{Any,Any}}())
     append!(c.closures.callbacks, registered.callbacks) # (those that exist before the program: see `add_callback!`)
     c.key = inference_key(c)
     return c
@@ -367,17 +377,17 @@ function inference_key(c::Compilation)
     return h % Int
 end
 
-# (what the pass is made with of the objects, see objects.jl: what is inferred with other facts is another inference. The objects by their identity: of this compilation. Only once inference has read an object: the code
-# of a program that has none is the same whatever the facts are, and what a pass before inferred is used again, as it was)
+# (what the pass is made with of the objects, see objects.jl: the answers to what inference has asked of the facts in this compilation, and not all of the facts, which change with each pass that reaches more code: a pass whose
+# answers are the same infers the same, and uses what the one before inferred. The objects by their identity: of this compilation. What is asked only grows, so that two passes with the same key asked the same, with the
+# same answers; before the facts are there (`ready`), nothing is asked, and a program that never could have asked (`once_wanted`) has the key that it had without them)
 function objects_hash(o::ObjectState)
-    (o.ready && o.consulted) || return UInt(0)
+    (o.ready && (o.once_wanted || !isempty(o.asked_written) || !isempty(o.asked_fields))) || return UInt(0)
     h = UInt(1)
-    for (T, name) in o.use_written; h += hash(name, T === nothing ? UInt(2) : type_hash(T)); end
-    for ((r, name), T) in o.use_stores; h += hash(type_hash(T), hash(name, objectid(r.x))); end
-    for ((S, name), T) in o.use_unattributed; h += hash(type_hash(T), hash(name, type_hash(S))); end
-    for k in o.use_unknown; h += hash(k[2], k[1] isa ObjRef ? objectid(k[1].x) : type_hash(k[1])); end
-    return hash(length(o.use_written) + length(o.use_stores) + length(o.use_unattributed) + length(o.use_unknown), h)
+    for (S, name) in o.asked_written; h += hash(written_in(o.use_written, S, name), hash(name, S === nothing ? UInt(2) : type_hash(S))); end
+    for (r, name) in o.asked_fields; h += hash(field_answer_hash(field_answer(o.use_stores, o.use_unattributed, o.use_unknown, r, name)), hash(name, objectid(r.x))); end
+    return hash(length(o.asked_written) + length(o.asked_fields), h)
 end
+field_answer_hash(@nospecialize(a)) = a === nothing ? UInt(3) : type_hash(a)
 
 """
     begin_pass!(c::Compilation)
@@ -392,11 +402,22 @@ function begin_pass!(c::Compilation)
     empty!(c.boxes.seen)
     s = c.slots
     empty!(s.universe_seen); empty!(s.stored_by_slot); empty!(s.raw_store_types); s.scan_truncated = false
-    empty!(s.seen); empty!(s.seen_unknown); empty!(s.unknown_stores)
+    empty!(s.seen); empty!(s.seen_members); empty!(s.seen_unknown); empty!(s.unknown_stores)
     empty!(s.argstores); empty!(s.argpasses); empty!(s.callargs)
     c.dispatch.registered_used = false
     empty!(c.dispatch.unions)
     begin_objects_pass!(c.objects)
     c.key = inference_key(c)
+    # (what this pass answers, and what is kept of what the passes before inferred: see reuse.jl)
+    c.answers = pass_answers(c)
+    invalidate_stale!(c)
     return c
 end
+
+"""
+    cache_key(c::Compilation) -> Int
+
+The key of the cache of inference of the compilation (the parameters of its jobs, see `OverridesParams`): the same for all of its passes, which take from it what is still right (see reuse.jl), and made of what is the same for the
+whole compilation (the settings, what is registered). With a cache that compilations share (`STATIC_RUNTIME_CACHE=1`), it is the key of the pass, all of the state (`inference_key`), as two compilations take each other's results by it.
+"""
+cache_key(c::Compilation) = c.settings.share_cache ? c.key : hash(c.registered.version, hash(c.settings)) % Int

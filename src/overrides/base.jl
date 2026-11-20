@@ -67,6 +67,17 @@ end
 # without the runtime. This one is specialized for the tuple, and so uses the `getindex` above.
 @device_override @inline Base.iterate(t::Tuple, i::Int = 1) = (1 <= i <= length(t)) ? (@inbounds(t[i]), i + 1) : nothing
 
+# The product of a tuple of integers (`length` of an `Array` is `prod(size(a))`) as a loop, with the same result: Base's is `*(x...)` and a fold that is written out for up to 32 elements, which for a tuple whose length is not known
+# when compiling (`length(::Array{Any})`, of the method of `setindex!` that Base has for an `Array{Any}`, where the code has an `Array` whose number of dimensions is not known) is code of 400 statements that Julia's optimizer took
+# more than ten seconds over, for each of the two folds. The loop is made into the same code for a tuple whose length is known. (Not for the empty tuple, whose type has no `T`: Base's, `prod(()) = 1`.)
+@device_override function Base.prod(t::Tuple{T,Vararg{T}}) where {T<:Base.BitInteger}
+    p = t[1]
+    for i in 2:length(t)
+        p *= t[i]
+    end
+    return p
+end
+
 # `string(1, x)` (and so `"a=$(1) b=$(x)"`) where `x` is not known when compiling (a value of `Any`): the arguments are a `Tuple{Int,Any}`, which is not a concrete type
 # (the type of the tuple depends on `x`), so making it, and taking an element of it, is a call of the runtime. With the arguments one by one it is not made.
 # (Without an `Any` in them the methods of Base are used as they were: those for strings and characters are more specific.)
