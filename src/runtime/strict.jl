@@ -101,6 +101,36 @@ struct DynamicSite
     signature::String
     frames::Vector{String}
     path::Vector{String}
+    # the methods that the site is in, as (name, file, line) of their definitions, from the debug information: those of
+    # the functions on the path from the entry point and those inlined at the call (for `implicated_slot_keys`)
+    methods::Vector{Tuple{String,String,Int}}
+end
+DynamicSite(function_name, signature, frames, path) = DynamicSite(function_name, signature, frames, path, Tuple{String,String,Int}[])
+
+# (the definition of the method of a subprogram of the debug information, as `DynamicSite.methods` has it)
+function subprogram_method(@nospecialize(sp))
+    sp === nothing && return nothing
+    name = try first(split(LLVM.name(sp), ';')) catch; return nothing end
+    file = try (fl = LLVM.file(sp); fl === nothing ? "" : basename(LLVM.filename(fl))) catch; "" end
+    line = try Int(LLVM.line(sp)) catch; 0 end
+    return (String(name), String(file), line)
+end
+
+# the methods of the debug information of the call `inst` and of the functions `path` (names of functions of `fns`)
+function site_methods(inst::LLVM.Instruction, path::Vector{String}, fns)
+    found = Tuple{String,String,Int}[]
+    add(m) = (m === nothing || m in found || push!(found, m); nothing)
+    loc = try LLVM.debug_location(inst) catch; nothing end
+    depth = 0
+    while loc !== nothing && depth < 16
+        add(subprogram_method(try LLVM.scope(loc) catch; nothing end))
+        loc = try LLVM.inlined_at(loc) catch; nothing end
+        depth += 1
+    end
+    for name in path
+        haskey(fns, name) && add(subprogram_method(try LLVM.subprogram(fns[name]) catch; nothing end))
+    end
+    return found
 end
 
 # "file.jl:12 in `name`", for the debug location of an instruction and the places that it was inlined into
@@ -111,7 +141,7 @@ function debug_frames(inst::LLVM.Instruction)
     while loc !== nothing && depth < 8
         line = try Int(LLVM.line(loc)) catch; 0 end
         scope = try LLVM.scope(loc) catch; nothing end
-        name = scope === nothing ? nothing : try chomp(LLVM.name(scope), ";") catch; nothing end
+        name = scope === nothing ? nothing : try first(split(LLVM.name(scope), ';')) catch; nothing end
         file = scope === nothing ? nothing : try
             f = LLVM.file(scope)
             f === nothing ? nothing : basename(LLVM.filename(f))
@@ -153,7 +183,8 @@ function callers_of(mod::LLVM.Module)
     return callers
 end
 
-# the shortest chain of functions from one without callers (the entry point) to `name`
+# the shortest chain of functions from one without callers (the entry point) to `name`, as names of functions of the
+# module (`readable_name` makes them what the message shows)
 function path_to_entry(callers::Dict{String,Vector{String}}, name::String; limit::Int = 12)
     prev = Dict{String,String}()
     queue = [name]
@@ -178,7 +209,7 @@ function path_to_entry(callers::Dict{String,Vector{String}}, name::String; limit
         root = prev[root]
         push!(path, root)
     end
-    return [readable_name(n) for n in path]
+    return path
 end
 
 # the places that call the runtime functions of `found` (see `dynamic_runtime_calls`): at most `limit` for each, and the
@@ -201,7 +232,8 @@ function dynamic_call_sites(mod::LLVM.Module, found; limit::Int = 4)
             key = string(fname, first(frames, 1))
             key in seen && continue
             push!(seen, key)
-            push!(list, DynamicSite(function_of(inst), signature_of(fn), frames, path_to_entry(callers, fname)))
+            path = path_to_entry(callers, fname)
+            push!(list, DynamicSite(function_of(inst), signature_of(fn), frames, String[readable_name(n) for n in path], site_methods(inst, path, fns)))
             length(list) >= limit && break
         end
         isempty(list) || push!(sites, name => list)

@@ -7,6 +7,44 @@
 # The most passes made for functions, callbacks, `@cfunction`s and boxes (slot passes are counted by `SLOT_PASS_LIMIT`).
 const MAX_FUNCTION_PASSES = 8
 
+# The most passes made again without the slot types that the code that failed read (see `implicated_slot_keys`), before
+# a pass without any slot types.
+const SLOT_NARROWINGS = 2
+
+"""
+    implicated_slot_keys(c::Compilation, e)
+
+The slots whose types the code that `e` (an `UnsupportedCodeError`) is about was inferred with: the slot questions (see
+`depends!`) of the methods of its call sites, those on the way from the entry point and those inlined at the call. A
+failure of a pass with slot types gives up these slots first, rather than all of them: a program can have code that
+needs the slot types (a field that holds a function, called) and code that the slot types make fail (a branch that is
+reached with them).
+"""
+function implicated_slot_keys(c::Compilation, @nospecialize(e))
+    keys = Any[]
+    (e isa Runtime.UnsupportedCodeError && !isempty(c.inferred)) || return keys
+    wanted = Set{Tuple{String,String,Int}}()
+    for (_, sites) in e.sites, site in sites
+        union!(wanted, site.methods)
+    end
+    isempty(wanted) && return keys
+    owner = c.inferred[1][2]
+    seen = Base.IdSet{Core.MethodInstance}()
+    for (mi, o) in c.inferred
+        (o === owner && mi.def isa Method && !(mi in seen)) || continue
+        push!(seen, mi)
+        m = mi.def::Method
+        (String(m.name), basename(String(m.file)), Int(m.line)) in wanted || continue
+        ci = live_instance(mi, owner)
+        f = ci === nothing ? nothing : findings_of(ci)
+        (f === nothing || f.deps === nothing) && continue
+        for q in Base.keys(f.deps)
+            (q isa Tuple && length(q) == 2 && q[1] === :slot && haskey(c.slots.types, q[2]) && !(q[2] in keys)) && push!(keys, q[2])
+        end
+    end
+    return keys
+end
+
 """
     begin_pass!(c::Compilation)
 
@@ -52,7 +90,18 @@ function run_passes(c::Compilation, compile)
                 failure = e
                 had_failure = true
                 trace_on() && trace("pass ", pass, " failed: ", first(replace(sprint(showerror, e), '\n' => ' '), 3500))
-                if s.mode === :on && !isempty(s.types) && c.settings.slots_fallback && !s.fell_back
+                implicated = s.mode === :on && c.settings.slots_fallback && s.narrowed < SLOT_NARROWINGS ? implicated_slot_keys(c, e) : Any[]
+                if !isempty(implicated)
+                    # (the slot types that the code that failed was inferred with may be what failed: give up those
+                    # slots, and compile once more with the others)
+                    s.narrowed += 1
+                    for k in implicated
+                        delete!(s.types, k); push!(s.open, k)
+                    end
+                    trace_on() && trace("pass ", pass, ": the slots that the code that failed read are given up (", length(implicated), "): ", first(join((string(k) for k in implicated), ", "), 1500))
+                    slots_retry = true
+                    failure = nothing
+                elseif s.mode === :on && !isempty(s.types) && c.settings.slots_fallback && !s.fell_back
                     # (the slot types may be what failed: compile once more without them)
                     s.fell_back = true
                     empty!(s.types); s.type_slots = false
@@ -72,7 +121,7 @@ function run_passes(c::Compilation, compile)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
         more_listeners = update_listeners!(c)
         wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners
-        retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + 2 && wanted
+        retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + SLOT_NARROWINGS + 2 && wanted
         trace_on() && trace_pass(c, pass, started, slots_retry, had_failure, failure, new, more_functions, newcb, more_listeners, more_boxes, newc, wanted, retry, function_passes)
         if retry
             if more_boxes

@@ -142,6 +142,7 @@ begin_pass!(bx::BoxState) = (empty!(bx.seen); bx)
 Base.@kwdef mutable struct SlotState
     mode::Symbol                                                      # from the settings; made `:off` if the types do not settle
     fell_back::Bool = false                                           # the compilation was made again without slot types
+    narrowed::Int = 0                                                 # passes made again without the slot types a failure read (passes.jl)
     passes::Int = 0
     types::Dict{SlotKey,Any} = Dict{SlotKey,Any}()                    # what reads of each slot are given in this pass
     open::Set{SlotKey} = Set{SlotKey}()                               # slots given up: reads are `Any`

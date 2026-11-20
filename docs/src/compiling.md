@@ -33,6 +33,10 @@ Julia's own would. Most of it is in the hooks of our interpreter (`src/inference
   unions of up to 4 types; ours, up to `SPLIT_LIMIT`.
 - **Slots of abstract types** (the elements of a `Vector{Any}`, a field of type `Any`) are given the types that the
   program stores in them, found in its code and in its constants, and every read of them is checked by default.
+  Knowing more can also make code reachable that does not compile (a branch that is never taken, now with types that
+  it can't be compiled for). When a pass fails, the slots that the methods of the failing code read are given up, and
+  the program is compiled again with the others (at most twice: `SLOT_NARROWINGS`); only then is it compiled without
+  any slot types.
 - **Slots that hold types** (`Vector{Type}`) are given the types they hold, each as a constant, and calls on what is
   read from them are split over those (see [Types as values](@ref)).
 - **Boxes of closures** (variables a closure captures and that are assigned again) are given the types assigned to
