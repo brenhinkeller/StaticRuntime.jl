@@ -46,6 +46,20 @@ function default_cflags(small::Bool = false)
     return ``
 end
 
+# The name of the entry point of an executable: except on macOS (where it is the entry point itself, `-e _name`),
+# StaticCompiler links it with a C wrapper whose `main` calls it by its name, so an entry point that is named `main` is a
+# second `main` ("multiple definition of `main`"), which would call itself. Its symbol is then given the prefix `julia_`
+# (`demangle = false`), unless the caller chose.
+function executable_kwargs(args, kwargs::NamedTuple)
+    haskey(kwargs, :demangle) && return kwargs
+    wrapped = !Sys.isapple() || get(kwargs, :llvm_to_clang, Sys.iswindows())
+    wrapped || return kwargs
+    funcs = args[1] isa Function ? nothing : args[1]
+    name = funcs === nothing ? (length(args) >= 4 ? args[4] : StaticCompiler.fix_name(args[1])) :
+                               (length(args) >= 3 ? args[3] : StaticCompiler.fix_name(first(first(funcs))))
+    return String(name) == "main" ? merge(kwargs, (; demangle = false)) : kwargs
+end
+
 # The target: the host, as StaticCompiler's own default, but, on macOS, with a version in the triple. StaticCompiler's
 # triple for it has none (`aarch64-apple-darwin`), so the object files have no "platform load command", which says what
 # system they are for, and the linker of recent versions of macOS warns about each (`no platform load command found in
@@ -117,7 +131,8 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
                 $(f in (:compile_executable, :compile_shlib) ?
                     :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && early_entry_check(c, args, entry_args; method_table, params = job_params, target)) : :nothing)
                 Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess = postprocess, strip = !ours && strip,
-                                  $(f in (:compile_executable, :compile_shlib) ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs))...) : :(NamedTuple(kwargs)...)))
+                                  $(f === :compile_executable ? :(executable_kwargs(args, merge((; cflags = default_cflags(small)), NamedTuple(kwargs)))...) :
+                                    f === :compile_shlib ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs))...) : :(NamedTuple(kwargs)...)))
             end
             $(f in (:compile_executable, :compile_shlib) ? :(libraries === :bundle && result isa AbstractString && Runtime.bundle_libraries(result, c.libraries[])) : :nothing)
             return result

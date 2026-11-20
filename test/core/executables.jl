@@ -168,6 +168,16 @@ end
     exe = Base.invokelatest(compile_executable, raw_main, (Int, Ptr{Ptr{UInt8}}), mktempdir())
     @test read(ignorestatus(`$exe a b`), String) == "3\n"
     @test exit_code(exe, "a", "b") == 4
+
+    # an entry point named `main`: on Linux (and with `llvm_to_clang`) the executable is linked with a C wrapper whose
+    # `main` calls it, so its symbol has the prefix `julia_` (it was "multiple definition of `main`", a user's report)
+    @eval module EntryNamedMain
+        main(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(sum(collect(1:argc+3))); 0)
+    end
+    for llvm_to_clang in (false, true)
+        exe = Base.invokelatest(compile_executable, EntryNamedMain.main, (Int, Ptr{Ptr{UInt8}}), mktempdir(); llvm_to_clang)
+        @test basename(exe) == "main" && read(`$exe a b`, String) == "21\n"
+    end
 end
 
 # The optimizer reads the alignment of a pointer from the bits of the address that it was in the process that compiles (`inttoptr 0x162293e80` is aligned to 128 bytes, by chance), and the SLP vectorizer made
