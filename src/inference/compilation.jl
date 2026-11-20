@@ -418,3 +418,64 @@ compilation (the settings, what is registered). With a cache that compilations s
 the key of the pass, all of the state (`inference_key`), as two compilations take each other's results by it.
 """
 cache_key(c::Compilation) = c.settings.share_cache ? c.key : hash(c.registered.version, hash(c.settings)) % Int
+
+
+# What a compilation leaves behind is not an input of the next one: no compilation depends on the ones that were made
+# before it. (What persists is what is not made by compiling: the overrides, the registrations of
+# `add_dispatch_candidates!` and the others, and the settings.) Two things are done for it:
+#
+# * what a compilation finds is in the compilation (the subtypes that it listed, which modules are the program's, the
+#   warnings for the user), or in the linking of its program (the addresses of the objects that it embeds), and not in a
+#   table of the process;
+# * what inference makes is not found by another compilation: each has the cache of its own (`Compilation.id`, which is
+#   in the parameters of its jobs, and so in the token that owns the code instances), and when it ends the code
+#   instances that it made are invalidated, emptied, and taken out of the lists of their methods (`purge_inferred!`).
+#   `STATIC_RUNTIME_CACHE=1` makes them share the cache: compiling is faster, and what is compiled is then not made of
+#   the program alone.
+function purge_inferred!(c::Compilation)
+    c.settings.share_cache && return nothing
+    owners = IdDict{Core.MethodInstance,Vector{Any}}()
+    for (mi, owner) in c.inferred
+        list = get!(Vector{Any}, owners, mi)
+        any(o -> o === owner, list) || push!(list, owner)
+    end
+    for (mi, list) in owners
+        purge_owners!(mi, list)
+    end
+    empty!(c.inferred)
+    return nothing
+end
+
+# Take the code instances of these owners out of the list that a method has (the head and the `next` of each are fields
+# that Julia changes itself); the last one of the list is not taken out (a method has no way to have no list), but is
+# made invalid and empty, as the others are before they are taken out: nothing can find it, and it is small.
+function purge_owners!(mi::Core.MethodInstance, owners::Vector{Any})
+    isdefined(mi, :cache) || return
+    chain = Core.CodeInstance[]
+    ci = @atomic mi.cache
+    push!(chain, ci)
+    while isdefined(ci, :next)
+        ci = @atomic ci.next
+        push!(chain, ci)
+    end
+    ours(ci) = any(o -> ci.owner === o, owners)
+    any(ours, chain) || return
+    for ci in chain
+        ours(ci) || continue
+        @atomic ci.max_world = UInt(0)
+        @atomic ci.inferred = nothing
+        @atomic ci.edges = Core.svec()
+        ci.analysis_results = CC.NULL_ANALYSIS_RESULTS # (what the analysis kept with it: see `SlotFactsResult` and `InferenceFindings`)
+    end
+    n = length(chain)
+    kept = Core.CodeInstance[ci for (i, ci) in enumerate(chain) if i == n || !ours(ci)]
+    length(kept) == n && return
+    # (the head is replaced only if it is the one that was read: a code instance that another thread put at the head
+    # since is kept, and the list is left as it is)
+    _, replaced = @atomicreplace mi.cache chain[1] => kept[1]
+    replaced || return
+    for i in 1:(length(kept) - 1)
+        @atomic kept[i].next = kept[i + 1]
+    end
+    return
+end

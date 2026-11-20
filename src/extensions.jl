@@ -2,14 +2,6 @@
 # and other extensions can call them.
 
 """
-    StaticRuntime.add_listeners!(x)
-
-No longer needed: the listeners of the constants of a program are found when it is compiled. (It does nothing, and gives
-`x`.)
-"""
-add_listeners!(@nospecialize(x)) = x
-
-"""
     StaticRuntime.prepare!(x)
 
 Make `x`, an object that is made before the program is compiled and is a constant of it (a `Makie.Scene`, a
