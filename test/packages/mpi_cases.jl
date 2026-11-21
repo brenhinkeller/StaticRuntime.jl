@@ -209,21 +209,56 @@ function c_customop(args::Vector{String})
     MPI.Finalize(); return 0
 end
 
-# function c_objects(args::Vector{String})
-#     MPI.Init(); comm = MPI.COMM_WORLD; rank = MPI.Comm_rank(comm)
-#     if rank == 0
-#         MPI.send(Dict("a" => 1, "b" => [1.0, 2.0]), comm; dest = 1, tag = 1)
-#         line(rank, "sent")
-#     elseif rank == 1
-#         d, st = MPI.recv(comm, MPI.Status; source = 0, tag = 1)
-#         line(rank, d["a"], " ", d["b"])
-#     end
-#     MPI.Finalize(); return 0
-# end
+# Julia objects: `MPI.send` and `MPI.recv` (they use `Serialization`: what is received is of a type that the program has, which are those that it sends, see "Serialization"), and `bcast` and `gather` of objects
+struct MPIPoint; x::Float64; y::Float64; label::String; end
+function c_objects(args::Vector{String})
+    MPI.Init(); comm = MPI.COMM_WORLD; rank = MPI.Comm_rank(comm)
+    if rank == 0
+        MPI.send(Dict("a" => [1.0, 2.0], "b" => [3.0]), comm; dest = 1, tag = 1)
+        MPI.send(MPIPoint(1.5, 2.5, "a point"), comm; dest = 2, tag = 2)
+        line(rank, "sent")
+    elseif rank == 1
+        d = MPI.recv(comm; source = 0, tag = 1)::Dict{String,Vector{Float64}}
+        line(rank, d["a"], " ", d["b"])
+    else
+        p = MPI.recv(comm; source = 0, tag = 2)::MPIPoint
+        line(rank, p.x, " ", p.y, " ", p.label)
+    end
+    MPI.Finalize(); return 0
+end
+function c_bcast_object(args::Vector{String})
+    MPI.Init(); comm = MPI.COMM_WORLD; rank = MPI.Comm_rank(comm)
+    obj = MPI.bcast(rank == 0 ? MPIPoint(3.5, 4.5, "from the root") : nothing, 0, comm)::Union{MPIPoint,Nothing}
+    p = obj::MPIPoint
+    line(rank, p.x, " ", p.y, " ", p.label)
+    MPI.Finalize(); return 0
+end
+function c_gather_objects(args::Vector{String})
+    MPI.Init(); comm = MPI.COMM_WORLD; rank = MPI.Comm_rank(comm)
+    g = MPI.gather(MPIPoint(rank + 0.5, 2.0 * rank, string("rank ", rank)), comm)
+    if rank == 0
+        gs = g::Vector{MPIPoint}
+        line(rank, join((string(p.x, "/", p.y, "/", p.label) for p in gs), ", "))
+    else
+        line(rank, g === nothing ? "none" : "something")
+    end
+    MPI.Finalize(); return 0
+end
+function c_recv_status(args::Vector{String})
+    MPI.Init(); comm = MPI.COMM_WORLD; rank = MPI.Comm_rank(comm); size = MPI.Comm_size(comm)
+    if rank == 0
+        for r in 1:size-1
+            v, st = MPI.recv(comm, MPI.Status; source = MPI.ANY_SOURCE, tag = 5)
+            line(rank, "got ", (v::Vector{Int}), " from ", st.source == 1 || st.source == 2 ? "a worker" : "unknown")
+        end
+    else
+        MPI.send([rank, rank * rank, rank^3], comm; dest = 0, tag = 5)
+    end
+    MPI.Finalize(); return 0
+end
 
 # Not compiled (see `mpi.jl`): a reduction with an operator of the user's (a C function that calls Julia)
-# TODO: `send` of any object (serialization)
-const CASES = Function[c_bcast, c_reduce, c_gather, c_scatter, c_alltoall, c_isend, c_sendrecv, c_split, c_scan, c_inplace, c_wtime, c_misc, c_gatherv, c_error, c_probe, c_many_comms, c_struct, c_cart, c_rma, c_file]
+const CASES = Function[c_bcast, c_reduce, c_gather, c_scatter, c_alltoall, c_isend, c_sendrecv, c_split, c_scan, c_inplace, c_wtime, c_misc, c_gatherv, c_error, c_probe, c_many_comms, c_struct, c_cart, c_objects, c_bcast_object, c_gather_objects, c_recv_status, c_rma, c_file]
 
 # c_customop is explictly only supported on non-ARM processors in MPI.jl, so only test it there
 if !(Sys.ARCH ∈ (:aarch64, :ppc64le, :powerpc64le) || startswith(lowercase(String(Sys.ARCH)), "arm"))

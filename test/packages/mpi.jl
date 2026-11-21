@@ -1,7 +1,7 @@
 # MPI.jl: programs that are compiled and run on 3 processes with `mpiexec`, and compared (what each process writes) with the same program run by Julia the same way.
 # The library is the one that MPI.jl uses (MPICH_jll by default): the program opens it, at the path that it has when compiling. Not supported, and listed as broken:
-# a reduction with an operator that is a function of the user's (`MPI.Allreduce(x, f, comm)`, which makes a C function that calls Julia), and `MPI.send` / `MPI.recv` of
-# any object (they use `Serialization`).
+# a reduction with an operator that is a function of the user's (`MPI.Allreduce(x, f, comm)`, which makes a C function that calls Julia). `MPI.send`, `MPI.recv` and `MPI.bcast`
+# of objects work for the types that the program has (they use `Serialization`).
 using MPI
 
 include("mpi_cases.jl")
