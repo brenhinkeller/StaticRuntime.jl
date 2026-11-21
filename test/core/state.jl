@@ -4,7 +4,7 @@
 @testset "A compilation is its own" begin
     StaticRuntime.with_compilation() do c
         @test StaticRuntime.compilation() === c
-        @test isempty(c.closures.functions) && isempty(c.closures.callbacks) && isempty(c.boxes.types) && isempty(c.slots.types) && isempty(c.slots.universe)
+        @test isempty(c.closures.functions) && isempty(c.closures.noted) && isempty(c.boxes.types) && isempty(c.slots.types) && isempty(c.slots.universe)
         StaticRuntime.with_compilation() do d # (a compilation that is made inside another is its own, and the other is there again when it ends)
             @test StaticRuntime.compilation() === d
             @test d !== c
@@ -26,7 +26,7 @@ struct StateProbe; x::Int; end
     @test key(c -> nothing) == base # (the same state is the same key, in every compilation)
     changes = [
         "a function candidate"   => c -> push!(c.closures.functions, typeof(sin)),
-        "a callback"             => c -> push!(c.closures.callbacks, (Int, typeof(sin))),
+        "a callback"             => c -> StaticRuntime.add_noted!(c.closures, Int, typeof(sin)),
         "a box"                  => c -> (c.boxes.types[(Tuple{typeof(sin),Float64}, 1)] = Int),
         "the type of a slot"     => c -> (c.slots.types[(:elem, Any, nothing)] = Int),
         "the universe"           => c -> push!(c.slots.universe, StateProbe),
@@ -58,7 +58,7 @@ const KEY_PROBE = """
     S = StaticRuntime
     c = S.Compilation()
     append!(c.closures.functions, [typeof(sin), typeof(cos), typeof(identity)])
-    push!(c.closures.callbacks, (Int, typeof(sin)))
+    StaticRuntime.add_noted!(c.closures, Int, typeof(sin))
     c.boxes.types[(Tuple{typeof(sin),Float64}, 1)] = Union{Int,String}
     c.boxes.types[(typeof(sin), :contents)] = Float64
     c.slots.types[(:elem, Any, nothing)] = Union{Int,String,Vector{Int}}

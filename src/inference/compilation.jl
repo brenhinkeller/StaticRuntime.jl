@@ -95,10 +95,10 @@ trace(args...) = (println(stderr, "[static-runtime] ", args...); nothing)
 
 const BoxKey = Tuple{Any,Union{Int,Symbol}} # (method specialization, box number) or (closure type, field name)
 
-"Functions that unknown calls are made over (closures.jl), callbacks and listeners, and `@cfunction`s (cfunctions.jl)."
+"Functions that unknown calls are made over (closures.jl), the types that the program has by kind (callbacks, and the kinds of `call_over_noted`: noted.jl), listeners, and `@cfunction`s (cfunctions.jl)."
 Base.@kwdef mutable struct ClosureState
     functions::Vector{Type} = Type[]                                  # the candidate function types of unknown calls
-    callbacks::Vector{Tuple{Type,Type}} = Tuple{Type,Type}[]          # (value type, function type) pairs, see `note_callback`
+    noted::Dict{Any,Vector{Type}} = Dict{Any,Vector{Type}}()          # the types that the program has, by kind: callbacks (the kind is the type of the value that they are called with, see `note_callback`) and the kinds of `call_over_noted` (a `Symbol`, see noted.jl). Registered, and found by the passes
     listener_objects::Dict{Any,Tuple} = Dict{Any,Tuple}()             # value type => the listeners that code compares with
     listener_types::Set{Any} = Set{Any}()                             # the types of all listeners found
     listeners_complete::Bool = true                                   # the scan of the constants found them all
@@ -111,9 +111,7 @@ Base.@kwdef mutable struct ClosureState
     # found in this pass
     seen_functions::Vector{Type} = Type[]
     seen_functions_set::Set{Type} = Set{Type}()
-    seen_callbacks::Vector{Tuple{Type,Type}} = Tuple{Type,Type}[]
-    noted::Dict{Symbol,Vector{Type}} = Dict{Symbol,Vector{Type}}()    # the types that a `call_over_noted` is made over (noted.jl): registered, and those that the passes found
-    seen_noted::Vector{Tuple{Symbol,Type}} = Tuple{Symbol,Type}[]     # found in this pass: (kind, type)
+    seen_noted::Vector{Tuple{Any,Type}} = Tuple{Any,Type}[]           # found in this pass: (kind, type)
     asked_noted::Set{Symbol} = Set{Symbol}()                          # the kinds that a `call_over_noted` of this pass was made for
     seen_cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}} = Tuple{DataType,Vector{DataType},DataType,Any}[] # (function type, argument types, result type, function)
     dispatch_requested::Bool = false                                  # an unknown call was seen
@@ -126,7 +124,7 @@ Base.@kwdef mutable struct ClosureState
     slowest::Vector{Tuple{Float64,Any,Int}} = Tuple{Float64,Any,Int}[] # (trace) (seconds, method, statements) of the slowest to optimize
 end
 function begin_pass!(cl::ClosureState)
-    empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_callbacks); empty!(cl.seen_cfunctions); empty!(cl.seen_noted); empty!(cl.asked_noted)
+    empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_cfunctions); empty!(cl.seen_noted); empty!(cl.asked_noted)
     cl.dispatch_requested = cl.union_used = cl.callback_call_requested = cl.box_function_seen = false
     cl.optimized = 0; empty!(cl.optimized_unique); empty!(cl.slowest)
     return cl
@@ -255,7 +253,7 @@ Base.@kwdef mutable struct Compilation
     trace::Trace = Trace()                                            # what `STATIC_RUNTIME_TRACE` says, read when the compilation starts
     id::Int = new_compilation_id(settings)                            # the name of this compilation's inference cache (see `purge_inferred!`)
     pass::Int = 0
-    closures::ClosureState = ClosureState(callbacks = copy(registered.callbacks), noted = Dict{Symbol,Vector{Type}}(k => copy(v) for (k, v) in registered.noted)) # (callbacks registered before the program)
+    closures::ClosureState = ClosureState(noted = Dict{Any,Vector{Type}}(k => copy(v) for (k, v) in registered.noted)) # (the types registered before the program: callbacks, and noted types)
     boxes::BoxState = BoxState()
     slots::SlotState = SlotState(settings.slots)
     dispatch::DispatchState = DispatchState()
@@ -372,16 +370,15 @@ function boxes_hash(b::BoxState)
     return hash(length(b.types), h)
 end
 
-# (the candidate functions, in the order found, which the unions are made in; the callbacks and compared listeners)
+# (the candidate functions, in the order found, which the unions are made in; the types noted by kind (callbacks and the others) and the compared listeners)
 function closures_hash(cl::ClosureState)
     h = foldl((h, T) -> hash(type_hash(T), h), cl.functions; init = UInt(0))
     h = hash(length(cl.functions), h)
-    h = foldl((h, (V, F)) -> hash(type_hash(F), hash(type_hash(V), h)), cl.callbacks; init = h)
     # (the listeners that the code compares with, by their identity: of this compilation)
     for (V, fs) in cl.listener_objects; h += hash(map(objectid, fs), type_hash(V)); end
     h = hash(map(objectid, cl.all_listeners), h)
-    for (kind, types) in cl.noted, T in types; h += hash(type_hash(T), hash(kind, UInt(8))); end
-    return hash(length(cl.callbacks), h)
+    for (kind, types) in cl.noted, T in types; h += hash(type_hash(T), hash(kind_hash(kind), UInt(7))); end
+    return hash(sum(length, values(cl.noted); init = 0), h)
 end
 
 """

@@ -1,14 +1,13 @@
-# What is found while a method is inferred and optimized (the function types its code has, the callbacks and
-# `@cfunction`s it declares, its unknown calls, the boxes it makes, the questions it asked of the compilation's state).
+# What is found while a method is inferred and optimized (the function types its code has, the types that it notes
+# (callbacks, and what `note_type` says) and the `@cfunction`s it declares, its unknown calls, the boxes it makes, the questions it asked of the compilation's state).
 # A method taken from the cache is not inferred again, so this is kept with its result (`analysis_results`, which the
 # cache keeps) and replayed from every method that the program reaches (`replay_findings!`): what a compilation finds
 # does not depend on what was inferred before it.
 
 Base.@kwdef mutable struct InferenceFindings
     functions::Vector{Type} = Type[]
-    callbacks::Vector{Tuple{Type,Type}} = Tuple{Type,Type}[]
     cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}} = Tuple{DataType,Vector{DataType},DataType,Any}[]
-    noted::Vector{Tuple{Symbol,Type}} = Tuple{Symbol,Type}[]  # `note_type(kind, T)`
+    noted::Vector{Tuple{Any,Type}} = Tuple{Any,Type}[]        # `note_type(kind, T)` and `note_callback(V, f)`
     noted_asked::Vector{Symbol} = Symbol[]                    # `call_over_noted(kind, ...)`
     boxes::Vector{Tuple{Core.CodeInfo,Core.MethodInstance}} = Tuple{Core.CodeInfo,Core.MethodInstance}[] # code that makes boxes, as inferred (for `learn_boxes!`)
     dispatch_requested::Bool = false
@@ -54,9 +53,6 @@ function replay_findings!(c::Compilation, interp, root)
         f === nothing && continue
         for T in f.functions
             add_seen_function!(cl, T)
-        end
-        for x in f.callbacks
-            x in cl.seen_callbacks || push!(cl.seen_callbacks, x)
         end
         for x in f.noted
             x in cl.seen_noted || push!(cl.seen_noted, x)

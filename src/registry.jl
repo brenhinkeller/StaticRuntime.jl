@@ -26,11 +26,10 @@ mutable struct Registry
     returns::Vector{Tuple{Any,Any}}     # `@assume`: (the signature that a call fits, the type that it gives)
     fields::Dict{SlotKey,Any}           # `@assume_field`: the slot => the type of what is read from it
     embedded::Set{SlotKey}              # `@assume_field_embedded`: the slots that hold only what the objects that are embedded hold
-    callbacks::Vector{Tuple{Type,Type}} # `add_callback!`: (the type of the value, the type of the function) of callbacks that exist before the program runs (see closures.jl)
-    noted::Dict{Symbol,Vector{Type}}    # `add_noted_types!`: the types that a `call_over_noted` of the kind is made over, besides those that the program notes (see noted.jl)
+    noted::Dict{Any,Vector{Type}}       # the types that the program is said to have, by kind: `add_callback!` (the kind is the type of the value that is called with, the types those of the functions, see closures.jl) and `add_noted_types!` (a kind that is a `Symbol`, see noted.jl)
     version::Int                        # a hash of all of the above: see `registry_version`
 end
-Registry() = Registry(Type[], Type[], Any[], Tuple{Any,Any}[], Dict{SlotKey,Any}(), Set{SlotKey}(), Tuple{Type,Type}[], Dict{Symbol,Vector{Type}}(), 0)
+Registry() = Registry(Type[], Type[], Any[], Tuple{Any,Any}[], Dict{SlotKey,Any}(), Set{SlotKey}(), Dict{Any,Vector{Type}}(), 0)
 
 const REGISTRY = Registry()
 
@@ -44,9 +43,8 @@ function registry_version(r::Registry)
     for (sig, R) in r.returns; h += hash(type_hash(R), hash(type_hash(sig), UInt(4))); end
     for ((kind, S, name), T) in r.fields; h += hash(type_hash(T), hash(type_hash(S), hash(name, hash(kind, UInt(5))))); end
     for (kind, S, name) in r.embedded; h += hash(type_hash(S), hash(name, hash(kind, UInt(6)))); end
-    for (V, F) in r.callbacks; h += hash(type_hash(F), hash(type_hash(V), UInt(7))); end
-    for (kind, types) in r.noted, T in types; h += hash(type_hash(T), hash(kind, UInt(8))); end
-    return hash(length(r.show) + length(r.family) + length(r.deepcopy) + length(r.returns) + length(r.fields) + length(r.embedded) + length(r.callbacks) + sum(length, values(r.noted); init = 0), h) % Int
+    for (kind, types) in r.noted, T in types; h += hash(type_hash(T), hash(kind_hash(kind), UInt(7))); end
+    return hash(length(r.show) + length(r.family) + length(r.deepcopy) + length(r.returns) + length(r.fields) + length(r.embedded) + sum(length, values(r.noted); init = 0), h) % Int
 end
 
 # (adds `x` to the list, if it is not there: and says whether it was added)
@@ -82,23 +80,21 @@ function register_field!(key::SlotKey, T)
     return true
 end
 
-# (a callback of the type `F` that is called with a value of the type `V`, that was made before the program:
-# `note_callback(V, f)` is what the code of the program says for those that it makes)
-function register_callback!(V::Type, F::Type)
-    (V, F) in REGISTRY.callbacks && return false
-    push!(REGISTRY.callbacks, (V, F))
-    REGISTRY.version = registry_version(REGISTRY)
-    return true
-end
+# (what is the same in every process for a kind, which is a `Symbol` or a type: the `hash` of a symbol is not)
+kind_hash(kind::Symbol) = hash(String(kind))
+kind_hash(@nospecialize(kind)) = type_hash(kind)
 
-# (a type that a `call_over_noted` of the kind is made over: see noted.jl)
-function register_noted!(kind::Symbol, T::Type)
+# (a type that is said to be one that the program has, of a kind: a type that a `call_over_noted` of the kind is made over
+# (see noted.jl), or a callback of the type `F` that is called with a value of the type `V`, that was made before the
+# program: `note_callback(V, f)` is what the code of the program says for those that it makes)
+function register_noted!(@nospecialize(kind), T::Type)
     list = get!(Vector{Type}, REGISTRY.noted, kind)
     any(y -> y === T || y == T, list) && return false
     push!(list, T)
     REGISTRY.version = registry_version(REGISTRY)
     return true
 end
+register_callback!(V::Type, F::Type) = register_noted!(V, F)
 
 function register_embedded!(key::SlotKey)
     key in REGISTRY.embedded && return false
@@ -121,14 +117,14 @@ struct Registered
     returns::Vector{Tuple{Any,Any}}
     fields::Dict{SlotKey,Any}
     embedded::Set{SlotKey}
-    callbacks::Vector{Tuple{Type,Type}}
-    noted::Dict{Symbol,Vector{Type}}
+    noted::Dict{Any,Vector{Type}}
 end
 
 function Registered(r::Registry = REGISTRY)
-    return Registered(r.version,
-                      unique!(vcat(DEFAULT_DISPATCH_CANDIDATES, r.show)),
-                      unique!(vcat(DEFAULT_SHOW_CANDIDATES, r.show)),
-                      copy(r.family), copy(r.returns), copy(r.fields), copy(r.embedded), copy(r.callbacks),
-                      Dict{Symbol,Vector{Type}}(k => copy(v) for (k, v) in r.noted))
+    Registered(r.version,
+        unique!(vcat(DEFAULT_DISPATCH_CANDIDATES, r.show)),
+        unique!(vcat(DEFAULT_SHOW_CANDIDATES, r.show)),
+        copy(r.family), copy(r.returns), copy(r.fields), copy(r.embedded),
+        Dict{Any,Vector{Type}}(k => copy(v) for (k, v) in r.noted)
+    )
 end

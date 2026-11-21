@@ -164,7 +164,8 @@ end
 # `Vector{Pair{Int,Any}}`) calls them with an unknown call, which would be made over all of the program's functions,
 # including `string`, `iterate` and others it passes around, which may not compile for the value. So the code that stores
 # them says what it stores (`note_callback(T, f)`: `f` is called with a `T`), and the code that calls them says so
-# (`call_callback(T, f, args...)`, which is `f(args...)`): the call is made over the callbacks of `T` only.
+# (`call_callback(T, f, args...)`, which is `f(args...)`): the call is made over the callbacks of `T` only. They are kept in
+# the store of the types that the program has, by kind, where the kind is `T` (see noted.jl).
 
 """
     StaticRuntime.note_callback(T, f)
@@ -229,10 +230,21 @@ end
 
 # (whether the program says that it makes functions of the type `F`, for any type of value. A loop: see `meets_any`)
 function noted_for_any(cl::ClosureState, @nospecialize(F))
-    for cb in cl.callbacks
-        cb[2] === F && return true
+    for (kind, fs) in cl.noted
+        kind isa Type && F in fs && return true # (a kind that is a symbol is not a callback)
     end
     return false
+end
+
+# whether any callback is known (the kinds that are types: see `noted_for_any`)
+has_callbacks(cl::ClosureState) = any(kv -> kv[1] isa Type && !isempty(kv[2]), cl.noted)
+
+# say that the program has a type of the kind; whether it was not there
+function add_noted!(cl::ClosureState, @nospecialize(kind), T::Type)
+    list = get!(Vector{Type}, cl.noted, kind)
+    T in list && return false
+    push!(list, T)
+    return true
 end
 
 # At the end of a pass: the listeners that the code is to compare with in the next, from all that were found; whether
@@ -246,7 +258,7 @@ function update_listeners!(c::Compilation)
         compared = length(fs) <= MAX_LISTENER_OBJECTS ? Tuple(fs) : ()
         if isempty(compared) || truncated
             for f in fs
-                (V, typeof(f)) in cl.callbacks || (push!(cl.callbacks, (V, typeof(f))); changed = true)
+                add_noted!(cl, V, typeof(f)) && (changed = true)
             end
         end
         old = get(cl.listener_objects, V, nothing)
@@ -288,11 +300,11 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(note_cal
     if length(arginfo.argtypes) == 3
         V = callback_value_type(arginfo.argtypes[2])
         F = CC.widenconst(arginfo.argtypes[3])
-        seen = compilation().closures.seen_callbacks
+        seen = compilation().closures.seen_noted
         if V !== nothing && F isa DataType && isconcretetype(F) && !(F <: Core.Builtin)
             (V, F) in seen || push!(seen, (V, F))
             f = frame_findings(sv)
-            f === nothing || (V, F) in f.callbacks || push!(f.callbacks, (V, F))
+            f === nothing || (V, F) in f.noted || push!(f.noted, (V, F))
         end
     end
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
@@ -323,7 +335,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
         # reached. A value type with too many listeners to compare has their types among the callbacks)
         cl = c.closures
         uncompared(F) = !(F isa DataType && isconcretetype(F) && cl.listeners_complete && F in cl.listener_types &&
-                          (V !== nothing ? !((V, F) in cl.callbacks) : (!isempty(cl.all_listeners) && !noted_for_any(cl, F))))
+                          (V !== nothing ? !(F in get(cl.noted, V, Type[])) : (!isempty(cl.all_listeners) && !noted_for_any(cl, F))))
         if T isa Union || (T isa DataType && isconcretetype(T))
             members = Base.uniontypes(T)
             left = filter(uncompared, members)
@@ -334,7 +346,7 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(call_cal
             end
         end
         if unknown_function_type(T) && V !== nothing
-            candidates = Type[F for (W, F) in c.closures.callbacks if W === V]
+            candidates = copy(get(c.closures.noted, V, Type[]))
             # (none registered for `T`: nothing is called, as far as is known; the compilation is made again if the code
             # that is inferred registers one)
             isempty(candidates) && return CC.Future{CC.CallMeta}(CC.CallMeta(Union{}, Union{}, CC.EFFECTS_THROWS, CC.NoCallInfo()))
@@ -362,10 +374,9 @@ function CC.edge_matches_sv(interp::OverridesInterpreter, frame::CC.AbsIntState,
                             hardlimit::Bool, sv::CC.AbsIntState)
     c = compilation()
     cl = c.closures
-    callbacks = cl.callbacks
     if !hardlimit && sig isa DataType && isconcretetype(sig)
         depends!(c, sv, (:closures,)) # (whether the recursion is limited depends on the callbacks and listeners: see passes.jl)
-        if !(isempty(callbacks) && isempty(cl.listener_types))
+        if has_callbacks(cl) || !isempty(cl.listener_types)
             F = sig.parameters[1]
             (F in cl.listener_types || noted_for_any(cl, F)) && return false
         end

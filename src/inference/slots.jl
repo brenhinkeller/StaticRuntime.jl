@@ -742,7 +742,7 @@ function note_slots_in!(c::Compilation, @nospecialize(x))
         if k === :listener
             note_listener!(c, key[2], key[3])
         elseif k === :listener_type
-            (key[2], key[3]) in c.closures.seen_callbacks || push!(c.closures.seen_callbacks, (key[2], key[3]))
+            (key[2], key[3]) in c.closures.seen_noted || push!(c.closures.seen_noted, (key[2], key[3]))
         elseif c.slots.mode === :off
             continue # (only the listeners are looked for: see `CC.ssa_inlining_pass!`)
         else

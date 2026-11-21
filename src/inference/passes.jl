@@ -1,10 +1,10 @@
-# The passes of a compilation. Each pass infers the program with what the passes before found (functions, callbacks,
-# `@cfunction`s, the types of boxes and slots, the facts of objects) and finds more; passes are made until what is found
+# The passes of a compilation. Each pass infers the program with what the passes before found (functions, callbacks and
+# other noted types, `@cfunction`s, the types of boxes and slots, the facts of objects) and finds more; passes are made until what is found
 # is what was used. `begin_pass!` starts a pass, `run_passes` loops, and `drive_inference!` runs the analyses after each
 # inference of the program. Each pass keeps what the passes before inferred that is still right (`invalidate_stale!`,
 # below).
 
-# The most passes made for functions, callbacks, `@cfunction`s and boxes (slot passes are counted by `SLOT_PASS_LIMIT`).
+# The most passes made for functions, callbacks and noted types, `@cfunction`s and boxes (slot passes are counted by `SLOT_PASS_LIMIT`).
 const MAX_FUNCTION_PASSES = 8
 
 # The most passes made again without the slot types that the code that failed read (see `implicated_slot_keys`), before
@@ -65,7 +65,7 @@ end
 compile_passes(compile; strict::Bool = true) = with_compilation(c -> (run_passes(c, compile), c); strict)
 
 # Each pass runs `compile(c)`. Another pass is made while one finds what the pass was not made with: new functions for
-# unknown calls (if the pass failed, is not strict, or made a call over the candidates), callbacks, `@cfunction`s, box
+# unknown calls (if the pass failed, is not strict, or made a call over the candidates), callbacks and noted types, `@cfunction`s, box
 # types, listeners, or different slot types (`SlotsChanged`). There are two budgets: `SLOT_PASS_LIMIT` for slot passes
 # (beyond it the program is compiled without slot types) and `MAX_FUNCTION_PASSES` for the others.
 function run_passes(c::Compilation, compile)
@@ -116,14 +116,13 @@ function run_passes(c::Compilation, compile)
         newc = [x for x in cl.seen_cfunctions if !any(r -> r.ftype === x[1] && r.args == x[2] && r.ret === x[3], cl.cfunction_roots)]
         # (a pass cut short by the slots did not get far enough to tell whether the functions it found are needed)
         more_functions = cl.dispatch_requested && !isempty(new) && (failure !== nothing || had_failure || !strict || cl.union_used || cl.box_function_seen)
-        newcb = Tuple{Type,Type}[x for x in cl.seen_callbacks if !(x in cl.callbacks)]
-        more_callbacks = cl.callback_call_requested && !isempty(newcb)
-        # (types that the code notes for a kind that a `call_over_noted` of this pass was made for: another pass is made over them)
-        newn = Tuple{Symbol,Type}[x for x in cl.seen_noted if x[1] in cl.asked_noted && !(x[2] in get(cl.noted, x[1], Type[]))]
-        more_noted = !isempty(newn)
+        # (types that the code says that the program has: callbacks, if a call of a callback was inferred, and those of a kind of
+        # `call_over_noted` that was asked for. Another pass is made over them)
+        newcb = Tuple{Any,Type}[x for x in cl.seen_noted if !(x[2] in get(cl.noted, x[1], Type[])) && (x[1] isa Symbol ? x[1] in cl.asked_noted : cl.callback_call_requested)]
+        more_callbacks = !isempty(newcb)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
         more_listeners = update_listeners!(c)
-        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners || more_noted
+        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners
         retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + SLOT_NARROWINGS + 2 && wanted
         trace_on() && trace_pass(c, pass, started, slots_retry, had_failure, failure, new, more_functions, newcb, more_listeners, more_boxes, newc, wanted, retry, function_passes)
         if retry
@@ -132,9 +131,8 @@ function run_passes(c::Compilation, compile)
                     T === Any ? delete!(bx.types, k) : (bx.types[k] = T)
                 end
             end
-            more_callbacks && append!(cl.callbacks, newcb)
-            for (k, T) in newn
-                push!(get!(Vector{Type}, cl.noted, k), T)
+            for (k, T) in newcb
+                add_noted!(cl, k, T)
             end
             more_functions && append!(cl.functions, new)
             for x in newc

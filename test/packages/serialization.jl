@@ -99,5 +99,23 @@ end
         run(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $code`)
         read(path)
     end
-    @test length(here) == length(there)
+    # (the name of the function of the program has a number that counts the programs that were made: `static_main_7`, `static_main_12`)
+    function normalized_length(bytes)
+        pattern = codeunits("static_main_")
+        n, i = 0, 1
+        while i <= length(bytes)
+            if i + length(pattern) <= length(bytes) && view(bytes, i:(i + length(pattern) - 1)) == pattern
+                n += length(pattern) + 1
+                i += length(pattern)
+                while i <= length(bytes) && UInt8('0') <= bytes[i] <= UInt8('9')
+                    i += 1
+                end
+            else
+                n += 1
+                i += 1
+            end
+        end
+        return n
+    end
+    @test normalized_length(here) == normalized_length(there)
 end

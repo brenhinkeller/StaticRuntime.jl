@@ -1,7 +1,7 @@
 # Types that the program notes, for code that reads a value of any of them (`note_type` and `call_over_noted`, `src/inference/noted.jl`): what `deserialize` is made of. The code that makes the values says what types it has, the code that reads
 # them is made over those, and a program that does not use it has nothing of it.
 
-using StaticRuntime: note_type, call_over_noted, add_noted_types!
+using StaticRuntime: note_type, call_over_noted
 
 # a reader over the types of `U`: a number of the type that the `n`th of them is
 @generated function noted_pick(::Val{U}, n::Int) where {U}
@@ -20,10 +20,7 @@ noted_second() = (v = call_over_noted(:picked, noted_pick, opaque(2)); println(t
     @test startswith(out, "Int64 20")
     out = compiled_stdout(() -> (noted_second(); noted_note_types(); 0))
     @test startswith(out, "Int64 20")
-    # a type that is registered is one too
-    add_noted_types!(:picked_registered, Int8)
-    out = compiled_stdout(() -> (v = call_over_noted(:picked_registered, noted_pick, opaque(1)); println(typeof(v), " ", v); 0))
-    @test startswith(out, "Int8 10")
+    # (a type that is registered is one too: that is tested with `deserialize`, in a process of its own (`packages/serialization_streams.jl`): what is registered is the registry of the process, which `state.jl` has a version of that is the same in every process)
     # nothing is left in a program that notes types and does not read them: it is the program that does not note them
     plain = filesize(compile_main(() -> opaque(7)))
     @test filesize(compile_main(() -> (noted_note_types(); opaque(7)))) == plain

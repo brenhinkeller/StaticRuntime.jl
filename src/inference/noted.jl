@@ -1,5 +1,15 @@
-# Types that the program says that it has, for code whose result can be of any of them: what `deserialize` reads (a value of
-# the type that the stream says) is one.
+# The types that the program says that it has, by kind, for code whose result or callee can be of any of them. One store
+# (`ClosureState.noted`, registered in `Registry.noted`, kept per method in `InferenceFindings.noted`) holds two uses of it:
+#
+# * a kind that is a type: the callbacks (closures.jl). The kind is the type of the value that they are called with, the types
+#   are the types of the functions, and `call_callback` makes an unknown call over them;
+# * a kind that is a `Symbol`: what is here, for code whose result is of any of the types, as what `deserialize` reads (a value of
+#   the type that the stream says). `call_over_noted` gives them to a function that makes the result.
+#
+# They are found, adopted by the next pass, and invalidated the same way (see `run_passes`). What differs is when another pass is
+# made over a new type (for a callback: whenever a call of a callback was inferred; for a symbol: when a `call_over_noted` of that
+# kind was) and what a method that read them depends on (`:closures`, for the callbacks, with the functions and the listeners;
+# `(:noted, kind)` for a symbol).
 #
 # The code that makes the values says so, with `note_type(kind, T)`, and the code that reads them is made over those types,
 # with `call_over_noted(kind, f, args...)`, which is `f(Val{U}(), args...)` for `U`, the union of the types that were noted
@@ -37,10 +47,10 @@ compiling.
 add_noted_types!(kind::Symbol, types::Type...) = (for T in types; register_noted!(kind, T); end; nothing)
 
 # the types of the kind, as the union that a call is made over
-noted_union(cl::ClosureState, kind::Symbol) = Union{get(cl.noted, kind, Type[])...}
+noted_union(cl::ClosureState, @nospecialize(kind)) = Union{get(cl.noted, kind, Type[])...}
 
 # what a question about the kind has as its answer (a set: the order that the types were found in does not matter)
-function noted_answer(cl::ClosureState, kind::Symbol)
+function noted_answer(cl::ClosureState, @nospecialize(kind))
     h = UInt(0)
     for T in get(cl.noted, kind, Type[]); h += type_hash(T); end
     return hash(length(get(cl.noted, kind, Type[])), h)
