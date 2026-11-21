@@ -123,6 +123,80 @@ end
 
 @device_override Base.atexit(f::Function) = static_atexit(f)
 
+# `@time`, `@timed` and `@timev` (and `time_print`): the time is measured, and what Julia counts of the collector and the
+# compiler is not: the heap does not count the bytes of each allocation, and nothing is compiled when the program runs. So
+# the counters are zero, and `@time` writes only the seconds (`  0.000012 seconds`), and `@timed` has `bytes = 0`,
+# `gctime = 0`, `compile_time = 0`. (`@allocated` needs the bytes, and is not supported; `@allocations` is -1.)
+@generated zero_gc_num() = Expr(:call, Base.GC_Num, (:(zero($(fieldtype(Base.GC_Num, i)))) for i in 1:fieldcount(Base.GC_Num))...)
+@device_override Base.gc_num() = zero_gc_num()
+@device_override Base.cumulative_compile_timing(b::Bool) = nothing
+@device_override Base.cumulative_compile_time_ns() = (UInt64(0), UInt64(0))
+@device_override Base.Threads.lock_profiling(b::Bool) = nothing
+# The number of allocations is not zero but -1, which `@allocations` returns to the program: 0 would be taken to be an answer
+# (`@allocations f() == 0` would be true for a function that allocates), and -1 can only be taken to be none. `time_print`
+# does not write what is counted.
+@device_override Base.gc_alloc_count(diff::Base.GC_Diff) = -1
+@device_override function Base.time_print(io::IO, elapsedtime, bytes = 0, gctime = 0, allocs = 0, lock_conflicts = 0, compile_time = 0, recompile_time = 0, newline = false; msg::Union{String,Nothing} = nothing)
+    timestr = Base.Ryu.writefixed(Float64(elapsedtime / 1e9), 6)
+    if msg isa String
+        print(io, msg, ": ")
+    else
+        print(io, length(timestr) < 10 ? (" "^(10 - length(timestr))) : "")
+    end
+    print(io, timestr, " seconds", newline ? "\n" : "")
+    nothing
+end
+
+# Libraries opened when the program runs (`Libdl.dlopen`, `dlsym`, `dlclose`): Julia's functions are those of libjulia
+# (`jl_load_dynamic_library`, which also adds the extension and searches `DL_LOAD_PATH`), so these are the C library's
+# `dlopen`, `dlsym` and `dlclose`. The flags of Libdl are Julia's own numbers, which are translated to those of the system.
+# Not kept: `DL_LOAD_PATH`, `@executable_path/` in a name. The library is tried as it is and then with the extension.
+function dl_flags(flags::UInt32)
+    f = Cint(0)
+    @static if Sys.isapple()
+        flags & Runtime.Libdl.RTLD_LAZY != 0 && (f |= 0x1)
+        flags & Runtime.Libdl.RTLD_NOW != 0 && (f |= 0x2)
+        flags & Runtime.Libdl.RTLD_LOCAL != 0 && (f |= 0x4)
+        flags & Runtime.Libdl.RTLD_GLOBAL != 0 && (f |= 0x8)
+        flags & Runtime.Libdl.RTLD_NOLOAD != 0 && (f |= 0x10)
+        flags & Runtime.Libdl.RTLD_NODELETE != 0 && (f |= 0x80)
+        flags & Runtime.Libdl.RTLD_FIRST != 0 && (f |= 0x100)
+    else
+        flags & Runtime.Libdl.RTLD_LAZY != 0 && (f |= 0x1)
+        flags & Runtime.Libdl.RTLD_NOW != 0 && (f |= 0x2)
+        flags & Runtime.Libdl.RTLD_NOLOAD != 0 && (f |= 0x4)
+        flags & Runtime.Libdl.RTLD_DEEPBIND != 0 && (f |= 0x8)
+        flags & Runtime.Libdl.RTLD_GLOBAL != 0 && (f |= 0x100)
+        flags & Runtime.Libdl.RTLD_NODELETE != 0 && (f |= 0x1000)
+    end
+    return f
+end
+
+@device_override function Runtime.Libdl.dlopen(s::AbstractString, flags::Integer = Runtime.Libdl.default_rtld_flags; throw_error::Bool = true)
+    f = dl_flags(UInt32(flags))
+    h = ccall(:dlopen, Ptr{Cvoid}, (Cstring, Cint), s, f)
+    ext = string(".", Runtime.Libdl.dlext)
+    h == C_NULL && !endswith(s, ext) && (h = ccall(:dlopen, Ptr{Cvoid}, (Cstring, Cint), string(s, ext), f))
+    if h == C_NULL
+        throw_error || return nothing
+        msg = ccall(:dlerror, Cstring, ())
+        error(msg == C_NULL ? "could not load library" : unsafe_string(msg))
+    end
+    return h
+end
+
+@device_override function Runtime.Libdl.dlsym(hnd::Ptr, s::Union{Symbol,AbstractString}; throw_error::Bool = true)
+    hnd == C_NULL && throw(ArgumentError("NULL library handle"))
+    p = ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), hnd, s)
+    if p == C_NULL
+        throw_error || return nothing
+        error("could not load symbol \"", s, "\"")
+    end
+    return p
+end
+
+@device_override Runtime.Libdl.dlclose(p::Ptr) = 0 == ccall(:dlclose, Cint, (Ptr{Cvoid},), p)
+
 # the path of a `LazyLibrary`, as the compiler has it (see `host_dlpath` in `runtime/libraries.jl`)
 @device_override Runtime.Libdl.dlpath(lib::Runtime.Libdl.LazyLibrary) = Runtime.host_dlpath(lib)
 
@@ -153,3 +227,35 @@ end
     end
     return A
 end
+
+# The memory of the machine (`Sys.total_memory()`, `Sys.free_memory()`, ...), which Base asks libuv for: the total from
+# `sysctl` (macOS) or `sysconf` (Linux); what is free as libuv has it, the free pages of Mach's statistics (macOS) or
+# `MemAvailable` of `/proc/meminfo` (Linux). The limit of a control group (`uv_get_constrained_memory`, Linux) is not
+# read: the total is the physical memory.
+@static if Sys.isapple()
+    function physical_memory()
+        v = Ref{UInt64}(0)
+        n = Ref{Csize_t}(sizeof(UInt64))
+        ok = ccall(:sysctlbyname, Cint, (Cstring, Ptr{UInt64}, Ptr{Csize_t}, Ptr{Cvoid}, Csize_t), "hw.memsize", v, n, C_NULL, 0) == 0
+        return ok ? v[] : UInt64(0)
+    end
+    function free_memory_bytes()
+        info = zeros(UInt32, 40) # (a `vm_statistics_data_t`: the number of free pages is its first field)
+        count = Ref{UInt32}(15)  # (`HOST_VM_INFO_COUNT`)
+        host = ccall(:mach_host_self, UInt32, ())
+        ok = GC.@preserve info ccall(:host_statistics, Cint, (UInt32, Cint, Ptr{UInt32}, Ptr{UInt32}), host, 2, pointer(info), count) == 0
+        return ok ? UInt64(info[1]) * UInt64(ccall(:sysconf, Clong, (Cint,), 29)) : UInt64(0) # (2: `HOST_VM_INFO`; 29: `_SC_PAGESIZE`)
+    end
+else
+    physical_memory() = UInt64(ccall(:sysconf, Clong, (Cint,), 85)) * UInt64(ccall(:sysconf, Clong, (Cint,), 30)) # (`_SC_PHYS_PAGES`, `_SC_PAGESIZE`)
+    function free_memory_bytes()
+        for line in eachline("/proc/meminfo")
+            startswith(line, "MemAvailable:") && return parse(UInt64, split(line)[2]) * UInt64(1024)
+        end
+        return UInt64(ccall(:sysconf, Clong, (Cint,), 86)) * UInt64(ccall(:sysconf, Clong, (Cint,), 30)) # (`_SC_AVPHYS_PAGES`)
+    end
+end
+@device_override Base.Sys.total_physical_memory() = physical_memory()
+@device_override Base.Sys.total_memory() = physical_memory()
+@device_override Base.Sys.free_physical_memory() = free_memory_bytes()
+@device_override Base.Sys.free_memory() = free_memory_bytes()

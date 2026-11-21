@@ -47,6 +47,7 @@ include("inference/redirect.jl")        # calls replaced by other calls while th
 include("inference/dispatch.jl")        # calls on abstract types, split over the types that values can have
 include("inference/tuples.jl")          # tuples of a few kinds, splats, fields by an index that is not known
 include("inference/closures.jl")        # calls of functions that are not known: candidates, callbacks, listeners
+include("inference/noted.jl")           # types that the program notes, for the code that reads a value of any of them (`deserialize`)
 include("inference/boxes.jl")           # the types of what the boxes of closures hold
 include("inference/slots.jl")           # the types of what slots of abstract types (`Vector{Any}`, `x::Any`) hold
 include("inference/types_as_values.jl") # slots that hold types (`Vector{Type}`), and keywords that are types
@@ -374,7 +375,7 @@ end
 
 export compile_executable, compile_shlib, static_code_llvm, static_code_typed, static_code_native,
        static_llvm_module, @device_override
-export UnsupportedCodeError, InferenceError, add_show_candidates!, add_dispatch_candidates!, @assume, @assume_field, @assume_field_embedded
+export UnsupportedCodeError, InferenceError, add_show_candidates!, add_dispatch_candidates!, add_deserialize_types!, @assume, @assume_field, @assume_field_embedded
 export StaticIO, StaticFile, STDIN, STDOUT, STDERR
 export static_result, static_status, static_status_batch, undefined_symbols, allocation_sites, @static_test
 export gc_live_bytes, gc_collections, gc_heap_bytes

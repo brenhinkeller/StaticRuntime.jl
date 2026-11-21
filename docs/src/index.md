@@ -90,7 +90,9 @@ says whether `lorenz` changes its first argument: `ODEProblem(f, u0, tspan, p)` 
 
 * **The language and Base.** Code that allocates (`Vector`, `Dict`, `Set`, `String`, structs, closures, boxed values),
   `try`/`catch`/`finally`, `deepcopy`, `IdDict`, symbols made when the program runs, non-`const` globals, tasks that run
-  to completion (`@async`, `Channel`, `wait`, `fetch`), `atexit`, finalizers, and `@cfunction` callbacks.
+  to completion (`@async`, `Channel`, `wait`, `fetch`), `atexit`, finalizers, and `@cfunction` callbacks; `Rational`,
+  `Float16`, `Int128`, `BigInt` and `BigFloat`; `Enum`s and `@kwdef` structs; sorting, reductions with `dims`, views,
+  `CartesianIndices`, the `Iterators`; `Threads.@threads` (on one thread), atomics, locks, `Event`s and semaphores.
 * **Input and output.** `print`, `println`, `show`, `display` and `text/plain` of numbers, strings, containers, structs
   and matrices, as Julia writes them; `printf` and `@printf`; files, the standard streams and the file system; colors and
   styled strings (see [Input and output](@ref)).

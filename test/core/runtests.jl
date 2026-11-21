@@ -26,6 +26,7 @@ end
 @testset verbose=true "Inference" begin
     @testset verbose=true "Dispatch" include_timed("dispatch.jl")
     @testset verbose=true "Slots" include_timed("slots.jl")
+    @testset verbose=true "Noted types" include_timed("noted.jl")
     @testset verbose=true "@assume" include_timed("assume.jl")
     @testset verbose=true "Functions" include_timed("closures.jl")
 end

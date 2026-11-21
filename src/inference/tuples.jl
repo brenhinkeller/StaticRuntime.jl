@@ -214,6 +214,42 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.isd
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
 end
 
+# `fieldtype(T, i)` of a type that is known, by an index or a name that is not: Julia compiles it as a read of the field
+# types of the type object (`T.types[i]`), which a type in the binary does not have (`field_cut`: a list of `nothing`s
+# of that length, so that the read would give a wrong answer, silently). It is made a call of `static_fieldtype`, which
+# compares the index or the name with each field's, each branch a constant type. (`fieldtype` of a type that is not
+# known is a call of the runtime, `jl_f_fieldtype`, which is refused.)
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.fieldtype), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if 3 <= length(argtypes) <= 4 && argtypes[2] isa Core.Const && !(argtypes[3] isa Core.Const)
+        T = argtypes[2].val
+        kind = CC.widenconst(argtypes[3])
+        if T isa DataType && !isabstracttype(T) && Base.datatype_fieldcount(T) isa Int && Base.datatype_fieldcount(T) <= 64 &&
+           (kind === Int || kind === Symbol)
+            return redirect(interp, static_fieldtype, Any[Val(T)], 3, arginfo, si, vtypes, sv; to = 3)
+        end
+    end
+    return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+end
+
+@generated function static_fieldtype(::Val{T}, i::Int) where {T}
+    body = Expr(:block)
+    for k in 1:fieldcount(T)
+        push!(body.args, :(i == $k && return $(QuoteNode(fieldtype(T, k)))))
+    end
+    push!(body.args, :(throw(BoundsError($T, i))))
+    return body
+end
+@generated function static_fieldtype(::Val{T}, name::Symbol) where {T}
+    body = Expr(:block)
+    for k in 1:fieldcount(T)
+        push!(body.args, :(name === $(QuoteNode(fieldname(T, k))) && return $(QuoteNode(fieldtype(T, k)))))
+    end
+    push!(body.args, :(throw(FieldError($T, name))))
+    return body
+end
+
 ## Splats
 
 # A vector literal with a splat of something that is not a tuple: the call of `splat_vector` with the parts, where Julia

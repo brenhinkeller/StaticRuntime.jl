@@ -30,11 +30,15 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 
 **Standard libraries** (a survey of them is kept in `test/packages`, and what does not work, and what happens then, in `test/core/limitations.jl`)
 
-* Work: Base64 (`base64encode` of strings, bytes, numbers, arrays of numbers and what a function writes, `base64decode`, and `Base64EncodePipe` and `Base64DecodePipe` of an `IOBuffer`), CRC32c, SHA, UUIDs (`uuid4()` too), `Random.RandomDevice`, Mmap (`Mmap.mmap(path, Vector{T}, dims, offset)`: the memory is not unmapped before the program ends), Statistics, Random, Printf, Logging (`NullLogger`), Dates, SparseArrays (with the factorizations), most of LinearAlgebra (`exp`, `sqrt`, `log` and powers of a matrix, `eigen`, `svd`, `qr`,
+* Work: Base64 (`base64encode` of strings, bytes, numbers, arrays of numbers and what a function writes, `base64decode`, and `Base64EncodePipe` and `Base64DecodePipe` of an `IOBuffer`), CRC32c, SHA, UUIDs (`uuid4()` too), `Random.RandomDevice`, Mmap (`Mmap.mmap(path, Vector{T}, dims, offset)`: the memory is not unmapped before the program ends), Statistics, Random, Printf, Logging (`NullLogger`), Libdl (`dlopen`, `dlsym` and `dlclose` of libraries opened when the program runs, not `DL_LOAD_PATH`), Future (`copy!`; not `randjump`), Serialization (`serialize` writes the bytes that Julia writes, and `deserialize` reads a value of one of the types that the program has: see [Serialization](@ref)), Dates, SparseArrays (with the factorizations), most of LinearAlgebra (`exp`, `sqrt`, `log` and powers of a matrix, `eigen`, `svd`, `qr`,
   `cholesky`, `lu`, `schur`, `ordschur`, `hessenberg`, `inv`, `det`, `\`, `opnorm`, ...), Sockets' address types, and the file system (see [The file system](@ref)).
-* Do not: `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own); `readdlm` / `writedlm`; `@time` and `@allocated` (use `@elapsed`);
+* Do not: `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own); `readdlm` / `writedlm`; `@allocated` (the heap does not count the bytes of each allocation; `@allocations` gives -1); `@time` and `@timed` work, but measure only the time (the bytes, the time of the collector and of the compiler are zero, and `@time` writes only the seconds);
   `TOML.parse` (the parser keeps a `Module`); `Markdown.parse` is refused when compiling, or stops with a message when it is run (its parser needs Julia's own); `Mmap` of an open stream, and anonymous ones (only the files that are named by their path are mapped); `Test` (`@test` and `@testset`); `with_logger` with a logger other than `NullLogger`; starting other programs;
-  `base64encode` of several values of different types in one call, and `base64encode(f, args...)` of a function with arguments.
+  `base64encode` of several values of different types in one call, and `base64encode(f, args...)` of a function with arguments. Also not supported, found by a survey of Base and the standard libraries: weak references (`WeakRef`, `WeakKeyDict`); `Printf.Format` of a format
+  that the program makes (`@printf`, `@sprintf` and a constant `Format` work); `Dates.canonicalize` (a `CompoundPeriod` holds a `Vector{Period}`); `instances` of an `Enum`
+  (`show` and comparisons of one work); `TOML.print`, and `Serialization` of a value that is a type or a module in a tuple or a field (`serialize((Int, 1))`), of a `UnionAll`, or whose type is not known when compiling (see [Serialization](@ref)); `Timer` and TCP sockets (libuv's
+  loop of events); `stacktrace`, `catch_backtrace` and `current_exceptions`; `Meta.parse` and `Expr`s made when the program runs; `methods` and `which`; `Base.summarysize`; and
+  `versioninfo`.
 
 **Tasks, threads and `eval`**
 
@@ -79,6 +83,11 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * **At most 256 `try` blocks are active at once** (and 256 exceptions being handled): more prints `fatal: exception handler stack overflow`
   and exits. An exception that nothing catches prints `fatal: uncaught exception (no handler to catch it)` and exits with status 1,
   without a backtrace or the message of the exception.
+* **An exception that is caught (`catch e`) is a value of the type `Any`**, and the calls on it are made over the registered types, which the
+  exceptions of Base are not: `typeof(e)`, `e isa T` and the exceptions of your own types work, but `e.msg`, `showerror(e)` and `sprint(showerror, e)` of a
+  `BoundsError`, `KeyError`, `DomainError`, `AssertionError`, or an `ErrorException` with a message that the program makes, stop the program with a
+  `MethodError` (or are refused when compiling). A `lazy"..."` string that the program turns into a `String` is an error too (see the comment of
+  `Base.String(::LazyString)` in `src/overrides/strings.jl`).
 * **There is no stack overflow check:** infinite recursion crashes (segmentation fault) instead of throwing `StackOverflowError`.
 * **Locks do nothing** (there is one thread), and `islocked` is `false`.
 * **Files** are libc streams: `eachline` of a file closes it only when the loop reaches the end (not on `break`), `seek` and

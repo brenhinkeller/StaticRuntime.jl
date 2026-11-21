@@ -112,6 +112,9 @@ Base.@kwdef mutable struct ClosureState
     seen_functions::Vector{Type} = Type[]
     seen_functions_set::Set{Type} = Set{Type}()
     seen_callbacks::Vector{Tuple{Type,Type}} = Tuple{Type,Type}[]
+    noted::Dict{Symbol,Vector{Type}} = Dict{Symbol,Vector{Type}}()    # the types that a `call_over_noted` is made over (noted.jl): registered, and those that the passes found
+    seen_noted::Vector{Tuple{Symbol,Type}} = Tuple{Symbol,Type}[]     # found in this pass: (kind, type)
+    asked_noted::Set{Symbol} = Set{Symbol}()                          # the kinds that a `call_over_noted` of this pass was made for
     seen_cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}} = Tuple{DataType,Vector{DataType},DataType,Any}[] # (function type, argument types, result type, function)
     dispatch_requested::Bool = false                                  # an unknown call was seen
     union_used::Bool = false                                          # a call was made over the candidates
@@ -123,7 +126,7 @@ Base.@kwdef mutable struct ClosureState
     slowest::Vector{Tuple{Float64,Any,Int}} = Tuple{Float64,Any,Int}[] # (trace) (seconds, method, statements) of the slowest to optimize
 end
 function begin_pass!(cl::ClosureState)
-    empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_callbacks); empty!(cl.seen_cfunctions)
+    empty!(cl.seen_functions); empty!(cl.seen_functions_set); empty!(cl.seen_callbacks); empty!(cl.seen_cfunctions); empty!(cl.seen_noted); empty!(cl.asked_noted)
     cl.dispatch_requested = cl.union_used = cl.callback_call_requested = cl.box_function_seen = false
     cl.optimized = 0; empty!(cl.optimized_unique); empty!(cl.slowest)
     return cl
@@ -252,7 +255,7 @@ Base.@kwdef mutable struct Compilation
     trace::Trace = Trace()                                            # what `STATIC_RUNTIME_TRACE` says, read when the compilation starts
     id::Int = new_compilation_id(settings)                            # the name of this compilation's inference cache (see `purge_inferred!`)
     pass::Int = 0
-    closures::ClosureState = ClosureState(callbacks = copy(registered.callbacks)) # (callbacks registered before the program)
+    closures::ClosureState = ClosureState(callbacks = copy(registered.callbacks), noted = Dict{Symbol,Vector{Type}}(k => copy(v) for (k, v) in registered.noted)) # (callbacks registered before the program)
     boxes::BoxState = BoxState()
     slots::SlotState = SlotState(settings.slots)
     dispatch::DispatchState = DispatchState()
@@ -377,6 +380,7 @@ function closures_hash(cl::ClosureState)
     # (the listeners that the code compares with, by their identity: of this compilation)
     for (V, fs) in cl.listener_objects; h += hash(map(objectid, fs), type_hash(V)); end
     h = hash(map(objectid, cl.all_listeners), h)
+    for (kind, types) in cl.noted, T in types; h += hash(type_hash(T), hash(kind, UInt(8))); end
     return hash(length(cl.callbacks), h)
 end
 

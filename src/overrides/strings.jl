@@ -75,6 +75,10 @@ end
 # messages compiles (the messages are made, and kept as they are); one that is turned into a `String` (printed, ...) is
 # an error when the program runs, which says so. (A string that was made before, `l.str`, is the one that is given.) The
 # packages that make them make them for messages that are not shown by default (`SciMLLogging`).
+#
+# (Making the string from the types of the tuples that the program stores in the field, found as for any field of an
+# abstract type, was tried: the messages of `SciMLLogging` have parts whose `print` does not compile, and every program
+# that solves a differential equation was refused.)
 @device_override function Base.String(l::Base.LazyString)
     old = @atomic :acquire l.str
     old === nothing || return old::String
@@ -195,3 +199,11 @@ end
 const CATEGORY_ABBREVIATIONS = ("Cn", "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",
                                 "Sm", "Sc", "Sk", "So", "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co")
 @device_override Base.Unicode.category_abbrev(c::AbstractChar) = @inbounds CATEGORY_ABBREVIATIONS[Base.Unicode.category_code(c) + 1]
+
+# Whether a character can start an identifier, and be in one (`Meta.isidentifier`, which `show` of a `NamedTuple` asks of
+# the names of its fields): Base asks the parser in libjulia (`jl_id_start_char`, `jl_id_char`). These are functions of
+# the code point alone too, and are tabulated from the parser in the same way.
+const ID_START = BoolRunTable(cp -> isvalid(Char, cp) && ccall(:jl_id_start_char, Cint, (UInt32,), cp) != 0)
+const ID_CHAR = BoolRunTable(cp -> isvalid(Char, cp) && ccall(:jl_id_char, Cint, (UInt32,), cp) != 0)
+@device_override Base.Meta.is_id_start_char(c::Char) = isvalid(c) && lookup(ID_START, UInt32(c))
+@device_override Base.Meta.is_id_char(c::Char) = isvalid(c) && lookup(ID_CHAR, UInt32(c))

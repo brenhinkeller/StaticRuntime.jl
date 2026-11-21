@@ -59,6 +59,13 @@ end
       ret i64 ptrtoint (ptr @_static_symbol_texts to i64)
     }""", "texts"), UInt, Tuple{})
 
+# the same for `Base.show_sym` (see `define_symbol_names!`)
+@inline embedded_symbol_names() = Base.llvmcall(("""
+    @_static_symbol_names = extern_weak global i64
+    define i64 @names() alwaysinline {
+      ret i64 ptrtoint (ptr @_static_symbol_names to i64)
+    }""", "names"), UInt, Tuple{})
+
 # the type tag of a symbol, as the code that is compiled has it
 @generated static_symbol_tag() = :($(UInt(Runtime.object_tag(:a))))
 
@@ -161,9 +168,9 @@ end
     GC.@preserve s return static_symbol(Ptr{UInt8}(pointer(s)), sizeof(s))
 end
 
-# The C string that `show` writes for a symbol of the binary that is not `:name` (see `embedded_symbol_texts`), or 0
-function symbol_text(s::Symbol)
-    table = embedded_symbol_texts()
+# The C string that `show` writes for a symbol of the binary that is not `:name` (see `embedded_symbol_texts`), or 0;
+# or of another table of the same kind (`embedded_symbol_names()`)
+function symbol_text(s::Symbol, table::UInt = embedded_symbol_texts())
     table == 0 && return UInt(0)
     q = symbol_pointer(s)
     n = symbol_length(s)

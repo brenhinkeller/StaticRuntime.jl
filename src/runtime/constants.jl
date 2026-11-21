@@ -503,6 +503,7 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
     end
     changed |= define_symbol_table!(e)
     changed |= define_symbol_texts!(e)
+    changed |= define_symbol_names!(e)
     return changed
 end
 
@@ -628,20 +629,38 @@ end
 # parser that are not in the binary. As { count, (the address of the symbol, the address of the text as a C string)...
 # }, sorted by name.
 function define_symbol_texts!(e::ObjectEmbedder)
-    mod = e.mod
-    haskey(LLVM.globals(mod), "_static_symbol_texts") || return false
+    return define_symbol_text_table!(e.mod, "_static_symbol_texts", "static_symbol_text_",
+                                     (s, name) -> plain_symbol_name(name) ? nothing : repr(s))
+end
+
+# The keywords of Julia's syntax, which `Base.show_sym` writes as `var"..."` (`Base.Meta.keyword_syms`)
+const SYNTAX_KEYWORDS = ("baremodule", "begin", "break", "catch", "const", "continue", "do", "else", "elseif", "end",
+    "export", "false", "finally", "for", "function", "global", "if", "import", "let", "local", "macro", "module",
+    "public", "quote", "return", "struct", "true", "try", "using", "while")
+
+# The same for `Base.show_sym` (a name in code: a field of a `NamedTuple`, `name` or `var"..."`), as the table
+# `_static_symbol_names`: the symbols that are not plain names, and the keywords
+function define_symbol_names!(e::ObjectEmbedder)
+    return define_symbol_text_table!(e.mod, "_static_symbol_names", "static_symbol_name_",
+                                     (s, name) -> plain_symbol_name(name) && !(String(copy(name)) in SYNTAX_KEYWORDS) ? nothing : sprint(Base.show_sym, s))
+end
+
+# (a table { count, (symbol, text as a C string)... } of the text that `text(symbol, name)` gives for each symbol of the
+# binary, those that it gives `nothing` for left out)
+function define_symbol_text_table!(mod::LLVM.Module, table::String, prefix::String, text)
+    haskey(LLVM.globals(mod), table) || return false
     words = LLVM.Constant[]
     n = 0
     for (name, g, addr) in embedded_symbol_globals(mod)
-        plain_symbol_name(name) && continue
-        text = repr(unsafe_pointer_to_objref(Ptr{Cvoid}(addr))::Symbol)
-        bytes = LLVM.ConstantDataArray(LLVM.Int8Type(), UInt8[codeunits(text)..., 0x00])
-        tg = LLVM.GlobalVariable(mod, LLVM.value_type(bytes), "static_symbol_text_$n")
+        t = text(unsafe_pointer_to_objref(Ptr{Cvoid}(addr))::Symbol, name)
+        t === nothing && continue
+        bytes = LLVM.ConstantDataArray(LLVM.Int8Type(), UInt8[codeunits(t)..., 0x00])
+        tg = LLVM.GlobalVariable(mod, LLVM.value_type(bytes), string(prefix, n))
         LLVM.initializer!(tg, bytes)
         LLVM.constant!(tg, true)
         LLVM.linkage!(tg, LLVM.API.LLVMInternalLinkage)
         push!(words, symbol_address(g), LLVM.const_ptrtoint(tg, LLVM.Int64Type()))
         n += 1
     end
-    return define_symbol_list!(mod, "_static_symbol_texts", LLVM.Constant[i64(n), words...])
+    return define_symbol_list!(mod, table, LLVM.Constant[i64(n), words...])
 end

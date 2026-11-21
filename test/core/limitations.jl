@@ -55,7 +55,7 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
         "graphemes"                   => () -> length(collect(graphemes(opaque("ab")))),
         "titlecase of a string"       => () -> length(titlecase(opaque("hello world"))),
         # the system, and the state of the compiling Julia
-        "@time"                       => () -> (@time opaque(1) + 1; 0),
+        "@allocated"                  => () -> (@allocated zeros(opaque(100))) > 0 ? 1 : 0,
         "TOML.parse"                  => () -> length(TOML.parse(opaque("a = 1"))),
     ]
     for (name, f) in cases
@@ -65,6 +65,18 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
             @test occursin(REFUSAL, string(detail))
         end
     end
+end
+
+# `@time` and `@timed` measure the time, and not what the collector and the compiler of Julia count: the bytes, the time of the collector and of the compiler are zero
+@testset "@time and @timed" begin
+    out = compiled_stdout(() -> (x = @time opaque(3) * 2; y = @time "label" opaque(4) + 1; z = @timed opaque(5); println(z.value, " ", z.bytes, " ", z.gctime, " ", z.compile_time); x + y))
+    lines = split(out, '\n')
+    @test occursin(r"^ +\d+\.\d{6} seconds$", lines[1])
+    @test occursin(r"^label: \d+\.\d{6} seconds$", lines[2])
+    @test lines[3] == "5 0 0.0 0.0"
+    @test lines[4] == "11"
+    # (the number of allocations is -1, not 0: a program that asks whether a function does not allocate does not get a yes)
+    @test compiled_stdout(() -> @allocations zeros(opaque(100))) == "-1\n"
 end
 
 # Starting another program: `run`, and the types of the processes of libuv, are refused when compiling (compiled by a process of its own: see above)

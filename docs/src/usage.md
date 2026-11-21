@@ -45,9 +45,11 @@ name = Printf.@sprintf("%s-%03d.txt", "run", 7)
 ### The file system
 
 `stat` (and `isfile`, `isdir`, `ispath`, `filesize`, `mtime`, `filemode`), `mkdir`, `rm` (with `force` and `recursive`), `readdir` (with `join` and `sort`), `mv`, `cp` (of a file or a directory), `pwd`, `cd`,
-`realpath`, `homedir`, `tempdir`, `tempname`, `mktemp`, `mktempdir` (and with a function), `ENV[name] = value` and `delete!(ENV, name)`, and `Libc.getpid` are done with the functions of the C library. What is different: an
-error is a `SystemError` with the message of `strerror`, where Base's is an `IOError` that has the code of libuv (a program that catches `IOError` for a missing file catches `SystemError` here), and `symlink`,
-`chmod`, `touch`, `mmap` and starting other programs (`run`, ``read(`cmd`, String)``) are not supported. `Threads.@threads` runs the loop on the one thread, in order.
+`realpath`, `homedir`, `tempdir`, `tempname`, `mktemp`, `mktempdir` (and with a function), `chmod` (and `recursive`), `symlink` and `readlink`, `walkdir`, `ENV[name] = value` and `delete!(ENV, name)`,
+`Libc.getpid`, `gethostname`, `Libc.strftime`, and `Sys.total_memory`, `Sys.free_memory` and their `physical` forms are done with the functions of the C library (the memory is not limited by a
+Linux control group, as libuv reads it). What is different: an
+error is a `SystemError` with the message of `strerror`, where Base's is an `IOError` that has the code of libuv (a program that catches `IOError` for a missing file catches `SystemError` here), and `touch`, `mmap` of an open stream and starting other programs
+(`run`, ``read(`cmd`, String)``) are not supported; `walkdir` walks the whole tree before the loop starts (its `Channel` is filled by a task that runs to its end). `Threads.@threads` runs the loop on the one thread, in order.
 
 ### Files
 
@@ -234,3 +236,22 @@ end
 * **The type of a field**: `@assume_field S.name::T` says that a field of the type `Any` (or another that is not concrete) of the struct `S` holds a `T` where it is read, and the read is a `typeassert`.
 * Both are given where the module is initialized (`__init__`), as `add_dispatch_candidates!` is: they are kept for the session, and not by what is precompiled. A package extension is the place. What is stated is a number in the key of
   what is inferred, so a change of it is a new inference.
+
+## Serialization
+
+`serialize(io, x)` of a value whose type is known when compiling writes the bytes that Julia writes (numbers, strings, tuples, arrays, `Dict`s and `Set`s, structs, objects that refer to themselves, ranges, `BigInt`), so a stream can be read by Julia, and by a program.
+
+`deserialize(io)` gives a value of the type that the stream says, which a program can not make when it runs: it is made over the types that the program has. Those are the types that the program serializes (found when compiling, with the types of what they hold: the fields of a struct, the elements of an array, the keys and values of a `Dict`), and the ones that are registered with `add_deserialize_types!`, for a stream that another program wrote:
+
+```julia
+struct Point; x::Float64; y::Float64; end
+add_deserialize_types!(Point, Vector{Point})     # before compiling
+
+function main()
+    p = deserialize(open("points.bin"))::Vector{Point}
+    ...
+end
+```
+
+What is read is, for the compiler, a value of one of those types (a union that Julia splits: `::T` after it says which, and is how a program that has many types is written). A stream with a value of another type stops the program, with a message that says so. A `Vector{Any}` (or a field of an abstract type) holds values of the types that are registered: register them too (`add_deserialize_types!(Vector{Any}, Int, String)`). Not supported: a `Symbol` that is read, tuples of more than 255 elements, `Union` and `UnionAll` values, modules, functions and `Expr`; and `serialize(s::Serializer, x)` of a `Serializer` that is made by the program (the types that it writes are found from `serialize(io, x)`). A program that does not use Serialization has nothing of it.
+

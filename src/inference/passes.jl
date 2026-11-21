@@ -118,9 +118,12 @@ function run_passes(c::Compilation, compile)
         more_functions = cl.dispatch_requested && !isempty(new) && (failure !== nothing || had_failure || !strict || cl.union_used || cl.box_function_seen)
         newcb = Tuple{Type,Type}[x for x in cl.seen_callbacks if !(x in cl.callbacks)]
         more_callbacks = cl.callback_call_requested && !isempty(newcb)
+        # (types that the code notes for a kind that a `call_over_noted` of this pass was made for: another pass is made over them)
+        newn = Tuple{Symbol,Type}[x for x in cl.seen_noted if x[1] in cl.asked_noted && !(x[2] in get(cl.noted, x[1], Type[]))]
+        more_noted = !isempty(newn)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
         more_listeners = update_listeners!(c)
-        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners
+        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners || more_noted
         retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + SLOT_NARROWINGS + 2 && wanted
         trace_on() && trace_pass(c, pass, started, slots_retry, had_failure, failure, new, more_functions, newcb, more_listeners, more_boxes, newc, wanted, retry, function_passes)
         if retry
@@ -130,6 +133,9 @@ function run_passes(c::Compilation, compile)
                 end
             end
             more_callbacks && append!(cl.callbacks, newcb)
+            for (k, T) in newn
+                push!(get!(Vector{Type}, cl.noted, k), T)
+            end
             more_functions && append!(cl.functions, new)
             for x in newc
                 push!(cl.cfunction_roots, Runtime.CFunctionRoot(length(cl.cfunction_roots) + 1, x[1], x[2], x[3]))
@@ -237,6 +243,7 @@ function current_answer(c::Compilation, q::Tuple)
     k === :types_empty && return isempty(c.slots.types)              # whether no slot has types
     k === :type_values && return c.answers.type_values               # the types that the slots of types hold (a call on a type that is not known is made over them)
     k === :universe && return c.answers.universe                     # the types that a call over an `Any` is made over, other than those registered
+    k === :noted && return noted_answer(c.closures, q[2])            # the types that a `call_over_noted` of the kind is made over (noted.jl)
     k === :closures && return c.answers.closures                     # the functions, callbacks and listeners (closures.jl)
     k === :box && return get(c.boxes.types, q[2], nothing)           # the type of what a box holds (boxes.jl)
     o = c.objects

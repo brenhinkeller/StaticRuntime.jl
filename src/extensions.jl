@@ -49,3 +49,12 @@ changes (see `typed_node`). Plots that are added afterwards are not drawn. The m
 CairoMakie.
 """
 function typed_drawing end
+
+"""
+    add_deserialize_types!(types...)
+
+Add types to those that `Serialization.deserialize` of a program can give, besides the types that the program serializes
+(it finds those itself): for a stream that another program wrote, or a file. Call it before compiling. The method is in the
+extension for Serialization.
+"""
+function add_deserialize_types! end

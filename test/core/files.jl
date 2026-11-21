@@ -187,6 +187,13 @@ end
         "environment"              => () -> (ENV["STATIC_COVERAGE_X"] = "5"; r = parse(Int, ENV["STATIC_COVERAGE_X"]) + Int(haskey(ENV, "STATIC_COVERAGE_X")); delete!(ENV, "STATIC_COVERAGE_X"); r + Int(haskey(ENV, "STATIC_COVERAGE_X"))),
         "process id and homedir"   => () -> Int(Libc.getpid() > 0) + Int(length(homedir()) > 0),
         "@threads"                 => () -> (s = Threads.Atomic{Int}(0); threads_sum(s)),
+        "chmod"                    => () -> (d = dir(); p = joinpath(d, "f"); write(p, "x"); chmod(p, 0o600); r = filemode(p) & 0o777; chmod(p, 0o644); println(string(r, base = 8), " ", string(filemode(p) & 0o777, base = 8)); rm(d; recursive = true); 0),
+        "symlink and readlink"     => () -> (d = dir(); p = joinpath(d, "f"); write(p, "abc"); q = joinpath(d, "l"); symlink(p, q); println(readlink(q) == p, " ", islink(q), " ", read(q, String)); rm(d; recursive = true); 0),
+        "readlink of what is not there" => () -> (try; readlink(joinpath(dir(), "nothing")); 0; catch e; 1; end),
+        "walkdir"                  => () -> (d = dir(); mkpath(joinpath(d, "a", "b")); write(joinpath(d, "a", "f"), "x"); write(joinpath(d, "g"), "y"); for (root, dirs, files) in walkdir(d); println(relpath(root, d), " ", dirs, " ", files); end; rm(d; recursive = true); 0),
+        "gethostname"              => () -> (println(gethostname() == gethostname(), " ", !isempty(gethostname())); 0),
+        "Libc.strftime"            => () -> (println(Libc.strftime("%Y-%m-%d %H:%M", 86400.0 * 400 + opaque(0.0))); 0),
+        "the memory of the machine" => () -> (println(Sys.total_memory(), " ", Sys.total_physical_memory(), " ", Sys.free_memory() > 0, " ", Sys.free_physical_memory() > 0); 0),
     ])
 end
 

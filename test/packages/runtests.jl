@@ -8,7 +8,7 @@ println("\n")
 @isdefined(check_cases) || include(joinpath(@__DIR__, "..", "helpers.jl"))
 include_timed("common.jl")
 
-const STDLIBS = String["dates", "encoding", "linearalgebra", "logging", "mmap", "printf", "sha", "sockets", "sparsearrays", "statistics", "styledstrings", "uuids"]
+const STDLIBS = String["dates", "encoding", "future", "libdl", "linearalgebra", "logging", "mmap", "printf", "serialization", "sha", "sockets", "sparsearrays", "statistics", "styledstrings", "uuids"]
 const PACKAGES_TESTED = String["datastructures", "distributions", "graphs", "jump", "makie", "mpi", "nanstatistics", "observables", "orderedcollections", "parsers", "sciml", "staticarrays", "statsbase", "unicodeplots"]
 const ALL = [STDLIBS; PACKAGES_TESTED]
 selected = get(ENV, "PACKAGES", "")
@@ -26,7 +26,7 @@ const PACKAGE_TEST_HELPER_NAMES = Symbol[n for n in names(PACKAGE_TEST_HELPERS; 
 function include_package_test(name::AbstractString)
     m = Module(Symbol("PackageTest_", name))
     # (what the tests have from `runtests.jl`, as `Main` has it: the standard libraries that they use, which do not have names in common)
-    Core.eval(m, :(using Test, Random, Printf, LinearAlgebra, Libdl, Dates, SparseArrays, Base64, CRC32c, Logging, Statistics))
+    Core.eval(m, :(using Test, Random, Printf, LinearAlgebra, Libdl, Future, Serialization, Dates, SparseArrays, Base64, CRC32c, Logging, Statistics))
     Core.eval(m, :(using SHA, UUIDs, Sockets, Unicode, TOML, Markdown, Mmap))
     Core.eval(m, :(using StaticRuntime))
     for n in PACKAGE_TEST_HELPER_NAMES

@@ -8,6 +8,8 @@ Base.@kwdef mutable struct InferenceFindings
     functions::Vector{Type} = Type[]
     callbacks::Vector{Tuple{Type,Type}} = Tuple{Type,Type}[]
     cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}} = Tuple{DataType,Vector{DataType},DataType,Any}[]
+    noted::Vector{Tuple{Symbol,Type}} = Tuple{Symbol,Type}[]  # `note_type(kind, T)`
+    noted_asked::Vector{Symbol} = Symbol[]                    # `call_over_noted(kind, ...)`
     boxes::Vector{Tuple{Core.CodeInfo,Core.MethodInstance}} = Tuple{Core.CodeInfo,Core.MethodInstance}[] # code that makes boxes, as inferred (for `learn_boxes!`)
     dispatch_requested::Bool = false
     union_used::Bool = false
@@ -55,6 +57,12 @@ function replay_findings!(c::Compilation, interp, root)
         end
         for x in f.callbacks
             x in cl.seen_callbacks || push!(cl.seen_callbacks, x)
+        end
+        for x in f.noted
+            x in cl.seen_noted || push!(cl.seen_noted, x)
+        end
+        for k in f.noted_asked
+            push!(cl.asked_noted, k)
         end
         for x in f.cfunctions
             any(s -> s[1] === x[1] && s[2] == x[2] && s[3] === x[3], cl.seen_cfunctions) || push!(cl.seen_cfunctions, x)

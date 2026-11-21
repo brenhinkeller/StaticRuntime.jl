@@ -28,6 +28,21 @@ const TU_PAIRS = (:a => 1, :b => "x", :c => 2.5)
 end
 
 # what inference finds for them is what Julia finds (the type of the elements is not lost)
+# `fieldtype(T, i)` of a type that is known by an index (or a name) that is not: Julia reads the field types of the type
+# object, which a type in the binary does not have (it was `String` for every field, silently); and `show` of a
+# `NamedTuple`, which compares the type of each field with it, and writes the names as Base does (`Meta.isidentifier`)
+@noinline ft_index(i) = i + opaque(0)
+@testset "Field types by an index that is not known" begin
+    check_cases([
+        "fieldtype by an index"     => () -> (T = typeof((opaque(1), "x", 2.0)); for i in 1:3; println(fieldtype(T, ft_index(i))); end; 0),
+        "fieldtype by a name"       => () -> (T = typeof((a = opaque(1), b = "x")); for s in (:a, :b); println(fieldtype(T, Symbol(string(s, opaque(0) == 0 ? "" : "z")))); end; 0),
+        "show of a NamedTuple"      => () -> (println((a = opaque(1), b = "x", c = 2.0)); 0),
+        "show after merge"          => () -> (println(merge((a = opaque(1), b = "x"), (c = 2.0,))); 0),
+        "names that are not plain"  => () -> (println((α = opaque(1), var"a b" = 2, var"true" = 3)); 0),
+        "isidentifier"              => () -> (println(Base.isidentifier(string("x", opaque(1))), Base.isidentifier(string(opaque(1), "x")), Base.isidentifier(string("δ", opaque(1)))); 0),
+    ])
+end
+
 @testset "Types of tuple elements" begin
     t_iter(i::Int) = iterate(TU_HET, i)
     ours = last(first(StaticRuntime.static_code_typed(t_iter, (Int,))))

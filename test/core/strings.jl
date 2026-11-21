@@ -37,6 +37,10 @@ end
         return bad
     end
     @test mismatches() == 0
+    # the characters of identifiers (`Meta.isidentifier`), as the parser has them
+    ids = count(cp -> (isvalid(Char, cp) && U.lookup(U.ID_START, cp)) != (isvalid(Char, cp) && ccall(:jl_id_start_char, Cint, (UInt32,), cp) != 0) ||
+                      (isvalid(Char, cp) && U.lookup(U.ID_CHAR, cp)) != (isvalid(Char, cp) && ccall(:jl_id_char, Cint, (UInt32,), cp) != 0), UInt32(0):UInt32(0x10ffff))
+    @test ids == 0
     # the characters that are not valid are not printable, as in Base (a `Char` is any 32 bits)
     @testset "isprint of any `Char`" begin
         rng = Random.Xoshiro(1)

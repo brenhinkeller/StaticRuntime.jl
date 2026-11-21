@@ -290,6 +290,25 @@ function Base.show(io::ShowStream, s::Symbol)
     return nothing
 end
 
+# A name in code (`Base.show_sym`: a field of a `NamedTuple`, a name in an expression): the name itself, or `var"..."`.
+# Base decides with the tables of the parser too. The text of each symbol of the binary that is not a plain ASCII name,
+# and of the keywords (`var"true"`), is made when linking (`define_symbol_names!`), as for `show`; a plain name that is
+# not there is itself. (So a keyword that only the program makes, `Symbol("true")` in a program that has no `:true`, is
+# written as it is, where Base writes `var"true"`.)
+@device_override function Base.show_sym(io::IO, sym::Symbol; allow_macroname = false)
+    text = symbol_text(sym, embedded_symbol_names())
+    if text != 0
+        unsafe_write(io, Ptr{UInt8}(text), UInt(@symbolcall strlen(Ptr{UInt8}(text)::Ptr{UInt8})::Int64))
+    elseif symbol_is_plain(sym)
+        unsafe_write(io, symbol_pointer(sym), UInt(symbol_length(sym)))
+    elseif symbol_is_certainly_quoted(sym)
+        print(io, "var\"", Base.escape_raw_string(string(sym)), '"')
+    else
+        error("show: a Symbol that the program made, and that is not an ASCII identifier, is not supported")
+    end
+    return nothing
+end
+
 ## Elements of an abstract type: dispatch over a closed set of types
 ##
 ## `show(io, x)` of an `x` of the type `Any` (an element of a `Vector{Any}`) is a dynamic call in Julia. When

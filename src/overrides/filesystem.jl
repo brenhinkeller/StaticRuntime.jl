@@ -129,6 +129,41 @@ end
     return newpath
 end
 
+# `chmod`, `symlink` and `readlink` (Base calls libjulia's and libuv's functions of the same name)
+const ModeT = Sys.isapple() ? UInt16 : UInt32
+@device_override function Base.chmod(path::AbstractString, mode::Integer; recursive::Bool = false)
+    path = String(path)
+    ccall(:chmod, Cint, (Cstring, ModeT), path, ModeT(mode)) == 0 || fs_error("chmod", path)
+    if recursive && isdir(path)
+        for p in readdir(path)
+            islink(joinpath(path, p)) || chmod(joinpath(path, p), mode; recursive = true)
+        end
+    end
+    return path
+end
+@device_override function Base.symlink(target::AbstractString, link::AbstractString; dir_target::Bool = false)
+    ccall(:symlink, Cint, (Cstring, Cstring), String(target), String(link)) == 0 || fs_error("symlink", link)
+    return nothing
+end
+@device_override function Base.readlink(path::AbstractString)
+    path = String(path)
+    size = 256
+    while true
+        buf = Vector{UInt8}(undef, size)
+        n = GC.@preserve buf ccall(:readlink, Int, (Cstring, Ptr{UInt8}, Csize_t), path, pointer(buf), size)
+        n < 0 && fs_error("readlink", path)
+        n < size && return String(resize!(buf, n))
+        size *= 2
+    end
+end
+
+# The entries of a directory as `DirEntry`s (what `walkdir` reads): of a kind that is not known (`UV_DIRENT_UNKNOWN`), so
+# that `isdir` and `islink` of one ask `stat`, as Base does for a file system that does not say
+@device_override function Base.Filesystem.readdir(dir::AbstractString, ::Type{Base.Filesystem.DirEntry}; sort::Bool = true)
+    dir = String(dir)
+    return [Base.Filesystem.DirEntry(dir, name, Cint(0)) for name in readdir(dir; sort)]
+end
+
 # a copy of a file (what it has, and the mode), or of a directory with what is in it
 function copy_tree(src::String, dst::String, force::Bool)
     if isdir(src)
