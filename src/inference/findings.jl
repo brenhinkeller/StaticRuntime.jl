@@ -9,6 +9,7 @@ Base.@kwdef mutable struct InferenceFindings
     cfunctions::Vector{Tuple{DataType,Vector{DataType},DataType,Any}} = Tuple{DataType,Vector{DataType},DataType,Any}[]
     noted::Vector{Tuple{Any,Type}} = Tuple{Any,Type}[]        # `note_type(kind, T)` and `note_callback(V, f)`
     noted_asked::Vector{Symbol} = Symbol[]                    # `call_over_noted(kind, ...)`
+    cases::Vector{Tuple{Symbol,Any}} = Tuple{Symbol,Any}[]    # (function, type) of the calls over the registered types that the method made (dispatch.jl)
     boxes::Vector{Tuple{Core.CodeInfo,Core.MethodInstance}} = Tuple{Core.CodeInfo,Core.MethodInstance}[] # code that makes boxes, as inferred (for `learn_boxes!`)
     dispatch_requested::Bool = false
     union_used::Bool = false
@@ -59,6 +60,9 @@ function replay_findings!(c::Compilation, interp, root)
         end
         for k in f.noted_asked
             push!(cl.asked_noted, k)
+        end
+        for x in f.cases
+            push!(c.dispatch.cases, x)
         end
         for x in f.cfunctions
             any(s -> s[1] === x[1] && s[2] == x[2] && s[3] === x[3], cl.seen_cfunctions) || push!(cl.seen_cfunctions, x)

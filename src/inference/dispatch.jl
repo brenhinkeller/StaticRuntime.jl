@@ -146,12 +146,17 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
             u = registered_union(c, T, isshow)
             u === nothing && continue
             reg = true
+            depends!(c, sv, (:pruned,)) # (the types that the call is not made over: see `prune_unviable!`)
+            u = without_pruned(c, arginfo, u)
+            u === nothing && continue
             # (only the types that some method fits are kept: the others are `MethodError`s whatever the program does,
             # and each of them counts for the limit on the number of cases that a call is split in)
             u = with_methods(c, interp, arginfo, i, u, max_methods)
             if Base.unionlen(u) > c.settings.split_limit
                 # (too many with the types that the program makes: the registered ones only, as without them)
                 u = registered_union(c, T, isshow; universe = false)
+                u === nothing && continue
+                u = without_pruned(c, arginfo, u)
                 u === nothing && continue
                 u = with_methods(c, interp, arginfo, i, u, max_methods)
             end
@@ -285,6 +290,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             key = (fname, Any[T isa Core.TypeofVararg ? T : CC.widenconst(T) for T in original[2:end]])
             calls = c.dispatch.registered_calls
             calls[key] = get(calls, key, 0) + 1
+            note_cases!(c, sv, original, arginfo)
             (trace_dispatch_on() || haskey(ENV, "STATIC_RUNTIME_CENSUS") || haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")) && note_census!(c, sv, original, arginfo)
             note_dispatch_used!(c, sv)
         end
@@ -319,6 +325,148 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
         return CC.CallMeta(result.rt, result.exct, result.effects, uncovered(result.info), result.refinements)
     end
+end
+
+## `show` of an element whose types are known
+
+# `show_element(io, x, T)` shows an element that is declared to be of the type `T` (`Any`, for the elements of a `Vector{Any}` or a
+# field), which is made over the registered types. But the element has the types that inference found for it (the slots of
+# containers of abstract elements, when slots.jl knows what is in them): a concrete type, or a few. When that is so the call is
+# `show(io, x)`, made over them, and the registered types are not asked. Each is a case of a call (`note_cases!`), so one whose
+# code can not be compiled is left out (`prune_unviable!`), and then the element is shown over the registered types, as it was.
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(show_element), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    at = arginfo.argtypes
+    if length(at) == 4
+        T = callback_value_type(at[4])
+        X = CC.widenconst(at[3])
+        members = Base.uniontypes(X)
+        if T !== nothing && !isconcretetype(T) && !isempty(members) && all(m -> m isa DataType && isconcretetype(m), members)
+            c = compilation()
+            depends!(c, sv, (:pruned,)) # (the types that the call is not made over: see `prune_unviable!`)
+            pruned = get(c.closures.pruned, :show, nothing)
+            if pruned === nothing || !any(m -> m in pruned, members)
+                fi = frame_findings(sv)
+                for m in members
+                    push!(c.dispatch.cases, (:show, m))
+                    fi === nothing || (:show, m) in fi.cases || push!(fi.cases, (:show, m))
+                end
+                return redirect(interp, show, Any[], 2, arginfo, si, vtypes, sv; positions = [2, 3], argtypes = Any[at[2], X],
+                                then = (result, _) -> CC.CallMeta(Nothing, result.exct, result.effects, result.info, result.refinements))
+            end
+        end
+    end
+    return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+end
+
+## Calls over the registered types that can not be compiled
+#
+# A call on an `Any` is made over the registered types and the universe, which is more than what the values can be: a type that
+# no value of reaches the call has code that is compiled for it all the same, and for some types (a struct that has a closure in
+# a field, a `Module`) that code can not be compiled. That is not an error of the program: the value is never of that type.
+# So when the code of a call over the registered types can not be compiled (the strict check says where, with the way from the
+# entry point), the type is left out of that call, as the registered types that are not are: it is a `MethodError` if a value
+# of it reaches the call, and compiling says so. The next pass is made without it. (`pruned` is of the compilation; the cases
+# of each call, kept with the code of the method that makes it, are what a failure is attributed to.)
+
+# the name of the function of a call, as the functions of the code that is compiled have it (`show`, `print`); `:unknown` for
+# one that has no name that the code is known by
+function callee_symbol(@nospecialize(ft))
+    ft = CC.widenconst(ft)
+    if ft isa DataType
+        isdefined(ft, :instance) && ft.instance isa Function && return nameof(ft.instance)
+        ft <: Type && length(ft.parameters) == 1 && ft.parameters[1] isa DataType && return nameof(ft.parameters[1])
+    end
+    return :unknown
+end
+
+# the members of `u` that the call is made over: those that were not left out of it
+function without_pruned(c::Compilation, arginfo::CC.ArgInfo, @nospecialize(u))
+    isempty(c.closures.pruned) && return u
+    list = get(c.closures.pruned, callee_symbol(arginfo.argtypes[1]), nothing)
+    list === nothing && return u
+    kept = Any[M for M in Base.uniontypes(u) if !(M in list)]
+    isempty(kept) && return nothing
+    return Union{kept...}
+end
+
+# the types that the arguments of the call were closed to, for each function that is called: what a failure is attributed to
+function note_cases!(c::Compilation, @nospecialize(sv), original, closed::CC.ArgInfo)
+    name = callee_symbol(closed.argtypes[1])
+    name === :unknown && return
+    fi = frame_findings(sv)
+    for i in 2:length(original)
+        original[i] isa Core.TypeofVararg && continue
+        CC.widenconst(original[i]) === CC.widenconst(closed.argtypes[i]) && continue
+        for M in Base.uniontypes(CC.widenconst(closed.argtypes[i]))
+            push!(c.dispatch.cases, (name, M))
+            fi === nothing || (name, M) in fi.cases || push!(fi.cases, (name, M))
+        end
+    end
+    return
+end
+
+# The methods (as `(name, file, line)` of their definitions: what the strict check has for the places that it names) that
+# the code of `mi` reaches, through the methods that it calls and those that were inlined in it
+function reached_methods(c::Compilation, mi::Core.MethodInstance, owner, cache::IdDict{Core.MethodInstance,Set{Tuple{String,String,Int}}})
+    haskey(cache, mi) && return cache[mi]
+    found = Set{Tuple{String,String,Int}}()
+    seen = Base.IdSet{Core.MethodInstance}()
+    stack = Core.MethodInstance[mi]
+    while !isempty(stack)
+        m = pop!(stack)
+        m in seen && continue
+        push!(seen, m)
+        if m.def isa Method
+            push!(found, (String(m.def.name), basename(String(m.def.file)), Int(m.def.line)))
+        end
+        ci = live_instance(m, owner)
+        ci === nothing && continue
+        for e in ci.edges
+            callee = e isa Core.CodeInstance ? CC.get_ci_mi(e) : e isa Core.MethodInstance ? e : nothing
+            callee isa Core.MethodInstance && push!(stack, callee)
+        end
+    end
+    return cache[mi] = found
+end
+
+# A call over the registered types whose code can not be compiled, from the strict check that said so (`e`): for each place that
+# it names, the cases of the calls over the registered types (the function, and a type that it was made over) whose code reaches
+# the method that has the place, are left out. A case is attributed to a place by what its code reaches, since the compiled
+# functions do not say what type they are for. Whether any was left out: another pass is made.
+function prune_unviable!(c::Compilation, e)
+    e isa UnsupportedCodeError || return false
+    isempty(c.dispatch.cases) && return false
+    isempty(c.inferred) && return false
+    owner = c.inferred[1][2]
+    # (what each specialization of a function of a case, for the type of the case, reaches)
+    by_name = Dict{Symbol,Vector{Core.MethodInstance}}()
+    for (mi, o) in c.inferred
+        (o === owner && mi.def isa Method) || continue
+        push!(get!(Vector{Core.MethodInstance}, by_name, mi.def.name), mi)
+    end
+    cache = IdDict{Core.MethodInstance,Set{Tuple{String,String,Int}}}()
+    added = false
+    for (_, sites) in e.sites, site in sites
+        isempty(site.methods) && continue
+        failing = site.methods[1] # (the method that has the call, from the debug information of the call: the innermost)
+        for (name, M) in c.dispatch.cases
+            list = get(c.closures.pruned, name, nothing)
+            list !== nothing && M in list && continue
+            implicated = false
+            for mi in get(by_name, name, Core.MethodInstance[])
+                sig = Base.unwrap_unionall(mi.specTypes)
+                sig isa DataType && any(p -> p === M, sig.parameters) || continue
+                failing in reached_methods(c, mi, owner, cache) && (implicated = true; break)
+            end
+            implicated || continue
+            push!(get!(Vector{Any}, c.closures.pruned, name), M)
+            added = true
+            compile_warning!((:unviable, name, M), string("a call of `", name, "` over the registered types and the universe is not made over `", M,
+                             "`: the code for it can not be compiled (", site.function_name, " in `", failing[1], "`, ", failing[2], ":", failing[3], "). A value of that type that reaches the call is a `MethodError`."))
+        end
+    end
+    return added
 end
 
 ## Where the values of a call over the registered types come from (trace `dispatch`)

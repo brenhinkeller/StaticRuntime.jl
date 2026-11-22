@@ -104,8 +104,10 @@ struct DynamicSite
     # the methods that the site is in, as (name, file, line) of their definitions, from the debug information: those of
     # the functions on the path from the entry point and those inlined at the call (for `implicated_slot_keys`)
     methods::Vector{Tuple{String,String,Int}}
+    path_signatures::Vector{String} # the signature (`signature_of`) of each function on the path, as the path has them (for the calls over the registered types that can not be compiled: `prune_unviable!`)
 end
-DynamicSite(function_name, signature, frames, path) = DynamicSite(function_name, signature, frames, path, Tuple{String,String,Int}[])
+DynamicSite(function_name, signature, frames, path) = DynamicSite(function_name, signature, frames, path, Tuple{String,String,Int}[], String[])
+DynamicSite(function_name, signature, frames, path, methods) = DynamicSite(function_name, signature, frames, path, methods, String[])
 
 # (the definition of the method of a subprogram of the debug information, as `DynamicSite.methods` has it)
 function subprogram_method(@nospecialize(sp))
@@ -233,7 +235,8 @@ function dynamic_call_sites(mod::LLVM.Module, found; limit::Int = 4)
             key in seen && continue
             push!(seen, key)
             path = path_to_entry(callers, fname)
-            push!(list, DynamicSite(function_of(inst), signature_of(fn), frames, String[readable_name(n) for n in path], site_methods(inst, path, fns)))
+            push!(list, DynamicSite(function_of(inst), signature_of(fn), frames, String[readable_name(n) for n in path], site_methods(inst, path, fns),
+                                    String[haskey(fns, n) ? signature_of(fns[n]) : readable_name(n) for n in path]))
             length(list) >= limit && break
         end
         isempty(list) || push!(sites, name => list)

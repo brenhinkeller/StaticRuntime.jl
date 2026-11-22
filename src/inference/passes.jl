@@ -120,9 +120,12 @@ function run_passes(c::Compilation, compile)
         # `call_over_noted` that was asked for. Another pass is made over them)
         newcb = Tuple{Any,Type}[x for x in cl.seen_noted if !(x[2] in get(cl.noted, x[1], Type[])) && (x[1] isa Symbol ? x[1] in cl.asked_noted : cl.callback_call_requested)]
         more_callbacks = !isempty(newcb)
+        # (a call over the registered types that has a case that can not be compiled: that case is left out in the next pass)
+        more_pruned = failure isa UnsupportedCodeError && prune_unviable!(c, failure)
+        more_pruned && (failure = nothing)
         more_boxes = any(((k, T),) -> T === Any ? haskey(bx.types, k) : get(bx.types, k, nothing) !== T, bx.seen)
         more_listeners = update_listeners!(c)
-        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners
+        wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners || more_pruned
         retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + SLOT_NARROWINGS + 2 && wanted
         (trace_dispatch_on() || haskey(ENV, "STATIC_RUNTIME_CENSUS") || haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")) && trace_census(c, pass)
         trace_on() && trace_pass(c, pass, started, slots_retry, had_failure, failure, new, more_functions, newcb, more_listeners, more_boxes, newc, wanted, retry, function_passes)
@@ -242,6 +245,7 @@ function current_answer(c::Compilation, q::Tuple)
     k === :types_empty && return isempty(c.slots.types)              # whether no slot has types
     k === :type_values && return c.answers.type_values               # the types that the slots of types hold (a call on a type that is not known is made over them)
     k === :universe && return c.answers.universe                     # the types that a call over an `Any` is made over, other than those registered
+    k === :pruned && return closures_hash(c.closures)                 # the calls over the registered types that are not made over a type (dispatch.jl)
     k === :noted && return noted_answer(c.closures, q[2])            # the types that a `call_over_noted` of the kind is made over (noted.jl)
     k === :closures && return c.answers.closures                     # the functions, callbacks and listeners (closures.jl)
     k === :box && return get(c.boxes.types, q[2], nothing)           # the type of what a box holds (boxes.jl)

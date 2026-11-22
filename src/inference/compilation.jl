@@ -102,6 +102,7 @@ const BoxKey = Tuple{Any,Union{Int,Symbol}} # (method specialization, box number
 "Functions that unknown calls are made over (closures.jl), the types that the program has by kind (callbacks, and the kinds of `call_over_noted`: noted.jl), listeners, and `@cfunction`s (cfunctions.jl)."
 Base.@kwdef mutable struct ClosureState
     functions::Vector{Type} = Type[]                                  # the candidate function types of unknown calls
+    pruned::Dict{Symbol,Vector{Any}} = Dict{Symbol,Vector{Any}}()     # (compilation) function => the types that a call of it over the registered types is not made over, because the code for one of them can not be compiled (`prune_unviable!`, dispatch.jl)
     noted::Dict{Any,Vector{Type}} = Dict{Any,Vector{Type}}()          # the types that the program has, by kind: callbacks (the kind is the type of the value that they are called with, see `note_callback`) and the kinds of `call_over_noted` (a `Symbol`, see noted.jl). Registered, and found by the passes
     listener_objects::Dict{Any,Tuple} = Dict{Any,Tuple}()             # value type => the listeners that code compares with
     listener_types::Set{Any} = Set{Any}()                             # the types of all listeners found
@@ -247,10 +248,11 @@ Base.@kwdef mutable struct DispatchState
     unions::Dict{Any,Any} = Dict{Any,Any}()                           # `registered_union` of each type, for this pass
     signatures::Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}} = Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}() # method signatures of a function
     census::Vector{Any} = Any[]                                       # (trace `dispatch`) the calls made over the registered types in this pass, with where their values come from
+    cases::Set{Tuple{Symbol,Any}} = Set{Tuple{Symbol,Any}}()          # (function, type): the calls over the registered types of this pass, and the types that each was made over (see `prune_unviable!`)
     flow_calls::Dict{Any,Vector{Any}} = Dict{Any,Vector{Any}}()       # (`STATIC_RUNTIME_FLOW`) (method instance, argument) => the types that the calls of the method give it
     flow_passes::Dict{Any,Set{Any}} = Dict{Any,Set{Any}}()            # (method instance, argument) => the (method instance, argument)s that pass theirs on to it
 end
-begin_pass!(d::DispatchState) = (d.registered_used = false; empty!(d.unions); empty!(d.census); empty!(d.flow_calls); empty!(d.flow_passes); d)
+begin_pass!(d::DispatchState) = (d.registered_used = false; empty!(d.unions); empty!(d.census); empty!(d.cases); empty!(d.flow_calls); empty!(d.flow_passes); d)
 
 ## The compilation
 
@@ -385,7 +387,8 @@ function closures_hash(cl::ClosureState)
     for (V, fs) in cl.listener_objects; h += hash(map(objectid, fs), type_hash(V)); end
     h = hash(map(objectid, cl.all_listeners), h)
     for (kind, types) in cl.noted, T in types; h += hash(type_hash(T), hash(kind_hash(kind), UInt(7))); end
-    return hash(sum(length, values(cl.noted); init = 0), h)
+    for (name, types) in cl.pruned, T in types; h += hash(type_hash(T), hash(String(name), UInt(9))); end
+    return hash(sum(length, values(cl.noted); init = 0) + sum(length, values(cl.pruned); init = 0), h)
 end
 
 """

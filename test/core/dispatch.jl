@@ -256,3 +256,14 @@ anyvalue(x) = Base.inferencebarrier(x)::Any
     # a function with a method for every type, and a type that has a method only for the generic one
     @test static_result(() -> dkind(anyvalue(DDog(1))) + dkind(anyvalue(DCow(2.0)))) == 3
 end
+# A call over the registered types and the universe is made over more types than the values can be, and for some the code can not be compiled (a `show` that needs the runtime of Julia,
+# here). That is not an error of the program, which never has a value of it there: the type is left out of the call (`prune_unviable!`), and compiling says so. A value of it is a `MethodError`.
+struct DUnviable; x::Int; end
+Base.show(io::IO, ::DUnviable) = (Core.eval(Main, :(1 + 1)); print(io, "DUnviable"))
+const D_UNVIABLE_HOLDER = Any[DUnviable(1), 2] # (the program has the type: it is in the universe)
+@testset "A case of a call that can not be compiled is left out" begin
+    f() = (println(D_UNVIABLE_HOLDER[2]); println(anyvalue(opaque(41))); 0)
+    status, detail = @test_logs (:warn, r"not made over `DUnviable`") match_mode = :any static_status(f)
+    @test status == :ok
+    @test detail == ""
+end
