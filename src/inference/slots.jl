@@ -513,6 +513,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
             st isa Expr && learn_statement!(c, st, called, optype; argof, lattice = x -> CC.argextype(x, ir), pathof = x -> receiver_path(ir, x))
         end
         record_call_arguments!(facts, ir, mi)
+        flow_shadow_on() && record_flow_arguments!(facts, ir, mi)
         note_universe_statements!(c, (ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
         note_slots_in_constants!(c, ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
     finally
@@ -636,6 +637,10 @@ function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
             push!(s.universe_seen, key[2])
         elseif k === :truncated
             s.scan_truncated = true
+        elseif k === :flowarg
+            push!(get!(Vector{Any}, c.dispatch.flow_calls, key[2]), T)
+        elseif k === :flowpass
+            push!(get!(Set{Any}, c.dispatch.flow_passes, key[2]), T)
         elseif k === :argstore
             push!(get!(Set{Any}, s.argstores, key[2]), T)
         elseif k === :argpass

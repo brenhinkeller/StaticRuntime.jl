@@ -179,6 +179,15 @@ host_string(f, x) = replace(sprint(f, x; context = :module => Main), r"(?<![\w.]
 # error there. (This method is what the call is in Julia: it gives the same text.)
 host_text(f, x) = host_string(f, x)
 
+# In the program, where the call is not folded because the type is not known when compiling (a type that is a value: an element
+# of a `Vector{Type}`, one of a union of types), the text of a type is in the table that the linker makes (`runtime_type_text`),
+# and what `host_string` would be is not compiled: it is Julia's `sprint` and `show` of a type, `show_datatype` and
+# `show_typeparams` and all that they call, which a program does not have. (Folded where the type is known: see `host_text` in
+# dispatch.jl.)
+@device_override host_text(f, x) = f === show ? runtime_show_text(x) : host_string(f, x)
+runtime_show_text(x::DataType) = runtime_type_text(x)
+runtime_show_text(x) = x isa DataType ? runtime_type_text(x) : error("the text of what is not a type that is known when compiling is not made when the program runs")
+
 type_name(::Type{T}) where {T} = host_text(show, T)
 
 Base.show(io::ShowStream, ::Type{T}) where {T} = (print(io, type_name(T)); nothing)

@@ -285,6 +285,7 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
             key = (fname, Any[T isa Core.TypeofVararg ? T : CC.widenconst(T) for T in original[2:end]])
             calls = c.dispatch.registered_calls
             calls[key] = get(calls, key, 0) + 1
+            (trace_dispatch_on() || haskey(ENV, "STATIC_RUNTIME_CENSUS") || haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")) && note_census!(c, sv, original, arginfo)
             note_dispatch_used!(c, sv)
         end
     end
@@ -318,6 +319,257 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
     return CC.Future{CC.CallMeta}(call, interp, sv) do result, interp, sv
         return CC.CallMeta(result.rt, result.exct, result.effects, uncovered(result.info), result.refinements)
     end
+end
+
+## Where the values of a call over the registered types come from (trace `dispatch`)
+#
+# For each argument that was closed to a union of the registered types and the universe: what defines the value in the code
+# of the method that makes the call (an argument of the method, a call of a function, a read of a field or of a slot, a phi),
+# and how many types it was made over. This is what a flow of types that was found for each call would replace those with
+# (see "Principled candidates" in the notes): the census says which kinds of origins there are and how large the sets are.
+
+function code_statements(@nospecialize(sv))
+    sv isa CC.InferenceState && return sv.src.code
+    sv isa CC.IRInterpretationState && return Any[sv.ir.stmts[i][:stmt] for i in 1:length(sv.ir.stmts)]
+    return nothing
+end
+
+# what a call is called, for the census
+function callee_name(@nospecialize(g))
+    g isa GlobalRef && return string(g.name)
+    g isa Core.MethodInstance && return string(g.def isa Method ? g.def.name : g)
+    g isa Core.SSAValue || g isa Core.Argument || g isa Core.SlotNumber && return "a function that is a value"
+    return g isa Function ? string(nameof(g)) : string(g)
+end
+
+const CENSUS_READS = ("getfield", "memoryrefget", "getindex", "unsafe_load", "memoryref", "arrayref")
+
+# where the value `x` of the code of `sv` comes from: described by what defines it, followed through a pi, a copy and a
+# variable that is assigned once, a few steps
+function value_origin(@nospecialize(sv), @nospecialize(x), depth::Int = 0)
+    x isa Core.Argument && return string("argument ", x.n - 1, " of the method")
+    x isa Core.SSAValue || x isa Core.SlotNumber || return x isa GlobalRef ? string("the global ", x.name) : "a constant"
+    code = code_statements(sv)
+    code === nothing && return "code that is not at hand"
+    if x isa Core.SlotNumber
+        nargs = sv isa CC.InferenceState ? Int(sv.src.nargs) : 0
+        defs = Any[st.args[2] for st in code if st isa Expr && st.head === :(=) && st.args[1] == x]
+        isempty(defs) && return x.id <= nargs ? string("argument ", x.id - 1, " of the method") : "a variable with no assignment"
+        length(defs) == 1 && depth < 3 && return value_origin(sv, defs[1], depth + 1)
+        return string("a variable assigned in ", length(defs), " places")
+    end
+    stmt = x.id <= length(code) ? code[x.id] : nothing
+    stmt === nothing && return "code that is not at hand"
+    stmt isa Core.PhiNode && return "a phi"
+    stmt isa Core.PiNode && return depth < 3 ? value_origin(sv, stmt.val, depth + 1) : "a pi"
+    stmt isa Core.SSAValue || stmt isa Core.SlotNumber || stmt isa Core.Argument ? (return depth < 3 ? value_origin(sv, stmt, depth + 1) : "a copy") : nothing
+    if stmt isa Expr
+        if stmt.head === :call || stmt.head === :invoke
+            name = callee_name(stmt.args[1])
+            name in CENSUS_READS && return string("a read (", name, ")")
+            name == "typeassert" && depth < 3 && return value_origin(sv, stmt.args[2], depth + 1)
+            return string("the result of `", name, "`")
+        end
+        stmt.head === :static_parameter && return "a type parameter"
+        stmt.head === :new && return "an object that is made here"
+        return string("`", stmt.head, "`")
+    end
+    return stmt isa QuoteNode ? "a constant" : string(typeof(stmt))
+end
+
+# the methods that are being inferred, from the one that makes the call outwards (for the census: who reached it)
+function census_chain(@nospecialize(sv))
+    names = String[]
+    while sv isa CC.InferenceState || sv isa CC.IRInterpretationState
+        mi = sv isa CC.InferenceState ? sv.linfo : sv.mi
+        push!(names, mi isa Core.MethodInstance && mi.def isa Method ? string(mi.def.name) : string(mi))
+        length(names) >= 12 && break
+        sv = CC.frame_parent(sv)
+    end
+    return join(names, " < ")
+end
+
+function note_census!(c::Compilation, @nospecialize(sv), original, closed::CC.ArgInfo)
+    fargs = closed.fargs
+    caller = sv isa CC.InferenceState ? sv.linfo : sv isa CC.IRInterpretationState ? sv.mi : nothing
+    f = closed.argtypes[1]
+    callee = CC.widenconst(f)
+    callee = callee isa DataType && isdefined(callee, :instance) ? nameof(callee.instance) : callee
+    for i in 2:length(original)
+        original[i] isa Core.TypeofVararg && continue
+        T0 = CC.widenconst(original[i])
+        T1 = CC.widenconst(closed.argtypes[i])
+        T0 === T1 && continue
+        origin = fargs === nothing || i > length(fargs) ? "not known" : value_origin(sv, fargs[i])
+        param = fargs === nothing || i > length(fargs) || caller === nothing ? nothing : argument_param(sv, fargs[i])
+        push!(c.dispatch.census, (caller = caller, callee = callee, arg = i - 1, from = T0, ncand = Base.unionlen(T1), origin = origin, param = param, candidates = T1))
+        # (`STATIC_RUNTIME_CENSUS=file` appends a line for each, to count them over many compilations: the test suite)
+        haskey(ENV, "STATIC_RUNTIME_CENSUS") && open(io -> println(io, origin, "\t", callee, "\t", T0, "\t", Base.unionlen(T1), "\t", caller, "\t", census_chain(sv)), ENV["STATIC_RUNTIME_CENSUS"], "a")
+    end
+    return
+end
+
+# what the flow of types says of a call of the census: `(status, types it found, how many of them the call was not made over)`;
+# the status is `:none` (the value is not one of an argument of the method), `:unknown` (what the callers give it is not known)
+# or `:known`
+function census_flow(c::Compilation, e)
+    e.param === nothing && return (:none, 0, 0)
+    traced = trace_param(c, e.caller, e.param)
+    traced isa Symbol && return (traced, 0, 0) # (`:nocallers`: no call of the method was seen; `:abstract`: a caller gives it a type that is not concrete)
+    candidates = Set{Any}(Base.uniontypes(e.candidates))
+    return (:known, length(traced), count(t -> !(t in candidates), traced))
+end
+
+# the census of a pass, written to the standard error with the trace `dispatch` (the calls in groups of the same function,
+# type and origin), and, with `STATIC_RUNTIME_CENSUS_FLOW=file`, a line for each call with what the flow of types found
+function trace_census(c::Compilation, pass::Int)
+    census = c.dispatch.census
+    flows = [census_flow(c, e) for e in census]
+    if haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")
+        open(ENV["STATIC_RUNTIME_CENSUS_FLOW"], "a") do io
+            for (e, f) in zip(census, flows)
+                println(io, f[1], "\t", e.ncand, "\t", f[2], "\t", f[3], "\t", e.callee, "\t", e.origin)
+            end
+        end
+    end
+    trace_dispatch_on() || return
+    isempty(census) && return trace("pass ", pass, ": no call was made over the registered types")
+    groups = Dict{Tuple{Any,Any,Int,String},Vector{Int}}()
+    for e in census
+        push!(get!(Vector{Int}, groups, (e.callee, e.from, e.arg, e.origin)), e.ncand)
+    end
+    trace("pass ", pass, ": ", length(census), " argument", length(census) == 1 ? "" : "s", " closed to registered types, in ", length(groups), " kinds of call")
+    for (k, ns) in sort!(collect(groups); by = kv -> -length(kv[2]))
+        callee, from, arg, origin = k
+        trace("  ", length(ns), " x ", callee, "(arg ", arg, "::", from, ") from ", origin, "; over ", minimum(ns) == maximum(ns) ? minimum(ns) : string(minimum(ns), " to ", maximum(ns)), " types")
+    end
+    known = [(e, f) for (e, f) in zip(census, flows) if f[1] === :known]
+    nunknown = count(f -> f[1] === :nocallers || f[1] === :abstract, flows)
+    trace("  flow of types: ", length(known), " of the arguments of methods found (", nunknown, " not known); over ", sum(e.ncand for (e, f) in known; init = 0),
+          " types by the call, ", sum(f[2] for (e, f) in known; init = 0), " by the flow; ", sum(f[3] for (e, f) in known; init = 0), " found that the call was not made over")
+    return
+end
+
+## The flow of types through the arguments of methods (`STATIC_RUNTIME_FLOW`, a shadow of what dispatch is made over)
+#
+# For each call of each method that is optimized: the type that it gives each argument of the method that it calls, or, if
+# the argument is one of its own, which. From those, what an argument of a method can be is what its callers give it, and
+# what the callers' arguments can be when they are passed on: `trace_param`. This does not change what is compiled: the
+# census (above) compares it with what the call was made over, to see how much narrower it is, and whether it is ever not
+# among them.
+
+flow_shadow_on() = haskey(ENV, "STATIC_RUNTIME_FLOW")
+
+# the methods that a call can be to, as `(method instance, the types that the call gives it)`: one for a call that inference
+# found one method for, one for each case of a call that is split over a union, and each of the methods of a call that
+# has several
+function flow_callees(info)
+    out = Tuple{Core.MethodInstance,Any}[]
+    matches = Core.MethodMatch[]
+    if info isa CC.MethodMatchInfo
+        append!(matches, info.results.matches)
+    elseif info isa CC.UnionSplitInfo
+        for split in info.split
+            split isa CC.MethodMatchInfo && append!(matches, split.results.matches)
+        end
+    end
+    for m in matches
+        callee = CC.specialize_method(m)
+        callee isa Core.MethodInstance && push!(out, (callee, m.spec_types))
+    end
+    return out
+end
+
+function record_flow_arguments!(facts, ir::CC.IRCode, mi::Core.MethodInstance)
+    for pc in 1:length(ir.stmts)
+        st = ir.stmts[pc][:stmt]
+        st isa Expr || continue
+        callees = Tuple{Core.MethodInstance,Any}[]
+        first_arg = 0
+        if st.head === :invoke
+            target = st.args[1]
+            callee = target isa Core.CodeInstance ? target.def : target
+            callee isa Core.MethodInstance && push!(callees, (callee, nothing))
+            first_arg = 2
+        elseif st.head === :call
+            callees = flow_callees(ir.stmts[pc][:info])
+            first_arg = 1
+        end
+        for (callee, spec) in callees
+            sig = Base.unwrap_unionall(callee.specTypes)
+            sig isa DataType || continue
+            nargs = length(st.args) - first_arg + 1
+            nargs == length(sig.parameters) || continue
+            for n in 2:nargs
+                a = st.args[first_arg + n - 1]
+                k = argument_index(ir, a)
+                if k !== nothing
+                    push!(facts, ((:flowpass, (callee, n), nothing), (mi, k)))
+                else
+                    T = CC.widenconst(CC.argextype(a, ir))
+                    # (a call split over the cases of a union gives the callee of each the type of its case)
+                    if spec isa DataType && n <= length(spec.parameters) && spec.parameters[n] isa Type && isconcretetype(spec.parameters[n])
+                        T = spec.parameters[n]
+                    end
+                    push!(facts, ((:flowarg, (callee, n), nothing), T))
+                end
+            end
+        end
+    end
+    return
+end
+
+# The number of the argument of the method of `sv` that the value `x` is (what is passed on unchanged: a copy, a `π`, a
+# `typeassert`), or `nothing`
+function argument_param(@nospecialize(sv), @nospecialize(x), depth::Int = 0)
+    depth > 4 && return nothing
+    x isa Core.Argument && return x.n
+    code = code_statements(sv)
+    code === nothing && return nothing
+    if x isa Core.SlotNumber
+        nargs = sv isa CC.InferenceState ? Int(sv.src.nargs) : 0
+        defs = Any[st.args[2] for st in code if st isa Expr && st.head === :(=) && st.args[1] == x]
+        isempty(defs) && return x.id <= nargs ? x.id : nothing
+        return length(defs) == 1 ? argument_param(sv, defs[1], depth + 1) : nothing
+    end
+    x isa Core.SSAValue && x.id <= length(code) || return nothing
+    st = code[x.id]
+    st isa Core.PiNode && return argument_param(sv, st.val, depth + 1)
+    (st isa Core.SSAValue || st isa Core.SlotNumber || st isa Core.Argument) && return argument_param(sv, st, depth + 1)
+    if st isa Expr && (st.head === :call) && length(st.args) == 3 && callee_name(st.args[1]) == "typeassert"
+        return argument_param(sv, st.args[2], depth + 1)
+    end
+    return nothing
+end
+
+# What the argument `k` of the method `mi` can be, from what its callers give it, as the concrete types, or `nothing` if
+# it is not known: the method has no caller that was seen (an entry point, a call that is not known) or one gives it a type
+# that is not concrete
+function trace_param(c::Compilation, mi, k::Int, seen::Set{Any} = Set{Any}())
+    key = (mi, k)
+    key in seen && return Set{Any}() # (a cycle: what is passed around adds nothing)
+    push!(seen, key)
+    given = get(c.dispatch.flow_calls, key, nothing)
+    passes = get(c.dispatch.flow_passes, key, nothing)
+    (given === nothing && passes === nothing) && return :nocallers
+    found = Set{Any}()
+    if given !== nothing
+        for T in given
+            T = CC.widenconst(T)
+            for t in Base.uniontypes(T)
+                (t isa DataType && isconcretetype(t)) || return :abstract
+                push!(found, t)
+            end
+        end
+    end
+    if passes !== nothing
+        for (pmi, pk) in passes
+            r = trace_param(c, pmi, pk, seen)
+            r isa Symbol && return r
+            union!(found, r)
+        end
+    end
+    return found
 end
 
 function unknown_parameters_of_program(@nospecialize(T))

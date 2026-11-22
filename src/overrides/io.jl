@@ -436,8 +436,9 @@ end
 const IGNORED_PROPERTIES = (:SHOWN_SET, :module)
 
 # (`@constprop :aggressive`: the name and the value of the property are known where `IOContext` is called, and have to
-# be known in the methods, to make the type)
-Base.@constprop :aggressive @inline property_context(io::ShowStream, ::Val{key}, value) where {key} = key in IGNORED_PROPERTIES ? io : with_property(io, Val(key), Val(value))
+# be known in the methods, to make the type. `key::Symbol`: where it is not known, `Val` of it is `Val` and `key` is `Any`, and
+# the `in` would be made over the registered types, which a name is not)
+Base.@constprop :aggressive @inline property_context(io::ShowStream, ::Val{key}, value) where {key} = (key::Symbol) in IGNORED_PROPERTIES ? io : with_property(io, Val(key), Val(value))
 
 Base.@constprop :aggressive @inline Base.IOContext(io::ShowStream, p::Pair{Symbol}) = property_context(io, Val(p.first), p.second)
 

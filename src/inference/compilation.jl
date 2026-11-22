@@ -69,23 +69,27 @@ Base.hash(s::Settings, h::UInt) = foldl((h, name) -> hash(getfield(s, name), h),
 # `STATIC_RUNTIME_TRACE=1` writes what each pass found and spent its time on to the standard error. Other values add:
 # - `methoderrors`: calls with no method for the types that reach them (mostly on paths union splitting leaves untaken);
 # - `embed`: why each object that can not be copied into the binary can not, with its path from a constant;
-# - `ir:<text>`: the optimized code of each method whose `MethodInstance` text contains `<text>`.
+# - `ir:<text>`: the optimized code of each method whose `MethodInstance` text contains `<text>`;
+# - `dispatch`: for each call that is made over the registered types and the universe (an argument of the type `Any` or another
+#   that can't be listed), where the value comes from and how many types it was made over (`census`, dispatch.jl).
 # It is read once per compilation (`Trace`; not part of the `Settings`, since it does not change what is compiled).
 struct Trace
     on::Bool
     methoderrors::Bool
     embed::Bool
     ir::String # (`""`: none)
+    dispatch::Bool
 end
 function Trace(v::AbstractString = get(ENV, "STATIC_RUNTIME_TRACE", "0"))
     on = !(v == "0" || isempty(v))
-    return Trace(on, v == "methoderrors", v == "embed", startswith(v, "ir:") ? String(v[4:end]) : "")
+    return Trace(on, v == "methoderrors", v == "embed", startswith(v, "ir:") ? String(v[4:end]) : "", v == "dispatch")
 end
 # (that of the running compilation, or of the environment outside of one: the runtime's linker is also used alone)
 current_trace() = (c = CURRENT_COMPILATION[]; c === nothing ? Trace() : c.trace)
 trace_on() = current_trace().on
 trace_method_errors_on() = current_trace().methoderrors
 trace_embed_on() = current_trace().embed
+trace_dispatch_on() = current_trace().dispatch
 trace(args...) = (println(stderr, "[static-runtime] ", args...); nothing)
 
 ## The state of each concern
@@ -242,8 +246,11 @@ Base.@kwdef mutable struct DispatchState
     registered_calls::Dict{Tuple{Any,Vector{Any}},Int} = Dict{Tuple{Any,Vector{Any}},Int}() # (for the message)
     unions::Dict{Any,Any} = Dict{Any,Any}()                           # `registered_union` of each type, for this pass
     signatures::Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}} = Dict{Tuple{UInt,Any,Int},Union{Nothing,Vector{Any}}}() # method signatures of a function
+    census::Vector{Any} = Any[]                                       # (trace `dispatch`) the calls made over the registered types in this pass, with where their values come from
+    flow_calls::Dict{Any,Vector{Any}} = Dict{Any,Vector{Any}}()       # (`STATIC_RUNTIME_FLOW`) (method instance, argument) => the types that the calls of the method give it
+    flow_passes::Dict{Any,Set{Any}} = Dict{Any,Set{Any}}()            # (method instance, argument) => the (method instance, argument)s that pass theirs on to it
 end
-begin_pass!(d::DispatchState) = (d.registered_used = false; empty!(d.unions); d)
+begin_pass!(d::DispatchState) = (d.registered_used = false; empty!(d.unions); empty!(d.census); empty!(d.flow_calls); empty!(d.flow_passes); d)
 
 ## The compilation
 
