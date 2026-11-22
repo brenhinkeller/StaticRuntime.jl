@@ -96,14 +96,15 @@ says whether `lorenz` changes its first argument: `ODEProblem(f, u0, tspan, p)` 
 * **Input and output.** `print`, `println`, `show`, `display` and `text/plain` of numbers, strings, containers, structs
   and matrices, as Julia writes them; `printf` and `@printf`; files, the standard streams and the file system; colors and
   styled strings (see [Input and output](@ref)).
-* **Calls that Julia leaves to the runtime.** Calls on values of abstract types and of `Any` are made over the types that
-  the program can have, and calls of functions taken from collections over the functions that the program has (see
-  [Compiling: overrides, passes, and inference](compiling.md)).
-* **Libraries.** BLAS and LAPACK (through libblastrampoline), `BigInt`, `BigFloat`, `Regex`, SuiteSparse, MPI, and any
-  JLL or library of your own through `ccall` (see [Libraries and packages](packages.md)).
-* **Standard libraries and packages.** Most of the standard libraries, and a survey of packages that is kept as tests:
+* **Linked Libraries.** BLAS and LAPACK (through libblastrampoline), `BigInt`, `BigFloat`, `Regex`, SuiteSparse, MPI, and any
+  JLL or library of your own through `ccall` (see [support](support.md)).
+* **Standard libraries and packages.** Most of the standard libraries, and a survey of packages that is kept as tests,
+  in [`test/packages/`](https://github.com/brenhinkeller/StaticRuntime.jl/tree/main/test/packages).
   OrdinaryDiffEq, UnicodePlots, JuMP with HiGHS, Makie and CairoMakie, Distributions, StatsBase, NaNStatistics,
   DataStructures, StaticArrays, Graphs, Parsers, OrderedCollections and MPI.jl.
+* **A few calls that Julia leaves to the runtime.** Calls on values of abstract types and of `Any` are made over the types that
+  the program can have, and calls of functions taken from collections over the functions that the program has (see
+  [Compiling: overrides, passes, and inference](compiling.md)).
 
 What can't work in a standalone binary is refused when compiling, with an explanation, rather than giving a different
 answer from Julia's. [Known limitations](@ref) gathers what does not work yet, or works differently. The tests
@@ -112,10 +113,9 @@ what it prints with what Julia prints.
 
 ## The manual
 
-* [Input, output and writing overrides](usage.md): printing and reading, entry points and the command line, symbols, and
-  writing overlay methods of your own.
-* [Compiling: overrides, passes, and inference](compiling.md): how a compilation works, what is done to help inference,
-  dynamic dispatch, and finding out why something does not compile.
+* [Basic usage](usage.md) Entry points and compilation options, as well as overrides, and how to write your own.
+* [Compiling: overrides, passes, and inference](compiling.md): how a compilation works, what is done to help inference, dynamic dispatch, and finding out why something does not compile.
 * [The runtime](runtime.md): memory and the garbage collector, exceptions, and the size of binaries.
-* [Libraries and packages](packages.md): BLAS, libraries, MPI, tasks, and the packages that are known to work.
-* [Limitations, testing and reference](limits.md).
+* [Supported libraries and packages](support.md): BLAS, libraries, MPI, tasks, and the packages that are known to work.
+* [Limitations](limits.md).
+* [API Reference](reference.md).

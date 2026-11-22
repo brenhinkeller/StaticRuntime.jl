@@ -1,6 +1,4 @@
-# Limitations, testing and reference
-
-## Known limitations
+# Known limitations
 
 What does not work yet, or works differently from Julia, gathered in one place. The sections above say more about each.
 
@@ -11,7 +9,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * **The host is the target.** The heap and the runtime are made for the machine that compiles, so cross-compiling (a `target` that is
   not the host) is not supported.
 * BLAS and LAPACK need LBT and the libraries that back it **at the same paths when the program is run** (see
-  [Linear algebra and BLAS](@ref)); they are not in the binary. The same is true of any other library that the program calls, unless `libraries = :bundle`
+  [LinearAlgebra](@ref)); they are not in the binary. The same is true of any other library that the program calls, unless `libraries = :bundle`
   is used (see [Libraries: `BigInt`, `BigFloat`, `Regex`, JLLs and libraries of your own](@ref)); BLAS is not bundled yet.
 
 **Refused, because the answer would otherwise differ from Julia's**
@@ -31,7 +29,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 **Standard libraries** (a survey of them is kept in `test/packages`, and what does not work, and what happens then, in `test/core/limitations.jl`)
 
 * Work: Base64 (`base64encode` of strings, bytes, numbers, arrays of numbers and what a function writes, `base64decode`, and `Base64EncodePipe` and `Base64DecodePipe` of an `IOBuffer`), CRC32c, SHA, UUIDs (`uuid4()` too), `Random.RandomDevice`, Mmap (`Mmap.mmap(path, Vector{T}, dims, offset)`: the memory is not unmapped before the program ends), Statistics, Random, Printf, Logging (`NullLogger`), Libdl (`dlopen`, `dlsym` and `dlclose` of libraries opened when the program runs, not `DL_LOAD_PATH`), Future (`copy!`; not `randjump`), Serialization (`serialize` writes the bytes that Julia writes, and `deserialize` reads a value of one of the types that the program has: see [Serialization](@ref)), Dates, SparseArrays (with the factorizations), most of LinearAlgebra (`exp`, `sqrt`, `log` and powers of a matrix, `eigen`, `svd`, `qr`,
-  `cholesky`, `lu`, `schur`, `ordschur`, `hessenberg`, `inv`, `det`, `\`, `opnorm`, ...), Sockets' address types, and the file system (see [The file system](@ref)).
+  `cholesky`, `lu`, `schur`, `ordschur`, `hessenberg`, `inv`, `det`, `\`, `opnorm`, ...), Sockets' address types, and the file system (see [Files and the filesystem](@ref)).
 * Do not: `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own); `readdlm` / `writedlm`; `@allocated` (the heap does not count the bytes of each allocation; `@allocations` gives -1); `@time` and `@timed` work, but measure only the time (the bytes, the time of the collector and of the compiler are zero, and `@time` writes only the seconds);
   `TOML.parse` (the parser keeps a `Module`); `Markdown.parse` is refused when compiling, or stops with a message when it is run (its parser needs Julia's own); `Mmap` of an open stream, and anonymous ones (only the files that are named by their path are mapped); `Test` (`@test` and `@testset`); `with_logger` with a logger other than `NullLogger`; starting other programs;
   `base64encode` of several values of different types in one call, and `base64encode(f, args...)` of a function with arguments. Also not supported, found by a survey of Base and the standard libraries: weak references (`WeakRef`, `WeakKeyDict`); `Printf.Format` of a format
@@ -61,7 +59,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
   with abstract values, `sum(f, v)` of a `Vector{Any}`, `isprime`) are rejected when compiling (`UnsupportedCodeError`), or abort the
   program if compiled with `strict = false`.
 * **Values that are only known at run time** (an element of a `Vector{Any}`) can't be the argument of `objectid` or `hash` unless their types
-  are registered, nor `===` of types and unions, and `show` of one is limited to the registered types (see [`show` of containers, types and structs](@ref)).
+  are registered, nor `===` of types and unions, and `show` of one is limited to the registered types (see [`add_show_candidates!`](@ref)).
 * `titlecase` of a string needs the grapheme breaks of utf8proc, which are in libjulia, and is not supported.
 
 * **Tuples that have a `Union` as an element** (`Tuple{Union{Vector{Float64},Vector{ComplexF64}},Int}`: what a function returns when the type of one of two values depends on the data) are made and read as
@@ -91,54 +89,12 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 * **There is no stack overflow check:** infinite recursion crashes (segmentation fault) instead of throwing `StackOverflowError`.
 * **Locks do nothing** (there is one thread), and `islocked` is `false`.
 * **Files** are libc streams: `eachline` of a file closes it only when the loop reaches the end (not on `break`), `seek` and
-  `skip` don't report errors, `open` takes only a C `fopen` mode, and the keyword arguments of `readline` and `eachline` (`keep = true`)
-  are not supported. Sockets are not available (only the types of addresses of `Sockets` are).
+  `skip` don't report errors. Sockets are not available (only the types of addresses of `Sockets` are).
 * **`rand` without a seed** gets its state from the operating system (`getentropy`); if that fails the first `rand()` throws, rather than
   giving the same stream each time. `RandomDevice` and `uuid4()` read `getentropy` at each call.
 * The output is **unbuffered beyond libc's**: `print` and `println` write through `FILE*`, which libc flushes when the program exits
   (not if it crashes).
 
-## Testing that something compiles
-
-```julia
-julia> using StaticRuntime
-
-julia> @static_test sum(rand(10)) < 10     # compile, run, and compare with Julia
-Test Passed
-
-julia> static_status(() -> length(string(12345)))
-(:ok, "")
-```
-
-[`static_status`](@ref) reports how far something gets: `:compile_error`, `:link_error`,
-`:runtime_error`, `:mismatch` or `:ok`. [`undefined_symbols`](@ref) lists what the compiled code
-needs besides libc.
 
 ## Package internals and testing
 
-### Source layout
-
-* `src/method_table.jl`: our method table, `@device_override` and the parameters of our compilations; `src/StaticRuntime.jl`: the module, `compile_executable` and the other entry points; `src/extensions.jl`: the functions that package extensions add methods to; `src/registry.jl`: what packages register (`REGISTRY`, which each compilation copies when it starts).
-* `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`io.jl`, `printing.jl`, `strings.jl`, `collections.jl`, `system.jl`, `bignum.jl`, ...).
-* `src/inference/`: what the compiler does with what Julia's inference leaves to the runtime. The state of a compilation and its keys (`compilation.jl`), our interpreter (`interpreter.jl`), the passes and what each reuses from the one before (`passes.jl`); calls on abstract types (`dispatch.jl`), tuples (`tuples.jl`), unknown functions, callbacks and listeners (`closures.jl`), boxes (`boxes.jl`), slots of abstract types (`slots.jl`) and of types (`types_as_values.jl`), constant objects (`objects.jl`, `object_calls.jl`), stated types (`assume.jl`), `@cfunction` (`cfunctions.jl`), replaced calls (`redirect.jl`), the optimizer's hooks (`optimize.jl`), and why a program does not infer (`diagnostics.jl`).
-* `src/runtime/`: the runtime that is linked into a program: the allocator and collector (`heap.jl`, `heap_link.jl`), the objects that are copied into the binary (`objects.jl`, `embedder.jl`, `constants.jl`), types at run time (`types.jl`), what is refused (`strict.jl`), and the functions of libraries, BLAS among them (`libraries.jl`, `loader.jl`).
-* `src/llvm/`: our LLVM passes (`pipeline.jl`, `tags.jl`); `src/testing.jl`: `static_status` and the other functions that compare a compiled program with Julia.
-* `ext/`: the overlays that need another package or standard library (LinearAlgebra, SparseArrays, Printf, Random, StyledStrings, Mmap, Observables, Makie, CairoMakie, UnicodePlots, MPI, FunctionWrappers).
-
-### Running the tests
-
-`] test` runs all: the tests of the compiler, the runtime and the language (`test/core`), as well as those of the standard libraries and the packages that programs use (`test/packages`).
-Most of them compile a program and compare what it prints with what Julia prints for the same code. Set `GROUP=Core` or `GROUP=Packages` to run one of the two, `PACKAGES=Dates,MPI` to run some of the files of `Packages` (the MPI tests need an MPI library, which MPI.jl installs), `TEST_TIMING=1` to print the time that each file took, and `TEST_FOLDED=0` to not fail the cases whose program is only a print of an answer that the compiler found (which is on by default: the test of such a case does not test the code that it is about) (`opaque` in `test/helpers.jl` makes values that the compiler does not know; whether a program computes something from them is read from its module, see `StaticRuntime.input_dependent_cases`; `TEST_FOLDED=report` lists those that do not, and goes on). `STATIC_RUNTIME_GC=3` runs the programs with the collector in stress mode, sweeping every three allocations.
-
-`GROUP=Fuzzing` (not part of `] test`) runs random values and programs (`test/fuzz`): each seed is compiled and run in a process of its own, with a time limit, a few at a time, and compared with Julia. The seeds that failed
-once are run every time (`test/fuzz/pinned.jl`), with random ones; `FUZZ_SEEDS=0x688,1:50` runs the seeds that you give, `FUZZ_COUNT` is the number of random ones for each kind (20), `FUZZ_TIME_LIMIT` the seconds for a case (120)
-and `FUZZ_WORKERS` how many run at once. A seed that fails or does not finish is written with the command that runs it again by itself: `julia --project=test test/fuzz/case.jl embedfuzz 0x688`.
-
-## Reference
-
-```@index
-```
-
-```@autodocs
-Modules = [StaticRuntime, StaticRuntime.Runtime]
-```

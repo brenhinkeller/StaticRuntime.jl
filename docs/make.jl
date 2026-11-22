@@ -10,16 +10,18 @@ makedocs(;
     sitename="StaticRuntime.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
+        edit_link="main",
         canonical="https://brenhinkeller.github.io/StaticRuntime.jl",
         assets=String[],
     ),
     pages=[
         "Home" => "index.md",
-        "Input, output and writing overrides" => "usage.md",
+        "Basic usage" => "usage.md",
         "Compiling: overrides, passes, and inference" => "compiling.md",
         "The runtime" => "runtime.md",
-        "Libraries and packages" => "packages.md",
-        "Limitations, testing and reference" => "limits.md",
+        "Supported libraries and packages" => "support.md",
+        "Limitations" => "limits.md",
+        "API Reference" => "reference.md",
     ],
 )
 

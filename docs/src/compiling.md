@@ -62,7 +62,7 @@ What these find depends on the whole program, which is why a compilation is made
 
 Code that a binary can not run is replaced in one of two ways.
 
-**`@device_override` replaces a method** (see [Writing overrides](usage.md#Writing-overrides)). It adds a method to this
+**`@device_override` replaces a method** (see [Writing overrides](usage.md#Overrides)). It adds a method to this
 package's method table, which method lookup prefers to Base's for the argument types that it matches. It is plain
 Julia: every call that dispatches to that signature gets the replacement. Examples: `prod` of a tuple of integers,
 `print_to_string`, `time_ns`, `getproperty(::Nothing, ::Symbol)`.

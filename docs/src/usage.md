@@ -1,177 +1,4 @@
-# Input, output and writing overrides
-
-## Input and output
-
-The standard streams of Julia are libuv streams, which need the Julia runtime. Compiled programs
-use those of libc, as [`StaticIO`](@ref)s: [`STDIN`](@ref), [`STDOUT`](@ref) and [`STDERR`](@ref).
-`StaticIO` implements the `IO` interface, so all of the code of Base for printing and reading works
-with it (`print`, `show`, `write`, `read`, `readline`, `eof`, `flush`, ...).
-
-`print`, `println` and `show` without an `IO` write to the standard output, as in Julia:
-
-```julia
-function main(args::Vector{String})
-    println("Hello, ", isempty(args) ? "world" : args[1], "! ", 1 + 1, " ", 2.5, " ", 'λ', " ", :sym)
-    println(STDERR, "this goes to the standard error")
-    line = readline(STDIN)
-    @show line
-end
-```
-
-!!! note "`stdout`, `stderr` and `stdin` of Base are the program's streams"
-    In Julia, `stdout` is a global variable of the abstract type `IO`, so a call like `println(stdout, x)` would be
-    resolved only when it runs. In a compiled program, reads of Base's `stdout`, `stderr` and `stdin` are `STDOUT`,
-    `STDERR` and `STDIN`, so such code works as it is.
-
-### Formatted output: `printf` and `@printf`
-
-Two ways, which write the same bytes into the same buffer, so can be mixed freely with `print`:
-
-* **`printf` of StaticTools**: C's `printf`, with any number of arguments and a `c"..."` format. Its format
-  specifiers are those of C: for example an `Int64` is `%lld` (`%d` is for a 32-bit `int`).
-  It takes integers, floating-point numbers, pointers, and strings (`StaticString`s,
-  `MallocString`s and `String`s) for `%s`, and a stream first: `printf(STDERR, c"...", x)`.
-* **`Printf` of Julia**: `@sprintf` and `@printf(STDOUT, "...", x)` (or `STDERR`, or a file), with Julia's
-  own formats, which are the same as in Julia: `%d` is for any integer, and so on. This is Julia's `Printf`,
-  so what it writes is the same. A format with `*` (`%*d`) is not supported. The format has to be
-  made once, as `@printf` does: a `Printf.Format("...")` made when the program runs can't be compiled.
-
-```julia
-printf(c"%s: %d of %lld, %5.2f%%\n", c"progress", 3, 10^12, 12.345)   # C
-Printf.@printf(STDOUT, "%s: %d of %d, %5.2f%%\n", "progress", 3, 10^12, 12.345)   # Julia
-name = Printf.@sprintf("%s-%03d.txt", "run", 7)
-```
-
-### The file system
-
-`stat` (and `isfile`, `isdir`, `ispath`, `filesize`, `mtime`, `filemode`), `mkdir`, `rm` (with `force` and `recursive`), `readdir` (with `join` and `sort`), `mv`, `cp` (of a file or a directory), `pwd`, `cd`,
-`realpath`, `homedir`, `tempdir`, `tempname`, `mktemp`, `mktempdir` (and with a function), `chmod` (and `recursive`), `symlink` and `readlink`, `walkdir`, `ENV[name] = value` and `delete!(ENV, name)`,
-`Libc.getpid`, `gethostname`, `Libc.strftime`, and `Sys.total_memory`, `Sys.free_memory` and their `physical` forms are done with the functions of the C library (the memory is not limited by a
-Linux control group, as libuv reads it). What is different: an
-error is a `SystemError` with the message of `strerror`, where Base's is an `IOError` that has the code of libuv (a program that catches `IOError` for a missing file catches `SystemError` here), and `touch`, `mmap` of an open stream and starting other programs
-(`run`, ``read(`cmd`, String)``) are not supported; `walkdir` walks the whole tree before the loop starts (its `Channel` is filled by a task that runs to its end). `Threads.@threads` runs the loop on the one thread, in order.
-
-### Files
-
-`open` opens a file with libc's `fopen`, as a [`StaticFile`](@ref), which is an `IO` like the standard streams,
-so what Base has for reading and writing an `IO` works: `open(f, path, mode)`, `read(path, String)`,
-`readlines`, `eachline`, `readline`, `write(path, x, y)`, `println(io, x)`, `eof`, `position`, `seek`,
-`filesize`, `close`, `@printf(io, ...)`, `printf(io, c"...", x)`, and numbers and arrays of numbers as binary data
-(`write(io, x)`, `read(io, Int32)`, `read!(io, array)`, `read(io, n)`). The mode is the one of `fopen` (`"r"`, `"w"`, `"a"`,
-`"r+"`, ...). The keyword arguments of `open`, `readline` and `eachline` (`read = true`, `keep = true`)
-are not supported; and so far there is nothing for the file system itself (`isfile`, `mkdir`, `rm`, `readdir`, ...).
-
-### What works, and what doesn't
-
-What works: numbers, strings, characters, symbols, `nothing`, `missing`, and anything built from
-those by `string`, interpolation, `sprint`, `repr`, `@show`... and their `show` (with the quotes
-and escapes), **arrays** (also nested, and of `Any`), **tuples**, **pairs**, **dictionaries**, **sets**, **types** and plain **structs**
-(see [`show` of containers, types and structs](@ref)), Unicode text and its properties (`isletter`, `uppercase`,
-`textwidth`, ...), formatting, and files.
-
-What doesn't work yet:
-* `show` of matrices, and of containers that are not arrays, tuples, pairs,
-  dictionaries or sets. (Print the elements.)
-* **`Dict{K,Any}` or `Dict{Any,Any}` built from pairs** (`Dict{String,Any}("a" => 1)`), and iterating a `Pair` of two
-  different types (`for x in "a" => 1`): both are dynamic. Fill a `Dict{K,Any}()` with `d[k] = v`.
-* **`===` of unions and of types**: `===` of two objects that are not the same one (so `Dict` and `Set` lookups)
-  compares Strings, numbers, tuples and immutable structs (with Strings, Symbols, or other structs in them) by
-  their contents, as in Julia. A struct with a field that is a `Union` of types stored inline
-  (`Union{Int,Nothing}`), types, and `svec`s report and exit when run, instead.
-* **`objectid` and `hash` of a value whose type is not known when compiling** (an element of a `Vector{Any}`, a field of
-  an abstract type that is not a Union): they need the type when the program is run, and are rejected. Structs,
-  tuples, Strings and the like are fine as keys of a `Dict` or `Set`, with the same `objectid` as Julia's.
-* **`@printf` without an `io`**, which uses `stdout`: write `@printf(STDOUT, ...)`.
-* The **file system** (`isfile`, `mkdir`, `readdir`, `rm`, ...). (`filesize(path)` works.) And memory-mapped
-  files, sockets, processes.
-
-The tables for the properties of characters are made when the package is compiled, with the Unicode
-data of the Julia that compiles it, and so are the same as in Julia.
-
-### `show` of containers, types and structs
-
-Base's `show` for a container asks the `IOContext` of the stream what is known about the types of the
-elements (an `ImmutableDict` of `Any`s), and writes type names by looking up modules and bindings: all
-dynamic. Here the same output is made with what is known when compiling (`src/overrides/printing.jl`, `src/overrides/io.jl`), and most of what Base does is Base's own code:
-
-* the name of a type is a constant string made by Base's own `show` when compiling, so it is what Base prints;
-* the **properties of the context** (`:typeinfo`, `:compact`, `:limit`, `:displaysize`, ...) are in the type of the stream (`ContextIO`), so that asking for one is a
-  constant (see the next section);
-* what Base's `typeinfo_prefix` does with the type of the elements is done when compiling, for the type of the container;
-* an element of an abstract type (an element of a `Vector{Any}`, a field of a struct of type `Any`) is shown by
-  a chain of `isa` over a closed set of types: the numbers, `String`, `Char`, `Symbol`, `Nothing`,
-  `Missing`, `Vector{Any}`, and those you add with [`add_show_candidates!`](@ref). Showing a value of another
-  type is an error *when the program runs* (the message says so).
-
-```julia
-struct Point; x::Int; y::Float64; end
-add_show_candidates!(Point, Tuple{Int,Float64})   # before compiling
-
-main() = (println(Any[1, "a", Point(2, 3.5), (4, 5.0)]); 0)
-# Any[1, "a", Point(2, 3.5), (4, 5.0)]
-```
-
-Arrays of any number of dimensions are shown by Base's code (`println(A)`, `repr(A)`, `"$A"`): the overlays only take away what makes Base compile the code once for all
-arrays, a matrix made a value of the type `Any` for the compiler (`inferencebarrier`), which would be a dynamic call. `Dict`s, `Set`s and vectors are Base's too; tuples, pairs and structs are written by
-methods of this package (Base's reads the dictionary of an `IOContext` directly).
-
-### `IOContext`, `text/plain` and `display`
-
-`IOContext(io, :compact => true, :limit => true, ...)` of the streams of the program (`STDOUT`, `STDERR`, files, and what `sprint` writes to) has the properties in its *type*, so asking
-for them (`get(io, :compact, false)`) is a constant when compiling, and what depends on it is decided then. So their **values have to be known when compiling** (a `Bool`, a number, a type, a tuple of
-those): `IOContext(io, :compact => flag)` with a `flag` that is only known when the program runs cannot be resolved (compiling says so). `:SHOWN_SET` (the containers that contain
-themselves, which are not detected) and `:module` are not kept. The properties then do what they do in Julia:
-
-```julia
-show(IOContext(STDOUT, :compact => true), 0.1 + 0.2)          # 0.3
-show(IOContext(STDOUT, :limit => true), collect(1:30))        # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10  …  21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
-```
-
-`show(io, MIME"text/plain"(), x)` and `display(x)` (which writes the `text/plain` form to the standard output, as the `TextDisplay` of a Julia script does) write matrices aligned, with the
-size and type above them, and vectors, ranges, dictionaries, sets and structured matrices (`Diagonal`, `Symmetric`, ...) as Julia does. Base lines up the numbers of a column by finding the
-decimal point (or the sign of the imaginary part, or the `//`) with regular expressions, which a program does not have: the same is found by a scan of the text. With `:limit` and
-`:displaysize` the output is cut as Julia cuts it (`display` does not set them, as on a terminal that is not one).
-
-### Color
-
-`printstyled` (with `color`, `bold`, `italic`, `underline`, `blink`, `reverse` and `hidden`, and a color that is a name or a number of 0 to 255) writes the escape sequences of Julia when the stream has
-`:color => true` in its context, and plain text when it has not. A program is not told whether its output is a terminal, so it is as `julia script.jl > file`: `STDOUT` has no color, and
-`Base.get_have_color()` (which Crayons, and so UnicodePlots, ask when the stream does not say) is `false`. A program that wants color asks for it: `printstyled(IOContext(STDOUT, :color => true), "text"; color = :red)`.
-
-### StyledStrings
-
-Styled strings (`styled"..."`, `AnnotatedString`, `AnnotatedChar`) are written to a stream with the escape sequences of Julia when its context has `:color => true`, and as plain text otherwise (loading
-`StyledStrings` is what enables this, as for the other standard libraries that have a part of their own). The faces are the ones that there are when compiling (the theme, and what has been added with
-`addface!`), as they are looked up by a comparison with each name; `withfaces`, `addface!` and the `faces.toml` of the user when the program runs are not supported. A terminal is taken to be one with
-italics, reverse and strikethrough (the terminfo of the terminal is not read), 24-bit color is used when the environment says so (`COLORTERM=truecolor`, ...) and else the closest of the 256 colors, and the underline of a color
-and style is a plain underline. Not supported: `show` of an `AnnotatedString` (`repr`), which shows annotations of the type `Any`.
-
-Limits: containers that contain themselves are not detected (they recurse until the program crashes); the keyword `context` of `sprint` with a pair that is written in the call
-(`sprint(show, v; context = :compact => true)`) works for what is not an array, and is not yet supported for the show of an array (give `IOContext` the stream instead, or a context that is
-a stream); `text/plain` of a `UniformScaling` (`2I`) is not supported (it uses a regular expression); a
-`Symbol` that the program makes and that is not a plain ASCII identifier is written as Base writes it only if that is clear without the parser's tables
-(`Symbol("a b")`, `Symbol("1a")`, `Symbol("")`), and else it is an error (the symbols that were there when compiling, such as `:+` or `:α`, are written as Julia writes them: see
-[Symbols](@ref)); and the names of types of modules that are loaded after this package (`using` in the program) are written with their module (Base writes
-`Main`'s view of them).
-
-## Symbols
-
-Julia keeps every symbol in one table, so that there is one object for each name and `===` of symbols compares addresses. A program has no such table, so:
-
-* The symbols that the program has when it is compiled are copied into it, as any constant is, so `Dict`s and `Set`s of symbols that are `const` work (a symbol
-  hashes by a number that is in it, which the copy has too), and so does `string(sym)`, `print`, `sort`, `startswith(string(sym), ...)`, and the like.
-* `Symbol("abc")`, `Symbol("x", 1)`, `Symbol(uppercase(string(s)))` and `Symbol(::Vector{UInt8})` of a name that the program makes work too. The binary has a list of
-  its symbols, sorted by name, that is looked in first, so `Symbol("abc") === :abc` and a `Dict` that was made when compiling finds a key that the program made; a name
-  that is not in it is made into a new symbol, kept in a tree (the same as the table of Julia is: by hash and name). These symbols are never freed (40 bytes and the name
-  for each different name), and their names can't have a NUL in them.
-* `show` of a symbol writes `:name` for a name that is a plain ASCII identifier. For other symbols, Julia decides with tables of its parser (`:+`, `:(==)`, `:α`, `Symbol("a b")`):
-  for those that the binary has, it writes what Julia writes (the text is made when linking); for those that the program makes, only the names that are certainly not
-  identifiers or operators (empty, with a space or a control character or a quote, or starting with a digit) are written, as `Symbol("...")`; any other is an error.
-* Types as keys: `==` of types, `hash` of a `DataType`, and so `Dict{DataType,...}` and `Set{DataType}`, work (a type hashes by the number that it has in it). `==` of types
-  that are not both concrete (a `Union`, an abstract type with parameters) goes by `<:` (see [Dynamic dispatch on abstract types and on `Any`](@ref)).
-* `getfield(x, name)`, `x.name`, and for a `NamedTuple` `nt[name]` and `get(nt, name, default)`, of a struct with a `Symbol` that is only known when the program runs work: the result has the union of the types of the fields (a table of functions that is indexed by the name of the one that a keyword asks for), which is split where it is used. Not supported: such a name for the fields of a type object.
-
-## Entry points
+# Entry points
 
 An executable is made of a function, in one of three forms:
 
@@ -185,7 +12,10 @@ An executable is made of a function, in one of three forms:
 integer (a function that ends with `println` returns `nothing`, and exits with 0). `main()` is the same for a program that takes no arguments. The third form is C's: it compiles `f(argc, argv)` to the
 `main` of a C program, with no code of ours between the two, which is as small as a program can be (the others add a kilobyte or less), and what the examples of the sizes and speeds below use. Its
 status is the return value as C has it, so the function has to return an `Int` (or an `Int32`): for `nothing` it is whatever the machine had in the register, and the compiler warns of it.
-See [`compile_executable`](@ref).
+
+# Compilation
+
+See [Compiling: overrides, passes, and inference](compiling.md) for how it works, and [`compile_executable`](@ref) or [`compile_shlib`](@ref) for options and syntax:
 
 ```julia
 main(args) = (println("got ", length(args), " arguments"); length(args))
@@ -195,30 +25,32 @@ hello() = println("hello")
 compile_executable(hello)                      # `./hello` prints "hello" and exits with 0
 ```
 
-## Writing overrides
+See also: [The runtime](runtime.md), [Supported libraries and packages](support.md), and [Limitations](limits.md).
 
-`@device_override` adds a method to the method table of this package (see below), which replaces
-the method of Base for the code that is compiled. One thing to know: **an override is used for every
-call that it covers entirely, instead of all of the methods of Base, including those that are more
-specific than it.** So an override `print(x1, x2) = print(STDOUT, x1, x2)` would also be used for
-`print(io, x)`, which must go to the methods of Base for printing to an `IO`: `print(io, 'c')`,
-`print(io, "string")`... Overrides therefore need to be written so that they don't cover calls that
-they should not: with the same signature as the method that they replace, with restricted argument
-types, or by doing for those calls what the method of Base does (see `src/overrides/io.jl`).
-
-### Fields that are made again when the program runs
-
-A field of a pointer of a constant (the face of FreeType of a font, a surface of a library) is an address of the process that compiled the program, and is null in the program. A package's extension says how the
-program makes it again with a method of `StaticRuntime.remade_by`, which gives a function of the object:
+## Testing that something compiles
 
 ```julia
-StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) = font -> open_face(font)   # (from what the font has)
+julia> using StaticRuntime
+
+julia> @static_test sum(rand(10)) < 10     # compile, run, and compare with Julia
+Test Passed
+
+julia> static_status(() -> length(string(12345)))
+(:ok, "")
 ```
 
-A read of the field (`getfield(font, :ft_ptr)`, wherever the package's code makes it) then makes it, and stores it, the first time that the program finds it null; the warning that the field is null in the program is
-not given for it. Only fields of a `Ptr` type. (The extension for Makie does this for the fonts of a figure.)
+[`static_status`](@ref) reports how far something gets: `:compile_error`, `:link_error`,
+`:runtime_error`, `:mismatch` or `:ok`. [`undefined_symbols`](@ref) lists what the compiled code
+needs besides libc.
 
-### Stating a type instead of copying code
+# Overrides
+
+`@device_override` adds a method to the method table of this package (see below), which replaces the method of Base for the code that is compiled.
+One key thing to know, if you wish to write your own overrides: **an override is used for every call that it covers entirely, instead of all of the methods of Base, including those that are more specific than it.** 
+Consequently, an override `print(x1, x2) = print(STDOUT, x1, x2)` would also be used for `print(io, x)`, which must go to the methods of Base for printing to an `IO`: `print(io, 'c')`, `print(io, "string")`... 
+Overrides therefore need to be written so that they don't cover calls that they should not: with the same signature as the method that they replace, with restricted argument types, or by doing for those calls what the method of Base does (see `src/overrides/io.jl`).
+
+## Stating a type instead of copying code
 
 Many overrides of code from a package are a copy of a function with a type put in it, because the compiler finds a wide type (a `Union`, `Any`) where the code knows what it is. A copy drifts when the package changes. `@assume` states the
 type, and the code of the package stays as it is:
@@ -237,21 +69,22 @@ end
 * Both are given where the module is initialized (`__init__`), as `add_dispatch_candidates!` is: they are kept for the session, and not by what is precompiled. A package extension is the place. What is stated is a number in the key of
   what is inferred, so a change of it is a new inference.
 
-## Serialization
+## Fields that are made again when the program runs
 
-`serialize(io, x)` of a value whose type is known when compiling writes the bytes that Julia writes (numbers, strings, tuples, arrays, `Dict`s and `Set`s, structs, objects that refer to themselves, ranges, `BigInt`), so a stream can be read by Julia, and by a program.
-
-`deserialize(io)` gives a value of the type that the stream says, which a program can not make when it runs: it is made over the types that the program has. Those are the types that the program serializes (found when compiling, with the types of what they hold: the fields of a struct, the elements of an array, the keys and values of a `Dict`), and the ones that are registered with `add_deserialize_types!`, for a stream that another program wrote:
+A field of a pointer of a constant (the face of FreeType of a font, a surface of a library) is an address of the process that compiled the program, and is null in the program. 
+A package's extension says how the program makes it again with a method of `StaticRuntime.remade_by`, which gives a function of the object:
 
 ```julia
-struct Point; x::Float64; y::Float64; end
-add_deserialize_types!(Point, Vector{Point})     # before compiling
-
-function main()
-    p = deserialize(open("points.bin"))::Vector{Point}
-    ...
-end
+StaticRuntime.remade_by(::Type{FTFont}, ::Val{:ft_ptr}) = font -> open_face(font)   # (from what the font has)
 ```
 
-What is read is, for the compiler, a value of one of those types (a union that Julia splits: `::T` after it says which, and is how a program that has many types is written). A stream with a value of another type stops the program, with a message that says so. A `Vector{Any}` (or a field of an abstract type) holds values of the types that are registered: register them too (`add_deserialize_types!(Vector{Any}, Int, String)`). Not supported: a `Symbol` that is read, tuples of more than 255 elements, `Union` and `UnionAll` values, modules, functions and `Expr`; and `serialize(s::Serializer, x)` of a `Serializer` that is made by the program (the types that it writes are found from `serialize(io, x)`). A program that does not use Serialization has nothing of it.
+A read of the field (`getfield(font, :ft_ptr)`, wherever the package's code makes it) then makes it, and stores it, the first time that the program finds it null; the warning that the field is null in the program is not given for it. Only fields of a `Ptr` type. (The extension for Makie does this for the fonts of a figure.)
 
+# Running the package tests
+
+`] test` runs all: the tests of the compiler, the runtime and the language (`test/core`), as well as those of the standard libraries and the packages that programs use (`test/packages`).
+Most of them compile a program and compare what it prints with what Julia prints for the same code. Set `GROUP=Core` or `GROUP=Packages` to run one of the two, `PACKAGES=Dates,MPI` to run some of the files of `Packages` (the MPI tests need an MPI library, which MPI.jl installs), `TEST_TIMING=1` to print the time that each file took, and `TEST_FOLDED=0` to not fail the cases whose program is only a print of an answer that the compiler found (which is on by default: the test of such a case does not test the code that it is about) (`opaque` in `test/helpers.jl` makes values that the compiler does not know; whether a program computes something from them is read from its module, see `StaticRuntime.input_dependent_cases`; `TEST_FOLDED=report` lists those that do not, and goes on). `STATIC_RUNTIME_GC=3` runs the programs with the collector in stress mode, sweeping every three allocations.
+
+`GROUP=Fuzzing` (not part of `] test`) runs random values and programs (`test/fuzz`): each seed is compiled and run in a process of its own, with a time limit, a few at a time, and compared with Julia. The seeds that failed
+once are run every time (`test/fuzz/pinned.jl`), with random ones; `FUZZ_SEEDS=0x688,1:50` runs the seeds that you give, `FUZZ_COUNT` is the number of random ones for each kind (20), `FUZZ_TIME_LIMIT` the seconds for a case (120)
+and `FUZZ_WORKERS` how many run at once. A seed that fails or does not finish is written with the command that runs it again by itself: `julia --project=test test/fuzz/case.jl embedfuzz 0x688`.
