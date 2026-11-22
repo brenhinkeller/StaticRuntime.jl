@@ -76,6 +76,28 @@
     @test read(joinpath(host_dir, "other.txt"), String) == read(joinpath(exe_dir, "other.txt"), String)
 end
 
+# The keywords of `open` (`read`, `write`, `create`, `truncate`, `append`, `lock`: the file is opened with the flags that Base works out from them) and of `readline`, `readlines` and `eachline` (`keep`)
+okpath(n) = string(tempdir(), "/static_open_keywords_", getpid(), "_", n, ".txt")
+@testset "Keywords of open, readline and eachline" begin
+    check_cases([
+        "read = true"                  => () -> (p = okpath(1); write(p, "ab\ncd\n"); open(p; read = true) do io; println(readline(io)); end; rm(p); 0),
+        "write = true truncates"       => () -> (p = okpath(2); write(p, "long old content\n"); open(p; write = true) do io; print(io, "new\n"); end; println(repr(read(p, String))); rm(p); 0),
+        "append = true"                => () -> (p = okpath(3); write(p, "a\n"); open(p; append = true) do io; print(io, "b\n"); end; println(repr(read(p, String))); rm(p); 0),
+        "read and write"               => () -> (p = okpath(4); write(p, "abcdef"); open(p; read = true, write = true) do io; write(io, "XY"); seekstart(io); println(repr(read(io, String))); end; rm(p); 0),
+        "write without truncating"     => () -> (p = okpath(5); write(p, "abcdef"); open(p; write = true, truncate = false) do io; write(io, "XY"); end; println(repr(read(p, String))); rm(p); 0),
+        "truncate and read"            => () -> (p = okpath(6); write(p, "abcdef"); open(p; truncate = true, read = true) do io; write(io, "Z"); seekstart(io); println(repr(read(io, String))); end; rm(p); 0),
+        "append and read"              => () -> (p = okpath(7); write(p, "a\n"); open(p; append = true, read = true) do io; write(io, "b\n"); seekstart(io); println(repr(read(io, String))); end; rm(p); 0),
+        "create = false, no file"      => () -> (p = okpath(8); r = try; open(p; write = true, create = false) do io; 1; end; catch e; 2; end; println(r); 0),
+        "read = true, no file"         => () -> (p = okpath(9); r = try; open(p; read = true) do io; 1; end; catch e; 2; end; println(r); 0),
+        "lock = false"                 => () -> (p = okpath(10); write(p, "q\n"); io = open(p; lock = false); println(readline(io)); close(io); rm(p); 0),
+        "readline of a stream, keep"   => () -> (p = okpath(11); write(p, "ab\ncd\n"); open(p, "r") do io; println(repr(readline(io; keep = true))); end; rm(p); 0),
+        "readline of a file, keep"     => () -> (p = okpath(12); write(p, "ab\ncd\n"); println(repr(readline(p; keep = true))); rm(p); 0),
+        "readlines of a file, keep"    => () -> (p = okpath(13); write(p, "ab\ncd\n"); println(repr(readlines(p; keep = true))); rm(p); 0),
+        "eachline of a file, keep"     => () -> (p = okpath(14); write(p, "ab\ncd\n"); for l in eachline(p; keep = true); println(repr(l)); end; rm(p); 0),
+        "eachline of a stream, keep"   => () -> (p = okpath(15); write(p, "ab\ncd\n"); open(p, "r") do io; for l in eachline(io; keep = true); println(repr(l)); end; end; rm(p); 0),
+    ])
+end
+
 # the forms of `readline`, `readlines` and `eachline` that read the standard input without naming it
 @testset "Standard input without naming it" begin
     @eval function stdin_forms_main(args::Vector{String})

@@ -142,15 +142,46 @@ function open_file(path::AbstractString, mode::AbstractString)
 end
 
 """
-    open(path, [mode = "r"]) -> StaticFile
+    open(path, [mode = "r"]; read, write, create, truncate, append, lock) -> StaticFile
 
-Open the file `path` with `fopen` of libc: `mode` is a C `fopen` mode (`"r"`, `"w"`, `"a"`, `"r+"`, ...).
-Close it with `close`; `open(f, path, mode)` does, after calling `f(io)`. (The keyword arguments of
-`open` in Base, like `read = true`, are not supported.)
+Open the file `path`, as a `StaticFile`. `mode` is a C `fopen` mode (`"r"`, `"w"`, `"a"`, `"r+"`, ...: opened with `fopen`). The
+keywords are those of Base's `open` (`read = true`, `append = true`, `create = false`, ...), with the same meaning for each
+combination: the file is opened with `open` of the system, with the flags that they say, and then given to libc as a stream
+(`fdopen`). `lock` is accepted and does nothing (there is one thread). Close it with `close`; `open(f, path, ...)` does, after
+calling `f(io)`.
 """
 @device_override Base.open(path::AbstractString, mode::AbstractString) = open_file(path, mode)
 
-@device_override Base.open(path::AbstractString) = open_file(path, "r")
+# the flags of `open` of each system (the access is `O_RDONLY` 0, `O_WRONLY` 1 or `O_RDWR` 2)
+@static if Sys.isapple()
+    const O_APPEND, O_CREAT, O_TRUNC = Cint(0x8), Cint(0x200), Cint(0x400)
+else
+    const O_APPEND, O_CREAT, O_TRUNC = Cint(0x400), Cint(0x40), Cint(0x200)
+end
+
+# The file as Base opens it: the flags are those that Base works out from the keywords (`Base.open_flags`), as `open` of the
+# system takes them, and the stream is made from the descriptor with the mode that its access is (what is there is not
+# truncated by `fdopen`)
+function open_file_with_flags(path::AbstractString, read::Bool, write::Bool, create::Bool, truncate::Bool, append::Bool)
+    path = String(path)
+    access = read && write ? Cint(2) : write ? Cint(1) : Cint(0)
+    flags = access | (create ? O_CREAT : Cint(0)) | (truncate ? O_TRUNC : Cint(0)) | (append ? O_APPEND : Cint(0))
+    fd = GC.@preserve path ccall(:open, Cint, (Cstring, Cint, Base.Cmode_t...), path, flags, Base.Cmode_t(0o666))
+    fd < 0 && throw(ErrorException(string("could not open file ", path)))
+    mode = append ? (read ? "a+" : "a") : read && write ? "r+" : write ? "w" : "r"
+    fp = GC.@preserve mode ccall(:fdopen, Ptr{FILE}, (Cint, Cstring), fd, mode)
+    if fp == C_NULL
+        ccall(:close, Cint, (Cint,), fd)
+        throw(ErrorException(string("could not open file ", path)))
+    end
+    return StaticFile(fp)
+end
+
+@device_override function Base.open(path::AbstractString; lock = true, read::Union{Bool,Nothing} = nothing, write::Union{Bool,Nothing} = nothing,
+                                    create::Union{Bool,Nothing} = nothing, truncate::Union{Bool,Nothing} = nothing, append::Union{Bool,Nothing} = nothing)
+    f = Base.open_flags(; read, write, create, truncate, append)
+    return open_file_with_flags(path, f.read, f.write, f.create, f.truncate, f.append)
+end
 
 function Base.close(f::StaticFile)
     fp = f.fp
@@ -195,7 +226,7 @@ Base.bytesavailable(f::StaticFile) = filesize(f) - position(f)
 ## Those of Base, for a file name or without a stream, which has the stream from `stdin` (the global of the abstract
 ## type `IO`), are written with keyword arguments (`keep`, `cancel`), and in terms of closures (`eachline` stores the
 ## function that closes the file in a field of the abstract type `Function`), which can't be resolved when compiling.
-## These do the same for calls without those keyword arguments: (`keep = true` is not supported.)
+## These do the same, with `keep` where Base has it.
 
 # `write(io, xs...)` loops over its arguments, which have different types (as `print`, see `base.jl`)
 write_all(io) = 0
