@@ -116,6 +116,7 @@ what it prints with what Julia prints.
 * [Basic usage](usage.md) Entry points and compilation options, as well as overrides, and how to write your own.
 * [Compiling: overrides, passes, and inference](compiling.md): how a compilation works, what is done to help inference, dynamic dispatch, and finding out why something does not compile.
 * [The runtime](runtime.md): memory and the garbage collector, exceptions, and the size of binaries.
+* [Binary size and performance](performance.md): Size and performance of compiled binaries, including comparison with C/C++.
 * [Supported libraries and packages](support.md): BLAS, libraries, MPI, tasks, and the packages that are known to work.
 * [Limitations](limits.md).
 * [API Reference](reference.md).

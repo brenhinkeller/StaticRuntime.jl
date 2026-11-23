@@ -19,6 +19,7 @@ makedocs(;
         "Basic usage" => "usage.md",
         "Compiling: overrides, passes, and inference" => "compiling.md",
         "The runtime" => "runtime.md",
+        "Binary size and performance" => "performance.md",
         "Supported libraries and packages" => "support.md",
         "Limitations" => "limits.md",
         "API Reference" => "reference.md",
