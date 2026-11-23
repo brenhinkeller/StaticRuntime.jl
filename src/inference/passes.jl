@@ -127,7 +127,7 @@ function run_passes(c::Compilation, compile)
         more_listeners = update_listeners!(c)
         wanted = more_functions || more_callbacks || !isempty(newc) || more_boxes || slots_retry || more_listeners || more_pruned
         retry = function_passes < MAX_FUNCTION_PASSES && pass < MAX_FUNCTION_PASSES + SLOT_PASS_LIMIT + SLOT_NARROWINGS + 2 && wanted
-        (trace_dispatch_on() || haskey(ENV, "STATIC_RUNTIME_CENSUS") || haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")) && trace_census(c, pass)
+        (trace_dispatch_on() || haskey(ENV, "STATIC_RUNTIME_CENSUS") || haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW") || haskey(ENV, "STATIC_RUNTIME_CENSUS_SETS")) && trace_census(c, pass)
         trace_on() && trace_pass(c, pass, started, slots_retry, had_failure, failure, new, more_functions, newcb, more_listeners, more_boxes, newc, wanted, retry, function_passes)
         if retry
             if more_boxes

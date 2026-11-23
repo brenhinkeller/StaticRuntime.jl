@@ -45,6 +45,9 @@ end
 
 # a value that the compiler does not know the type of
 any_value(x) = Base.inferencebarrier(x)
+# (a value that comes through `any_value` or `Base.inferencebarrier` has a type that the compiler is not told of: the types of such values in the
+# tests are registered, as a program has to register what comes from where the compiler does not see)
+StaticRuntime.add_dispatch_candidates!(Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, UInt128, Float16, Float32, Float64, String, Char, Symbol, Bool, Nothing, Missing)
 
 # A number that is `x`, and that neither Julia nor LLVM can know when compiling (it is added to the top bit of the clock, which is zero until the year 2262). A program whose values are
 # constants is run by the compiler, and what is compiled is a print of the answer: so what a case has to run (an exception, an allocation, a loop) has to depend on a number like this.

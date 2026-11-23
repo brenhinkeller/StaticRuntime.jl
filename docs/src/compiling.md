@@ -154,7 +154,7 @@ A compilation is made in passes (the types of functions, callbacks, boxes and th
 looking at a compilation that takes long, or ends in "did not settle":
 
 - **A compilation is made of its program and of nothing else.** What was compiled before does not change what is compiled: the tables that compilations keep are forgotten when one begins, and what inference makes (the code instances of Julia's compiler) has a cache of its own for each compilation, which is emptied when it ends.
-  Only what is not made by compiling persists: the overrides, the registrations (`add_dispatch_candidates!`, `add_show_candidates!`, `add_callback!`, `prepare!`, ...) and the settings. `STATIC_RUNTIME_CACHE=1` makes compilations share what they infer (a compilation is then
+  Only what is not made by compiling persists: the overrides, the registrations (`add_dispatch_candidates!`, `add_callback!`, `prepare!`, ...) and the settings. `STATIC_RUNTIME_CACHE=1` makes compilations share what they infer (a compilation is then
   quicker, and the facts that the analysis finds of each method are kept with it, so that it should not matter; `test/core/determinism.jl` compiles the same programs in other orders, and again, and checks that they are the same).
 - `STATIC_RUNTIME_TRACE=1` writes a line for each pass on the error output: how long it took, whether it was cut short by a change of the types of the slots or completed or failed, the candidates of the calls of
   unknown functions that it has and found (and why they were taken, or not), the number of methods that were optimized (and how many of them were different: a pass that optimizes the same methods again and again is
@@ -213,7 +213,7 @@ Which types the union has depends on the type of the argument:
   `inferencebarrier`, say), or a program compiled with `STATIC_RUNTIME_UNIVERSE=0`:
 
   ```julia
-  add_dispatch_candidates!(Tuple{Int,Float64})   # before compiling; the same list as `add_show_candidates!`
+  add_dispatch_candidates!(Tuple{Int,Float64})   # before compiling
   ```
 
   A value of a type that is not registered **aborts the program when it reaches such a call**, with a message that says which

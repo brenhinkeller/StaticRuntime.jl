@@ -1,5 +1,5 @@
 # What is registered: the one place that the packages that are compiled say things to the compiler in, with
-# `add_show_candidates!`, `add_dispatch_candidates!`, `@assume` and `@assume_field`.
+# `add_dispatch_candidates!`, `@assume` and `@assume_field`.
 #
 # The registrations of a process are one value, `REGISTRY`, and they only grow: a type that is registered stays, and a
 # statement of a type that is made again replaces the one before it. The `version` of the registry is a hash of what is
@@ -55,7 +55,7 @@ function register_new!(r::Registry, list::Vector, x)
     return true
 end
 
-register_show!(types) = (for T in types; register_new!(REGISTRY, REGISTRY.show, T); end; nothing)
+register_types!(types) = (for T in types; register_new!(REGISTRY, REGISTRY.show, T); end; nothing)
 register_family!(types) = (for T in types; register_new!(REGISTRY, REGISTRY.family, T); end; nothing)
 register_deepcopy!(sig) = register_new!(REGISTRY, REGISTRY.deepcopy, sig)
 
@@ -122,8 +122,8 @@ end
 
 function Registered(r::Registry = REGISTRY)
     Registered(r.version,
-        unique!(vcat(DEFAULT_DISPATCH_CANDIDATES, r.show)),
-        unique!(vcat(DEFAULT_SHOW_CANDIDATES, r.show)),
+        unique!(copy(r.show)),
+        unique!(copy(r.show)),
         copy(r.family), copy(r.returns), copy(r.fields), copy(r.embedded),
         Dict{Any,Vector{Type}}(k => copy(v) for (k, v) in r.noted)
     )

@@ -13,21 +13,25 @@
 # Only calls that dispatch (more than one method fits, or the one that does does not cover the argument types) are
 # changed.
 
-## The registered types: those of `show` (`add_show_candidates!`), which a value of `Any` is expected to have
+## The registered types:
 
 """
     add_dispatch_candidates!(types...)
 
 Add concrete types to those that a call on a value of type `Any` (an element of a `Vector{Any}`, say), or of an abstract
-type with too many subtypes to list (`Number`), dispatches over in compiled code. The defaults are numbers, `String`,
-`Char`, `Symbol`, `Nothing`, `Missing` and `Vector{Any}`; the types that the program itself makes, and the types stored in
-its containers of `Any`, are found without this. Use it for a value of one of Julia's types that reaches such a call some
-other way (`add_dispatch_candidates!(Tuple{Int,Float64})`), or with `STATIC_RUNTIME_UNIVERSE=0`. A value of a type that is
-not listed is an error when the program runs (compiling says which calls were made this way). It is the same list as
-[`add_show_candidates!`](@ref)'s, and applies to every later compilation in the process: call it before compiling, not
-from a package for its own types.
+type with too many subtypes to list (`Number`), dispatches over in compiled code. There are no types that are there to start
+with: the types that the program itself makes, and the types stored in its containers of `Any`, are found without this. Use it for
+a value that reaches such a call from where the compiler does not see (what a C function gives, `Base.inferencebarrier`, a global of
+type `Any`): `add_dispatch_candidates!(Int, String)`. A value of a type that is not listed is an error when the program runs. 
+It applies to every later compilation in the process: call it before compiling, not from a package for its own types.
 """
-add_dispatch_candidates!(types::Type...) = add_show_candidates!(types...)
+function add_dispatch_candidates!(types::Type...)
+    for T in types
+        isconcretetype(T) || throw(ArgumentError("$T is not a concrete type"))
+    end
+    register_types!(types)
+    return nothing
+end
 
 # Types that a call is made over only when the argument is of a type that they are instances of (`Dates.DatePart{'y'}`
 # for `Dates.DatePart`), and not for `Any`: they are not types that a value of `Any` is likely to have, and a call with
@@ -39,11 +43,6 @@ function add_family_candidates!(types::Type...)
     register_family!(types)
     return nothing
 end
-
-# (without `Vector{Any}`, which `show` needs for lists in lists, but which has methods of arithmetic and the like, that
-# call for much of what is not there, for every call with an `Any` that is a number: register it if you have lists in
-# the values of the calls that you make)
-const DEFAULT_DISPATCH_CANDIDATES = Type[T for T in DEFAULT_SHOW_CANDIDATES if T !== Vector{Any}]
 
 ## The unions that an abstract type is made
 
@@ -79,7 +78,7 @@ end
 
 # The union of the registered types that are subtypes of `T` (`Any`, or an abstract type that can't be listed), or
 # `nothing`. For a call of `show`, which is also made for a `Vector{Any}` in a `Vector{Any}`, they are the types that
-# `show` is registered for (see `add_show_candidates!`): those of calls in general, and `Vector{Any}`.
+# `show` is registered for (see `add_dispatch_candidates!`): those of calls in general, and `Vector{Any}`.
 function registered_union(c::Compilation, @nospecialize(T), show::Bool = false; universe::Bool = true)
     # (a `Union` is not looked up: `hash` of a union is the same for all unions, so a table with them for keys compares
     # each with the ones that it has, which for the unions of many types is a subtype check of each pair, and they are
@@ -92,7 +91,7 @@ function registered_union(c::Compilation, @nospecialize(T), show::Bool = false; 
 end
 # (whether `registered_union(c, T, show)` reads the universe: the types that the program makes, which change between
 # passes)
-reads_universe(c::Compilation, @nospecialize(T), show::Bool) = !show && c.settings.universe && T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll)
+reads_universe(c::Compilation, @nospecialize(T), show::Bool) = c.settings.universe && T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll)
 
 function registered_union_(c::Compilation, @nospecialize(T), show::Bool, universe::Bool)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its
@@ -101,7 +100,7 @@ function registered_union_(c::Compilation, @nospecialize(T), show::Bool, univers
     candidates = show ? c.registered.show : c.registered.dispatch
     T === Any || (candidates = vcat(candidates, c.registered.family))
     found = Type[C for C in candidates if C <: T]
-    if universe && !show && c.settings.universe
+    if universe && c.settings.universe
         # (the types that the program makes, that are not Julia's own: see slots.jl. How many there are is the limit
         # that the call is split in, once the methods are looked at (`close_abstract_arguments`))
         for t in universe_extras(c, T)
@@ -453,6 +452,10 @@ function prune_unviable!(c::Compilation, e)
         for (name, M) in c.dispatch.cases
             list = get(c.closures.pruned, name, nothing)
             list !== nothing && M in list && continue
+            # (a type that was registered is one that the user said values of are there: it is not left out for what other types
+            # need. A place in a function that every case reaches (`print`, `getindex`) is the same for all of them, and the code of
+            # the case that does not compile is not told apart from the others that reach it by the functions, only by what they do)
+            (M in c.registered.dispatch || M in c.registered.show) && continue
             implicated = false
             for mi in get(by_name, name, Core.MethodInstance[])
                 sig = Base.unwrap_unionall(mi.specTypes)
@@ -462,8 +465,15 @@ function prune_unviable!(c::Compilation, e)
             implicated || continue
             push!(get!(Vector{Any}, c.closures.pruned, name), M)
             added = true
-            compile_warning!((:unviable, name, M), string("a call of `", name, "` over the registered types and the universe is not made over `", M,
-                             "`: the code for it can not be compiled (", site.function_name, " in `", failing[1], "`, ", failing[2], ":", failing[3], "). A value of that type that reaches the call is a `MethodError`."))
+            message = string("a call of `", name, "` over the registered types and the universe is not made over `", M,
+                             "`: the code for it can not be compiled (", site.function_name, " in `", failing[1], "`, ", failing[2], ":", failing[3], "). A value of that type that reaches the call is a `MethodError`.")
+            # (a type of Julia's own that the program found for itself (a `Vector{TypeVar}` that something of Base holds) is one that the
+            # program has no value of that the user could say: a warning is for a type that the user made or registered)
+            if user_relevant(M) || M in c.registered.dispatch || M in c.registered.show
+                compile_warning!((:unviable, name, M), message)
+            else
+                @debug message _id = :static_pruned
+            end
         end
     end
     return added
@@ -568,9 +578,61 @@ function census_flow(c::Compilation, e)
     return (:known, length(traced), count(t -> !(t in candidates), traced))
 end
 
+# The types that can be an `Any` in the program, found from what it does (the stage 2 of the notes "Principled candidates"): those
+# that are stored in a slot of a container or a field of abstract elements (the slots that slots.jl knows), those that calls give to
+# an argument that a method declares abstract (the types of the arguments of the calls, `record_flow_arguments!`), and the types of
+# the program's own (the universe). It is compared with what calls on an `Any` are made over (the registered types and the
+# universe) with `STATIC_RUNTIME_CENSUS_SETS=file`: what the program widens that the lists do not have, and what the lists have that
+# it never widens.
+function widened_types(c::Compilation)
+    out = Set{Any}()
+    function add(@nospecialize(T))
+        for t in Base.uniontypes(CC.widenconst(T))
+            t isa DataType && isconcretetype(t) && push!(out, t)
+        end
+    end
+    for (key, T) in c.slots.types
+        # (what an exception holds is for the code that reports it: `BoundsError.a` has the array that was indexed)
+        key[2] isa Type && key[2] <: Exception && continue
+        add(T)
+    end
+    for ((mi, n), given) in c.dispatch.flow_calls
+        mi isa Core.MethodInstance || continue
+        sig = Base.unwrap_unionall(mi.specTypes)
+        (sig isa DataType && n <= length(sig.parameters)) || continue
+        p = sig.parameters[n]
+        (p isa Type && !isconcretetype(p)) || continue # (an argument that the method declares abstract)
+        for T in given
+            add(T)
+        end
+    end
+    return out
+end
+
+function write_candidate_sets(c::Compilation, pass::Int)
+    path = get(ENV, "STATIC_RUNTIME_CENSUS_SETS", nothing)
+    path === nothing && return
+    current = Set{Any}(Base.uniontypes(something(registered_union(c, Any), Union{})))
+    for t in c.slots.universe
+        push!(current, t)
+    end
+    widened = widened_types(c)
+    for t in c.slots.universe
+        push!(widened, t)
+    end
+    text(S) = join(sort!(String[string(t) for t in S]), " ; ")
+    open(path, "a") do io
+        println(io, "PASS\t", pass, "\tcurrent ", length(current), "\twidened ", length(widened), "\twidened-only ", length(setdiff(widened, current)), "\tcurrent-only ", length(setdiff(current, widened)))
+        println(io, "WIDENED_ONLY\t", text(setdiff(widened, current)))
+        println(io, "CURRENT_ONLY\t", text(setdiff(current, widened)))
+    end
+    return
+end
+
 # the census of a pass, written to the standard error with the trace `dispatch` (the calls in groups of the same function,
 # type and origin), and, with `STATIC_RUNTIME_CENSUS_FLOW=file`, a line for each call with what the flow of types found
 function trace_census(c::Compilation, pass::Int)
+    write_candidate_sets(c, pass)
     census = c.dispatch.census
     flows = [census_flow(c, e) for e in census]
     if haskey(ENV, "STATIC_RUNTIME_CENSUS_FLOW")

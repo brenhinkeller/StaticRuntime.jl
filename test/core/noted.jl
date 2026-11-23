@@ -20,7 +20,7 @@ noted_second() = (v = call_over_noted(:picked, noted_pick, opaque(2)); println(t
     @test startswith(out, "Int64 20")
     out = compiled_stdout(() -> (noted_second(); noted_note_types(); 0))
     @test startswith(out, "Int64 20")
-    # (a type that is registered is one too: that is tested with `deserialize`, in a process of its own (`packages/serialization_streams.jl`): what is registered is the registry of the process, which `state.jl` has a version of that is the same in every process)
+    # (a type that is registered is one too: that is tested with `deserialize`, in a process of its own (the testset "streams that Julia wrote" of `packages/serialization.jl`): what is registered is the registry of the process, which `state.jl` has a version of that is the same in every process)
     # nothing is left in a program that notes types and does not read them: it is the program that does not note them
     plain = filesize(compile_main(() -> opaque(7)))
     @test filesize(compile_main(() -> (noted_note_types(); opaque(7)))) == plain

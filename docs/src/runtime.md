@@ -188,7 +188,7 @@ tags is made only if the code indexes it with something that is not a constant (
 otherwise each of the types that the code names is the one object. The `isa` table (`ijl_subtype`) is as large as the
 number of types asked about times the number of types in the binary that are subtypes of them.
 `println(Any[...])` is larger because it has the code to show each of the types in the registered ones: add only the types
-that you need with [`add_show_candidates!`](@ref) (the defaults can't be removed yet).
+that you need with [`add_dispatch_candidates!`](@ref) (the defaults can't be removed yet).
 
 ## Compared with C and C++
 

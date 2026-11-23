@@ -324,38 +324,17 @@ end
 ## compiling, only a closed set of the types is known to be possible, and the call is a chain of `isa`
 ## (tests of the type tag of `x`) over that set. What is not in the set is not known, which can not
 ## be reported when compiling, so what is not in the set is an error when the program runs. Add types with
-## `add_show_candidates!`.
-
-const DEFAULT_SHOW_CANDIDATES = Type[Int, Float64, String, Bool, Char, Symbol, Nothing,
-    Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, UInt128, Float16, Float32,
-    Missing, Vector{Any}]
-
-"""
-    add_show_candidates!(types...)
-
-Add concrete types to those that `show` of a value of an abstract type (an element of a `Vector{Any}`, say) dispatches
-over in compiled code, besides the defaults (numbers, `String`, `Char`, `Symbol`, `Nothing`, `Missing`, `Vector{Any}`):
-`add_show_candidates!(MyType, Tuple{Int,Float64})`. A value of another type is an error when the program runs. Call it
-before compiling. (It is a list, not a method to add, because the dispatch is made in the world age of `show_element`,
-where methods defined later are not visible.)
-"""
-function add_show_candidates!(types::Type...)
-    for T in types
-        isconcretetype(T) || throw(ArgumentError("$T is not a concrete type"))
-    end
-    register_show!(types)
-    return nothing
-end
+## `add_dispatch_candidates!`.
 
 @generated function show_element(io, x, ::Type{T}) where {T}
     isconcretetype(T) && return :(show(io, x); nothing)
     body = Expr(:block)
-    for C in vcat(DEFAULT_SHOW_CANDIDATES, REGISTRY.show) # (the registry as it is when this is generated: see registry.jl)
+    for C in REGISTRY.show # (the registry as it is when this is generated: see registry.jl)
         typeintersect(C, T) === Union{} && continue
         # (an `isa` that is true when `T` is a subtype of `C`: no test)
         push!(body.args, :(x isa $C && return (show(io, x::$C); nothing)))
     end
-    push!(body.args, :(error("show: a value of a type that is not in the list of `add_show_candidates!`")))
+    push!(body.args, :(error("show: a value of a type that is not in the list of `add_dispatch_candidates!`")))
     return body
 end
 

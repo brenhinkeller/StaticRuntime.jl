@@ -97,7 +97,13 @@ end
 function CC.abstract_eval_globalref(interp::OverridesInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
     stream = standard_stream(g)
     stream === nothing || return CC.RTEffects(CC.Const(stream), Union{}, CC.EFFECTS_TOTAL)
-    return @invoke CC.abstract_eval_globalref(interp::CC.AbstractInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
+    rt = @invoke CC.abstract_eval_globalref(interp::CC.AbstractInterpreter, g::GlobalRef, saw_latestworld::Bool, sv::CC.AbsIntState)
+    # (a global that is not `const` and has no type is read as `Any`: calls on it are made over the types that it holds,
+    # which the program that compiles has the first of, and the code assigns the rest)
+    if CC.widenconst(rt.rt) === Any && CURRENT_COMPILATION[] !== nothing && isdefined(g.mod, g.name) && !isconst(g.mod, g.name)
+        note_universe!(CURRENT_COMPILATION[], typeof(getglobal(g.mod, g.name)); force = true)
+    end
+    return rt
 end
 
 # (in the code before it is optimized, so that what the code loads is what inference said)

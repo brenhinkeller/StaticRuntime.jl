@@ -43,11 +43,11 @@ struct StateProbe; x::Int; end
     @test key(c -> (c.slots.types[(:elem, Any, nothing)] = Union{Int,String})) != key(c -> (c.slots.types[(:elem, Any, nothing)] = Union{Int,Symbol}))
     # what is registered: a registration is in the key of the compilations that are made after it, and not of one that was made before
     before = StaticRuntime.Compilation()
-    StaticRuntime.add_show_candidates!(StateProbe)
+    StaticRuntime.add_dispatch_candidates!(StateProbe)
     after = StaticRuntime.Compilation()
     @test after.key != before.key
     @test StateProbe in after.registered.dispatch && !(StateProbe in before.registered.dispatch)
-    StaticRuntime.add_show_candidates!(StateProbe) # (again: nothing changes)
+    StaticRuntime.add_dispatch_candidates!(StateProbe) # (again: nothing changes)
     @test StaticRuntime.Compilation().key == after.key
 end
 
@@ -107,7 +107,7 @@ struct RegShown; v::Int; end
     holder(x) = () -> (println(RegHolder(Base.inferencebarrier(x))); 0)
     @test static_status(holder(1))[1] == :ok                        # (the generated code for `Any` is made, with what is registered now)
     @test static_status(holder(RegShown(7)))[1] == :runtime_error   # (a type that is not registered is not shown: it says so when the program runs)
-    StaticRuntime.add_show_candidates!(RegShown)
+    StaticRuntime.add_dispatch_candidates!(RegShown)
     @test static_status(holder(RegShown(7)))[1] == :ok
 end
 

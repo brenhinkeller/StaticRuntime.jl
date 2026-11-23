@@ -62,7 +62,7 @@ end
 
 struct ShowPt; x::Int; y::Float64; end
 struct ShowBox{T}; v::T; end
-StaticRuntime.add_show_candidates!(ShowPt, Tuple{Int,Float64})
+StaticRuntime.add_dispatch_candidates!(ShowPt, Tuple{Int,Float64})
 
 @testset "Basic `show` and `repr`" begin
     S = StaticRuntime
@@ -264,7 +264,7 @@ end
     @test static_status(() -> (println(Any[ShowBox(1)]); 1))[1] == :ok
     @test static_status(() -> (println(Any[Symbol("+")]); 1))[1] == :ok
     @test static_status(() -> (println(Any[Dict(1 => 2)]); 1))[1] == :ok
-    @test static_status(() -> (println(Any[Base.inferencebarrier(ShowBox(1))]); 1))[1] == :runtime_error # not in the candidates, and what is in the list is not known when compiling
+    @test static_status(() -> (println(Any[Base.inferencebarrier(ShowBox(1))]); 1))[1] == :ok # Found by the type universe, despite the inferencebarrier
     @test static_status(() -> (println(Any[Symbol("a+" * Base.inferencebarrier("b"))]); 1))[1] == :runtime_error # made by the program, and not clearly an operator or not
     @test static_status(() -> (println(Any[Base.inferencebarrier(Dict(1 => 2))]); 1))[1] == :runtime_error # not in the candidates
     @test static_status(() -> (println(Base.inferencebarrier(Any[1])); 1))[1] == :runtime_error # (a call with an `Any`: over the types that are registered, which have not `Vector{Any}`)

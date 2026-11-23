@@ -111,10 +111,12 @@ function user_relevant(@nospecialize(T), depth::Int = 0)
     return false
 end
 
-function note_universe!(c::Compilation, @nospecialize(T))
+# (`force`: the type of a value that a global holds or is given, which a call on the global is made over, Julia's own types too:
+# the program has nothing else to say what they are)
+function note_universe!(c::Compilation, @nospecialize(T); force::Bool = false)
     c.settings.universe || return
     T = CC.widenconst(T)
-    user_relevant(T) || return
+    (force ? isconcretetype(T) : user_relevant(T)) || return
     s = c.slots
     s.facts_sink === nothing ? push!(s.universe_seen, T) : push!(s.facts_sink, ((:universe, T, nothing), Any))
     return
@@ -134,6 +136,9 @@ function universe_extras(c::Compilation, @nospecialize(T))
     return s.universe_extras[T] = found
 end
 
+# the type of an operand of a statement that is not a statement (a constant)
+operand_type_of_constant(@nospecialize(x)) = x isa QuoteNode ? typeof(x.value) : x isa Union{GlobalRef,Core.SSAValue,Core.SlotNumber,Core.Argument,Core.BindingPartition,Expr} ? Any : typeof(x)
+
 # the types that the statements of a method have (those of the optimized code of it, or of the code before it was
 # optimized), and its arguments
 function note_universe_statements!(c::Compilation, types, stmts, mi::Core.MethodInstance)
@@ -142,7 +147,16 @@ function note_universe_statements!(c::Compilation, types, stmts, mi::Core.Method
     sig isa DataType && for T in sig.parameters
         T isa Type && note_universe!(c, T)
     end
+    stmts = collect(stmts)
+    types = collect(types)
     for (st, T) in zip(stmts, types)
+        # (what is given to a non-`const` global: a call on a read of it is made over the types of what it holds)
+        if st isa Expr && st.head === :call && length(st.args) == 4 && called_function(stmts, st.args[1]) === Core.setglobal!
+            v = st.args[4]
+            VT = v isa Core.SSAValue ? (v.id <= length(types) ? types[v.id] : Any) : operand_type_of_constant(v)
+            VT isa Core.Const && (VT = typeof(VT.val))
+            VT isa Type && foreach(t -> note_universe!(c, t; force = true), Base.uniontypes(CC.widenconst(VT)))
+        end
         # (a `PiNode` and a `PhiNode` have the type of values that are made elsewhere, and what a `typeassert` gives is
         # the type of its argument: a type that is only there because a call was made over it is not one that is made)
         (st isa Core.PiNode || st isa Core.PhiNode || st isa Core.PhiCNode || st isa Core.UpsilonNode) && continue

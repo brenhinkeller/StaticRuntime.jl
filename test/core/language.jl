@@ -6,7 +6,7 @@ mutable struct MutS; x::Int; end
 const GLOBAL_REF = Ref(0)
 const MIXED = Any[1, "str", 2.5, :sym, nothing, 'c', true, UInt8(7), (1, 2), [1, 2, 3]] # of different types
 struct Pt; x::Int; y::Float64; end
-StaticRuntime.add_show_candidates!(Pt, Tuple{Int,Float64})
+StaticRuntime.add_dispatch_candidates!(Pt, Tuple{Int,Float64})
 struct Other; s::String; end
 classify(x) = x isa Int ? 1 : x isa String ? 10 : x isa Float64 ? 100 : x isa Symbol ? 1000 : x isa Nothing ? 10_000 :
               x isa Char ? 100_000 : x isa Bool ? 1_000_000 : x isa UInt8 ? 10_000_000 : x isa Tuple ? 100_000_000 : 1_000_000_000
@@ -125,14 +125,9 @@ gl_vec_untyped() = (push!(gl_untyped_vec, 9); sum(gl_untyped_vec))
                 # (it writes 9 to a global and gives the 9 that it wrote, which the compiler knows)
                 folded_ok = ("gl_write",))
 
-    # a global of a type that is not known (`Any`) that holds a value that is not of the registered types can't be used: and the message says why
-    @testset "untyped globals of other types" begin
-        status, detail = static_status(gl_ref_untyped)
-        @test status == :compile_error
-        @test occursin("global variables that are not `const`", detail) || occursin("not `const`", detail)
-        status, detail = static_status(gl_vec_untyped)
-        @test status == :compile_error
-        @test occursin("not `const`", detail)
+    # a global of a type that is not known (`Any`) that holds a container: the container is a global that is read, and what is in it is what the program put there
+    @testset "untyped globals that hold containers" begin
+        check_cases([gl_ref_untyped, gl_vec_untyped])
     end
 end
 
