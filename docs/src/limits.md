@@ -1,10 +1,10 @@
-# Known limitations
+# Known Limitations
 
 What does not work yet, or works differently from Julia, gathered in one place. The sections above say more about each.
 
 **Platforms**
 
-* **macOS and Linux only** for the collector (`gc = true`, or `gc = :auto` for a program that needs it); elsewhere it is off by default, and a program that needs it is an error. Linux is tested on CI (x86 and aarch64), not by hand: the collector depends on the layout of the stack and `setjmp` of the C library, and BLAS on `dlopen`.
+* **macOS and Linux only** for the garbage collector. Linux is tested on CI (x86 and aarch64), but not by hand. The collector depends on the layout of the stack and `setjmp` of the C library, and BLAS on `dlopen`.
 * **The host is the target.** The heap and the runtime are made for the machine that compiles, so cross-compiling (a `target` that is not the host) is not supported.
 * BLAS and LAPACK need LBT and the libraries that back it **at the same paths when the program is run** (see [LinearAlgebra](@ref)); they are not in the binary. The same is true of any other library that the program calls, unless `libraries = :bundle` is used (see [Libraries: `BigInt`, `BigFloat`, `Regex`, JLLs and libraries of your own](@ref)); BLAS is not bundled yet.
 
@@ -23,8 +23,7 @@ Does not work:
 * `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own)
 * `titlecase` of a string needs the grapheme breaks of utf8proc, which are in libjulia, and is not supported.
 * `base64encode` of several values of different types in one call, and `base64encode(f, args...)` of a function with arguments. 
-* `instances` of an `Enum` (`show` and comparisons of one work)
-* `with_logger` with a logger other than `NullLogger`
+* `with_logger`
 * `Test` (`@test` and `@testset`)
 * `Timer`
 * `@allocated` (the heap does not count the bytes of each allocation; @allocations` gives -1)

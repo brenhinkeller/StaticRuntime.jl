@@ -1,4 +1,4 @@
-# API Reference
+## API Reference
 
 ```@index
 ```
@@ -7,7 +7,7 @@
 Modules = [StaticRuntime, StaticRuntime.Runtime]
 ```
 
-# Source layout
+## Source layout
 
 * `src/method_table.jl`: our method table, `@device_override` and the parameters of our compilations; `src/StaticRuntime.jl`: the module, `compile_executable` and the other entry points; `src/extensions.jl`: the functions that package extensions add methods to; `src/registry.jl`: what packages register (`REGISTRY`, which each compilation copies when it starts).
 * `src/overrides/`: the overlay methods of Base and of the standard libraries, by topic (`io.jl`, `printing.jl`, `strings.jl`, `collections.jl`, `system.jl`, `bignum.jl`, ...).

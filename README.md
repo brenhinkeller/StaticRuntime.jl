@@ -217,7 +217,7 @@ The main limits, which the manual has in full:
 * **Memory**: the collector is conservative and the heap is not thread-safe (a library called from several threads needs a lock; on a stack that is not its thread's it frees nothing).
 * **Runtime differences**: at most 256 nested `try` blocks, no stack overflow check (infinite recursion crashes), and uncaught exceptions exit with a short message and no backtrace.
 
-See [Known limitations](https://brenhinkeller.github.io/StaticRuntime.jl/dev/#Known-limitations) in the manual for the complete list and the reasons.
+See [Known Limitations](https://brenhinkeller.github.io/StaticRuntime.jl/dev/#Known-limitations) in the manual for the complete list and the reasons.
 
 [docs-dev-img]: https://img.shields.io/badge/docs-dev-blue.svg
 [docs-dev-url]: https://brenhinkeller.github.io/StaticRuntime.jl/dev/

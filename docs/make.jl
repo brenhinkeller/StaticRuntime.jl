@@ -16,12 +16,12 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
-        "Basic usage" => "usage.md",
-        "Compiling: overrides, passes, and inference" => "compiling.md",
-        "The runtime" => "runtime.md",
+        "Basic Usage" => "usage.md",
+        "The Runtime" => "runtime.md",
         "Binary size and performance" => "performance.md",
+        "Compiling: overrides, passes, and inference" => "compiling.md",
         "Supported libraries and packages" => "support.md",
-        "Limitations" => "limits.md",
+        "Known Limitations" => "limits.md",
         "API Reference" => "reference.md",
     ],
 )

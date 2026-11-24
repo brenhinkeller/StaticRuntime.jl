@@ -2,7 +2,7 @@
 CurrentModule = StaticRuntime
 ```
 
-# StaticRuntime
+# [StaticRuntime](https://github.com/brenhinkeller/StaticRuntime.jl)
 
 StaticRuntime compiles ordinary Julia code, packages included, to a standalone executable or shared library that does
 not need `libjulia`. It builds on [StaticCompiler.jl](https://github.com/tshort/StaticCompiler.jl) and
@@ -34,15 +34,22 @@ Packages compile like Base does. This program solves the Lorenz system with
 using StaticRuntime
 using SciMLBase, OrdinaryDiffEqTsit5, StaticArrays, UnicodePlots
 
-lorenz(u, p, t) = SVector(p[1] * (u[2] - u[1]), u[1] * (p[2] - u[3]) - u[2], u[1] * u[2] - p[3] * u[3])
+lorenz(u, p, t) = SVector(p[1] * (u[2] - u[1]), u[1] * (p[2] - u[3]) - u[2], u[1]*u[2] - p[3]*u[3])
 
 function main(args::Vector{String})
     ρ = length(args) > 0 ? parse(Float64, args[1]) : 28.0
-    prob = ODEProblem{false, SciMLBase.FullSpecialize}(lorenz, SVector(1.0, 0.0, 0.0), (0.0, 30.0), SVector(10.0, ρ, 8 / 3))
+    prob = ODEProblem{false, SciMLBase.FullSpecialize}(
+        lorenz, SVector(1.0, 0.0, 0.0), (0.0, 30.0), SVector(10.0, ρ, 8/3)
+    )
     sol = solve(prob, Tsit5(); saveat = 0.01)
     x = [u[1] for u in sol.u]
     z = [u[3] for u in sol.u]
-    println(lineplot(x, z; title = "Lorenz attractor, ρ = $ρ", xlabel = "x", ylabel = "z", width = 60, height = 20))
+    plt = lineplot(x, z; 
+        title = "Lorenz attractor, ρ = $ρ", 
+        xlabel = "x", ylabel = "z", 
+        width = 60, height = 20,
+    )
+    println(plt)
     println(length(sol.t), " points, ", sol.stats.naccept, " steps")
     return 0
 end
@@ -51,7 +58,7 @@ compile_executable(main, (Vector{String},), "build", "lorenz"; small = true)
 ```
 
 ```
-shell> ./build/lorenz
+shell> ./build/lorenz 28
         ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀Lorenz attractor, ρ = 28.0⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
         ┌────────────────────────────────────────────────────────────┐
      50 │⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡠⠤⠤⡀⠀│
@@ -87,6 +94,8 @@ says whether `lorenz` changes its first argument: `ODEProblem(f, u0, tspan, p)` 
 [SciML (differential equations)](@ref)).
 
 ## What works
+We aim to support all type-stable generic Julia code, plus some limited dynamism, 
+as discussed in [Supported libraries and packages](support.md). This includes:
 
 * **The language and Base.** Code that allocates (`Vector`, `Dict`, `Set`, `String`, structs, closures, boxed values),
   `try`/`catch`/`finally`, `deepcopy`, `IdDict`, symbols made when the program runs, non-`const` globals, tasks that run
@@ -97,7 +106,7 @@ says whether `lorenz` changes its first argument: `ODEProblem(f, u0, tspan, p)` 
   and matrices, as Julia writes them; `printf` and `@printf`; files, the standard streams and the file system; colors and
   styled strings (see [Input and output](@ref)).
 * **Linked Libraries.** BLAS and LAPACK (through libblastrampoline), `BigInt`, `BigFloat`, `Regex`, SuiteSparse, MPI, and any
-  JLL or library of your own through `ccall` (see [support](support.md)).
+  JLL or library of your own through `ccall` (see [Libraries: `BigInt`, `BigFloat`, `Regex`, JLLs and libraries of your own](@ref)).
 * **Standard libraries and packages.** Most of the standard libraries, and a survey of packages that is kept as tests,
   in [`test/packages/`](https://github.com/brenhinkeller/StaticRuntime.jl/tree/main/test/packages).
   OrdinaryDiffEq, UnicodePlots, JuMP with HiGHS, Makie and CairoMakie, Distributions, StatsBase, NaNStatistics,
@@ -106,17 +115,17 @@ says whether `lorenz` changes its first argument: `ODEProblem(f, u0, tspan, p)` 
   the program can have, and calls of functions taken from collections over the functions that the program has (see
   [Compiling: overrides, passes, and inference](compiling.md)).
 
-What can't work in a standalone binary is refused when compiling, with an explanation, rather than giving a different
-answer from Julia's. [Known limitations](@ref) gathers what does not work yet, or works differently. The tests
+What can't work in a standalone binary should be refused when compiling, with an explanation, rather than giving a different
+answer from Julia's. [Known Limitations](@ref) gathers what does not work yet, or works differently. The tests
 (`test/core` and `test/packages`) are the up-to-date list of what is checked: most of them compile a program and compare
 what it prints with what Julia prints.
 
 ## The manual
 
-* [Basic usage](usage.md) Entry points and compilation options, as well as overrides, and how to write your own.
-* [Compiling: overrides, passes, and inference](compiling.md): how a compilation works, what is done to help inference, dynamic dispatch, and finding out why something does not compile.
-* [The runtime](runtime.md): memory and the garbage collector, exceptions, and the size of binaries.
+* [Basic Usage](usage.md): Entry points and compilation options, as well as overrides, and how to write your own.
+* [The Runtime](runtime.md): Memory and the garbage collector, exceptions, and support for Julia types.
 * [Binary size and performance](performance.md): Size and performance of compiled binaries, including comparison with C/C++.
+* [Compiling: overrides, passes, and inference](compiling.md): How a compilation works, what is done to help inference, dynamic dispatch, and finding out why something does not compile.
 * [Supported libraries and packages](support.md): BLAS, libraries, MPI, tasks, and the packages that are known to work.
-* [Limitations](limits.md).
-* [API Reference](reference.md).
+* [Known Limitations](limits.md)
+* [API Reference](reference.md)

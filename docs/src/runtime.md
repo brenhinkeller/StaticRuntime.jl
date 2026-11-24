@@ -1,4 +1,4 @@
-# The runtime: memory, exceptions, tags and size
+# The Runtime: memory, exceptions, and types
 
 ## Memory and the garbage collector
 
@@ -11,9 +11,9 @@ whether a program has it:
 * `gc = false`: it never is, and **nothing is ever freed**, even if the program allocates for as long as it runs. This may suit a program that runs very briefly, but can easily use an unreasonable amount of memory if your code is not written with this in mind.
 
 ```julia
-exe = compile_executable(main, (Vector{String},), "build", "program")               # with the collector, if needed
-exe = compile_executable(main, (Vector{String},), "build", "program"; gc = true)    # always with the collector
-exe = compile_executable(main, (Vector{String},), "build", "program"; gc = false)   # without the collector
+compile_executable(main, (Vector{String},), "build", "program")   # with the collector, if needed
+compile_executable(main, (Vector{String},), "build", "program"; gc = true)  # with the collector
+compile_executable(main, (Vector{String},), "build", "program"; gc = false) # without the collector
 ```
 
 The collector and the allocator it works with (`src/runtime/heap.jl`) are written in Julia, and compiled with StaticCompiler into every
@@ -50,11 +50,11 @@ collection, and how many collections there have been.
 
 !!! warning "One thread"
     The heap is not thread-safe: a compiled program, or a library made with `compile_shlib`, must allocate from one thread at a
-    time (a library that is called from several needs a lock around its calls: `gc = false` does not help, that allocator is not
-    thread-safe either). The collector looks at the stack of the thread that calls it, from the base of that stack (on Linux, that
-    of the main thread). If the library is called on a stack that is not that, for instance from a task of Julia running on another
+    time (a library that is called from several needs a lock around its calls: `gc = false` does not help; the non-freeing allocator 
+    is not thread-safe either). The collector looks at the stack of the thread that calls it, from the base of that stack (on Linux, 
+    that of the main thread). If the library is called on a stack that is not that, for instance from a task of Julia running on another
     thread, it does not know where the references are, so it **frees nothing** in that call (the memory grows until the program
-    is called from a thread that it can collect from).
+    is called from a thread that it can collect from). 
 
 ### Without the collector (`gc = false`)
 
@@ -78,54 +78,31 @@ julia> allocation_sites(i -> sum(collect(1:i)), (Int,))
 2
 ```
 
-To avoid the growth in a program without the collector: allocate once, outside the loop, and reuse the memory (`resize!`, `fill!`,
-in-place `.=` and `mul!`, `empty!`); prefer `StackArray`s from StaticTools for small, fixed-size data; use `MallocArray`/`MallocString`
-and `free`, or `@no_escape`/`@alloc` from Bumper.jl, for memory with a clear lifetime; and write with `printf` or `print` instead
-of building strings in loops.
+To avoid leaking memory to repeated allocations in a program without the collector: allocate once, outside the loop, and reuse the memory (`resize!`, `fill!`, in-place `.=` and `mul!`, `empty!`); prefer `StackArray`s from StaticTools for small, fixed-size data; use `MallocArray`/`MallocString` and `free`, or `@no_escape`/`@alloc` from Bumper.jl, for memory with a clear lifetime; and write with `printf` or `print` instead of building strings in loops.
 
 ### Testing the collector
 
-The collector is tested on the host against an oracle (random graphs of objects, of which what is reached is known), and by
-compiling programs with it. `gc = N` (a number) is a mode for finding mistakes: the collector is always in the program, and also runs every `N` allocations,
-and what it frees is overwritten, so that a use of memory that was freed is seen at once. All of the tests can be run so with
-the environment variable `STATIC_RUNTIME_GC` (`auto`, `false`, `true`, or a number), which sets the default of `gc`.
+The collector is tested on the host against an oracle (random graphs of objects, of which what is reached is known), and by compiling programs with it. `gc = N` (a number) is a mode for finding mistakes: in this case, the collector is always included in the binary, and  runs every `N` allocations, immediately overwriting what it frees. All of the tests can be run in this manner with the environment variable `STATIC_RUNTIME_GC` (`auto`, `false`, `true`, or a number), which sets the default of `gc`.
 
 ## Exceptions
 
-`try`/`catch`/`finally` and `rethrow` work, as long as the exception was thrown by code in the
-same program. They are implemented with `setjmp`/`longjmp` and a fixed-depth handler stack (256
-nested `try` blocks).
+Standard `try`/`catch`/`finally` and `rethrow` should work, as long as the exception was thrown by code in the same program.  These are implemented with `setjmp`/`longjmp`, a fixed-depth stack of handlers (256 nested `try` blocks at once) and a stack of the exceptions that are being handled (256 as well).
 
-An exception that no `try` catches prints `fatal: uncaught exception (no handler to catch it)`
-and exits with status 1. The message does not say which exception it was.
+`catch e` gives the exception object, and `e isa T` works with concrete types, and with abstract ones for constants (objects have type tags, and the types that the code mentions are in the binary; see [Type tags](@ref)). 
 
-Limitations, which are bugs rather than design choices:
+The following cases stop the program, each with a message on standard output (via `puts`) and exit status 1:
 
-* `catch e; e isa T` works with concrete types, and with abstract ones for constants (objects have type
-  tags, and the types that the code mentions are in the binary; see [Type tags](@ref)). `isa` with an abstract type
-  or a `Union` works on boxed values too; the answers come from a table that is made when compiling (see [Type tags](@ref)).
-* Code that needs dynamic dispatch, or other things from the Julia runtime, is rejected when
-  compiling, by default (see [Code that needs the Julia runtime is rejected](@ref)). With `strict = false`, it compiles and aborts with
-  `Dynamic behavior is not supported in standalone binaries (...)` if the call is reached.
+* An exception that no `try` catches: `fatal: uncaught exception (no handler to catch it)`. The message will not say which exception it was, and there is no backtrace.
+* More than 256 nested `try` blocks: `fatal: exception handler stack overflow`.
+* `rethrow()` outside a `catch`: `fatal: rethrow() outside catch`.
+
+Code that needs dynamic dispatch, or other things from the Julia runtime, is not an exception matter: it is rejected when compiling, by default (see [Code that needs the Julia runtime is rejected](@ref)). With `strict = false`, it compiles and aborts with `Dynamic behavior is not supported in standalone binaries (...)` if the call is reached.
 
 ## Type tags
 
-Every object that a compiled program allocates has a type tag in its header, as in Julia: a small number for
-the built-in types and the address of the type object otherwise. `isa` with a concrete type, the type of a caught
-exception, and `show` of an `Any` element read this tag. The objects that the code refers to as constants
-(strings, tuples, types, ...) are copied into the binary with their tags, and so are the type objects that
-the tags and `isa` with abstract types read (names, parameters). Details are in `src/llvm/tags.jl` and `src/runtime/embedder.jl`.
+Every object that a compiled program allocates has a type tag in its header, as in Julia: a small number for the built-in types and the address of the type object otherwise. `isa` with a concrete type, the type of a caught exception, and `show` of an `Any` element read this tag. The objects that the code refers to as constants (strings, tuples, types, ...) are copied into the binary with their tags, and so are the type objects that the tags and `isa` with abstract types read (names, parameters). Details may be found in `src/llvm/tags.jl` and `src/runtime/embedder.jl`.
 
-`x isa Number` for an `x` that is only known when the program runs is `ijl_subtype(typeof(x), Number)` in libjulia, whose
-subtyping algorithm is not in the binary. The types that it is asked about are constants of the code, and the types
-that an object can have are those in the binary, so the answers are worked out when compiling, with Julia's own `<:`, and
-written out as the function `ijl_subtype`: a table of which types in the binary are subtypes of each type that is asked
-about. When the type is not a constant of the code (`isa(x, types[i])`, `a <: b` of two elements of a `Vector{DataType}`, `eltype(c) <: C`), the table
-has an answer for each pair of the types that are in the binary (a bit each, found by searching for the two types), and `jl_f_issubtype` and `jl_f_isa`, the
-builtins that these calls are, look in it. So `<:` and `isa` work for any types that are in the binary: the types of its objects, the types that it names, and the
-types that those refer to. A type that the program makes up (`Vector{T}` for a `T` that is computed, anything with a `TypeVar`) is not in the binary, and the program exits with a
-message if it is asked about; `a <: b` of types that a function builds this way is rejected when compiling. The table has a row and a column for each type in the binary, so it
-grows with the square of their number (about 125 kB for a thousand types), and is only there if the code asks about types that are not constants.
+`x isa Number` for an `x` that is only known when the program runs is `ijl_subtype(typeof(x), Number)` in libjulia, whose subtyping algorithm is not in the binary. The types that it is asked about are constants of the code, and the types that an object can have are those in the binary, so the answers are worked out when compiling, with Julia's own `<:`, and written out as the function `ijl_subtype`: a table of which types in the binary are subtypes of each type that is asked about. When the type is not a constant of the code (`isa(x, types[i])`, `a <: b` of two elements of a `Vector{DataType}`, `eltype(c) <: C`), the table has an answer for each pair of the types that are in the binary (a bit each, found by searching for the two types), and `jl_f_issubtype` and `jl_f_isa`, the builtins that these calls are, look in it. So `<:` and `isa` work for any types that are in the binary: the types of its objects, the types that it names, and the types that those refer to. A type that the program makes up (`Vector{T}` for a `T` that is computed, anything with a `TypeVar`) is not in the binary, and the program exits with a message if it is asked about; `a <: b` of types that a function builds this way is rejected when compiling. The table has a row and a column for each type in the binary, so it grows with the square of their number (about 125 kB for a thousand types), and is only there if the code asks about types that are not constants.
 
 ## Fields that are made again when the program runs
 
