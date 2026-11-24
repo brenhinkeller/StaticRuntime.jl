@@ -663,6 +663,8 @@ const LIBC_FUNCTIONS = Set([
     "open", "lseek", "ftruncate", "mmap", "munmap", "getpagesize", "msync",
     "gethostname", "wcsftime", "strftime", "chmod", "symlink", "readlink", "sysconf", "sysctlbyname", "mach_host_self", "host_statistics",
     "dlopen", "dlsym", "dlclose", "dlerror",
+    "posix_spawnp", "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy", "posix_spawn_file_actions_addopen", "posix_spawn_file_actions_adddup2",
+    "posix_spawn_file_actions_addclose", "posix_spawn_file_actions_addchdir_np", "waitpid", "pipe", "_NSGetEnviron",
     # libm
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
     "atanh", "exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sqrt", "cbrt", "hypot",
@@ -672,6 +674,9 @@ const LIBC_FUNCTIONS = Set([
                        "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sqrt", "cbrt", "hypot",
                        "fabs", "floor", "ceil", "trunc", "round", "rint", "fmod", "ldexp", "copysign"))...,
 ])
+
+# Variables of the C library (`cglobal(:environ)`): the lookup is the address of the variable
+const LIBC_DATA = Set(["environ"])
 
 # Functions of libjulia that are the C library's (SuiteSparse is given them as its allocators): they are those, here
 const LIBJULIA_ALIASES = Dict("jl_malloc" => "malloc", "ijl_malloc" => "malloc", "jl_calloc" => "calloc", "ijl_calloc" => "calloc",
@@ -687,6 +692,16 @@ function resolve_lazy_lookups!(mod::LLVM.Module)
         call = LLVM.user(use)::LLVM.CallInst
         name = constant_cstring(LLVM.operands(call)[2])
         name = get(LIBJULIA_ALIASES, name, name)
+        if name in LIBC_DATA
+            # (a variable, which `cglobal` gives the address of: the global is declared, and the address is its own)
+            gvs = LLVM.globals(mod)
+            target = haskey(gvs, name) ? gvs[name] : LLVM.GlobalVariable(mod, LLVM.PointerType(), name)
+            LLVM.linkage!(target, LLVM.API.LLVMExternalLinkage)
+            LLVM.replace_uses!(call, target)
+            LLVM.erase!(call)
+            changed = true
+            continue
+        end
         (name in RUNTIME_SHIM_FUNCTIONS || name in LIBC_FUNCTIONS) || continue
         target = haskey(fns, name) ? fns[name] :
                  LLVM.Function(mod, name, LLVM.FunctionType(LLVM.VoidType()))

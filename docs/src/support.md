@@ -98,7 +98,25 @@ so what Base has for reading and writing an `IO` works: `open(f, path, mode)`, `
 
 The filesystem: `stat` (and `isfile`, `isdir`, `ispath`, `filesize`, `mtime`, `filemode`), `mkdir`, `rm` (with `force` and `recursive`), `readdir` (with `join` and `sort`), `mv`, `cp` (of a file or a directory), `pwd`, `cd`, `realpath`, `homedir`, `tempdir`, `tempname`, `mktemp`, `mktempdir` (and with a function), `chmod` (and `recursive`), `symlink` and `readlink`, `walkdir`, `ENV[name] = value` and `delete!(ENV, name)`, `Libc.getpid`, `gethostname`, `Libc.strftime`, and `Sys.total_memory`, `Sys.free_memory` and their `physical` forms are done with the functions of the C library (the memory is not limited by a Linux control group, as libuv reads it). 
 What is different: 
-an error is a `SystemError` with the message of `strerror`, where Base's is an `IOError` that has the code of libuv (a program that catches `IOError` for a missing file catches `SystemError` here), and `touch`, `mmap` of an open stream and starting other programs (`run`, ``read(`cmd`, String)``) are not supported; `walkdir` walks the whole tree before the loop starts (its `Channel` is filled by a task that runs to its end). `Threads.@threads` runs the loop on the one thread, in order.
+an error is a `SystemError` with the message of `strerror`, where Base's is an `IOError` that has the code of libuv (a program that catches `IOError` for a missing file catches `SystemError` here), and `touch` and `mmap` of an open stream are not supported; `walkdir` walks the whole tree before the loop starts (its `Channel` is filled by a task that runs to its end). `Threads.@threads` runs the loop on the one thread, in order.
+
+
+## Running other programs (`Cmd`)
+
+`run`, `success` and `read` of a command (and with them `readchomp` and ``read(`cmd`, String)``) start the program with `posix_spawnp`, and wait for it with `waitpid`, without libuv; the output of `read` is taken from a pipe, and the standard input of the program that `read` starts is `/dev/null`, as in Base:
+
+```julia
+run(`git status`)                                # inherits standard input, output and error; throws a `ProcessFailedException` if the status is not 0
+branch = readchomp(`git branch --show-current`)
+ok = success(`which gcc`)
+run(ignorestatus(`false`))
+files = read(Cmd(`ls`, dir = "/tmp"), String)    # `dir` and `setenv` (`env`)
+run(pipeline(`make`, stdout = "log.txt", stderr = devnull))
+```
+
+The words of a command with `$` interpolated (a string, a number, the elements of a vector, another `Cmd` as the first word) are put together as Base does. The redirects of `pipeline(cmd; stdin, stdout, stderr, append)` can be a file, `devnull`, `stdin`, `stdout` or `stderr`. What the program has written is flushed before another one starts, so the output of the two comes in the order that it was written (Base buffers its own, so a program that runs in Julia with its output redirected shows the output of the commands first, unless it calls `flush(stdout)`).
+
+What is different or not supported: a command that can not be started (not found, not executable) throws a `SystemError`, where Base's is an `IOError`; a pipe from one command to another (`pipeline(a, b)`, ``a & b``), `run(cmd; wait = false)`, streams as extra arguments of `run`, `open(cmd)` and `eachline(cmd)` are not supported; `detach`, `cpus`, `uid` and `gid` of a `Cmd` are ignored. `dir` needs `posix_spawn_file_actions_addchdir_np`, which macOS 10.15 and glibc 2.29 have. (This is tested on macOS only so far; the Linux CI will tell for the file actions and `environ`.) A caught `ProcessFailedException` is a value of the type `Any`: `e isa ProcessFailedException` works, `e.procs` after it, and `showerror(e)` does after `add_dispatch_candidates!(Base.ProcessFailedException)`.
 
 ## Tasks
 

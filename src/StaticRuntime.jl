@@ -34,6 +34,7 @@ include("overrides/deepcopy.jl")   # deepcopy of any struct
 include("overrides/bignum.jl")     # BigInt and BigFloat
 include("overrides/regex.jl")      # Regex
 include("overrides/filesystem.jl") # The file system, the environment, the process
+include("overrides/process.jl")    # Starting other programs: run, success, read of a Cmd
 include("overrides/logging.jl")    # @warn, @info and @error, to the standard error
 include("overrides/gc.jl")         # The garbage collector, from the program, and finalizers
 include("overrides/tasks.jl")      # Tasks that run to completion: @async, Channel, wait, fetch

@@ -42,3 +42,16 @@ assert_message(n::Int) = (@assert n > 0 "n = $n is not positive"; n + 1)
     exe = Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(main)))
     @test parse(Int, readchomp(`$exe`)) == length("n = -5 is not positive")
 end
+
+# A call that has no method for what reaches it (a constructor with no method for an argument that the code can have, here) says which one it was
+mutable struct NoMethodFor; name::String; NoMethodFor(name::String) = new(name); end
+@testset "A call with no method names the function or the type" begin
+    @eval @noinline rt_calls_constructor(x) = NoMethodFor(x)
+    @eval rt_no_method(argc::Int, argv::Ptr{Ptr{UInt8}}) = (rt_calls_constructor(time_ns() >> 63 == 0 ? 5 : "s"); 0)
+    exe = compile_executable(rt_no_method, (Int, Ptr{Ptr{UInt8}}), mktempdir(), "rt_no_method")
+    err = tempname()
+    p = run(ignorestatus(pipeline(`$exe`; stderr = err, stdout = err)))
+    @test p.exitcode != 0
+    @test occursin("no method matching `NoMethodFor`", read(err, String))
+end
+

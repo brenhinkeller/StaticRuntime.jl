@@ -29,6 +29,12 @@ function null_methoderror_arguments!(mod::LLVM.Module)
                         name === nothing && addr !== nothing && (name = function_name_at(UInt(addr)))
                         LLVM.operands(user)[1] = LLVM.null(ptrT)
                         changed = true
+                    elseif value isa LLVM.GlobalVariable && startswith(LLVM.name(value), "static_type_")
+                        # (a type that is called, `Foo(x, y)`, is a global that is named by its address)
+                        addr = tryparse(UInt, LLVM.name(value)[13:end]; base = 16)
+                        name === nothing && addr !== nothing && (name = function_name_at(addr))
+                        LLVM.operands(user)[1] = LLVM.null(ptrT)
+                        changed = true
                     end
                 elseif user isa LLVM.GetElementPtrInst
                     push!(todo, user)
@@ -49,12 +55,17 @@ function null_methoderror_arguments!(mod::LLVM.Module)
 end
 
 # The name of the function that is the object at `addr` (a function is an object of a type of its own, without contents,
-# that may not be aligned as the others are), or `nothing`
+# that may not be aligned as the others are; a type that is called is the type), or `nothing`
 function function_name_at(addr::UInt)
     object_type(UInt(0x10000)) # (which sets what the tag of a type is)
     word = safe_load(addr - 8)
     word === nothing && return nothing
     tag = word & ~UInt(15)
+    # (a type that is called, `Foo(x, y)`: the object is a type, of the type `DataType` or `UnionAll`, which have tags that are not
+    # addresses)
+    if tag == DATATYPE_TAG[] || tag == (unsafe_load(Ptr{UInt}(UInt(pointer_from_objref(UnionAll)) - 8)) & ~UInt(15))
+        return string(unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
+    end
     tag < (64 << 4) && return nothing
     typetag = safe_load(tag - 8)
     (typetag === nothing || typetag & ~UInt(15) != DATATYPE_TAG[]) && return nothing

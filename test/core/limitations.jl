@@ -3,7 +3,7 @@
 # part of the language or of the library that it belongs to, and change the manual (the section "Known limitations"); if something that was refused now compiles and does not work, that is
 # worse than the refusal.
 
-# (this file has a budget of two minutes. The two programs that reach so much of Base that they take about a minute to compile (starting another program, `Markdown.parse`) are compiled by processes of their own,
+# (this file has a budget of two minutes. The two programs that reach so much of Base that they take about a minute to compile (`open` of a command, `Markdown.parse`) are compiled by processes of their own,
 # which run while the rest of the file does; the last test says if the budget was not kept)
 const LIMITATIONS_START = time()
 
@@ -27,7 +27,7 @@ function refusal_of((proc, file))
     return Symbol(status), String(detail)
 end
 const WORKERS = Dict(
-    "starting another program" => refusal_in_process("() -> (run(`true`); 0)"),
+    "starting another program" => refusal_in_process("() -> (io = open(`echo hi`); println(readline(io)); close(io); 0)"),
     "Markdown.parse"           => refusal_in_process("() -> length(string(Markdown.parse(opaque(\"# a\"))))"),
 )
 
@@ -79,7 +79,7 @@ end
     @test compiled_stdout(() -> @allocations zeros(opaque(100))) == "-1\n"
 end
 
-# Starting another program: `run`, and the types of the processes of libuv, are refused when compiling (compiled by a process of its own: see above)
+# Starting another program: `run`, `success` and `read` of a command work (process.jl); `open(cmd)`, which needs the pipes and the processes of libuv, is refused when compiling (compiled by a process of its own: see above)
 @testset "Starting another program" begin
     status, detail = refusal_of(WORKERS["starting another program"])
     @test status == :compile_error
