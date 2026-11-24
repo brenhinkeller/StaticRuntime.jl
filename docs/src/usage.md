@@ -11,7 +11,7 @@ An executable is compiled from a function, in one of three forms:
 
 That is to say:
 * `main()`, for a program that has no arguments, and wants none. You may return an integer status, or nothing (in which case `0` will be returned by default).
-* `main(args)` is the form to use for a program that is written like a Julia script: it has the command-line arguments in the same form and order as `ARGS` has them. Again, you may return an integer status, or nothing (in which case `0` will be returned by default).
+* `main(args)` is the form to use for a program that is written like a Julia script: it has the command-line arguments in the same form and order as `Base.ARGS` has them. Again, you may return an integer status, or nothing (in which case `0` will be returned by default).
 * The third form is C's: it compiles `f(argc, argv)` to the `main` of a C program, with no code of ours between the two, which is as small as a program can be (the others add a kilobyte or less). Its status is the return value as C has it, so the function has to return an `Int` (or an `Int32`); if you try to return `nothing`, the return value is then whatever the machine had in the register, and the compiler will warn of this.
 
 ## Compilation

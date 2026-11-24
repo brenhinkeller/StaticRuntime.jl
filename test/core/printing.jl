@@ -269,3 +269,11 @@ end
     @test static_status(() -> (println(Any[Base.inferencebarrier(Dict(1 => 2))]); 1))[1] == :runtime_error # not in the candidates
     @test static_status(() -> (println(Base.inferencebarrier(Any[1])); 1))[1] == :runtime_error # (a call with an `Any`: over the types that are registered, which have not `Vector{Any}`)
 end
+
+@testset "A global of Base that the code reads does not widen the types that `show` of an `Any` is made over" begin
+    # (the `GlobalRef` that the code holds was scanned as an object: its `Core.BindingPartition` has a field of the type `Any`, which stored
+    # the types of what is reachable, and `show` of an `Any` was made over all of them, which took minutes to compile)
+    t = @elapsed status = static_status(() -> (println(Any[length(Base.LOAD_PATH), "a", 2.5]); 0))[1]
+    @test status == :ok
+    @test t < 120
+end

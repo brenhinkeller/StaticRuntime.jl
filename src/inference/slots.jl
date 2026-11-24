@@ -266,7 +266,8 @@ end
 # on `Any` are made over it too: only for slots that are open at the end of the pass (`add_stored_types!`), since a slot
 # with types gives reads those, and all the types that all slots store are many. (Types of the type system, which Base
 # keeps in `Vector{Any}`s while it works with types, are not values of programs.)
-const REFLECTION_TYPES = Any[TypeVar, Core.TypeofVararg, Core.TypeName, Module, Method, Core.MethodInstance, Core.CodeInstance, Core.SimpleVector]
+const REFLECTION_TYPES = Any[TypeVar, Core.TypeofVararg, Core.TypeName, Module, Method, Core.MethodInstance, Core.CodeInstance, Core.SimpleVector,
+                              Core.GlobalRef, Core.Binding, Core.BindingPartition]
 function note_stored_type!(c::Compilation, key::SlotKey, @nospecialize(T))
     c.settings.universe || return
     (T isa DataType && isconcretetype(T) && !(T <: Function) && !(T <: Type)) || return
@@ -683,7 +684,11 @@ const SCAN_BUDGET = 200_000
 const SCAN_FIELDS = 64
 note_truncated!(c::Compilation) = c.slots.facts_sink === nothing ? (c.slots.scan_truncated = true) : push!(c.slots.facts_sink, ((:truncated, nothing, nothing), Any))
 
-scan_leaf(@nospecialize(x)) = x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
+# (a `GlobalRef` is a constant of the code that reads a global, and the `Core.Binding` and `Core.BindingPartition` that it holds
+# are the compiler's: their fields of the type `Any` hold the global's value, and are not slots of the program. Scanned as objects
+# they opened slots that store types of everything reachable, which the universe then took, and `show` of an `Any` was made
+# over all of them)
+scan_leaf(@nospecialize(x)) = x isa Core.GlobalRef || x isa Core.Binding || x isa Core.BindingPartition || x isa Type || x isa Module || x isa Symbol || x isa String || x isa Number || x isa Char
 
 # the facts about the slots, and the universe, that are in `x0` and in what it refers to: `(slot, type of what is
 # stored)`, `((:universe, type, nothing), Any)` and `((:truncated, nothing, nothing), Any)`, each once (whether objects
