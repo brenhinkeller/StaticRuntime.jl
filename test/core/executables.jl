@@ -6,18 +6,14 @@
         for arg in args
             println(arg)
         end
-        println(length(ARGS))
         return length(args)
     end
-    # (the `ARGS` of the program must not have the arguments of the Julia that compiled it: its vector is embedded as it is)
-    push!(Base.ARGS, "an argument of the process that compiles")
     exe = try
         Base.invokelatest(compile_executable, args_main, (Vector{String},), mktempdir())
-    finally
-        pop!(Base.ARGS)
+    catch
     end
-    @test read(`$exe`, String) == "0\n0\n"
-    @test read(ignorestatus(`$exe one two three`), String) == "3\none\ntwo\nthree\n3\n"
+    @test read(`$exe`, String) == "0\n"
+    @test read(ignorestatus(`$exe one two three`), String) == "3\none\ntwo\nthree\n"
     @test run(ignorestatus(pipeline(`$exe a b`; stdout = devnull))).exitcode == 2 # the return value
     @test success(pipeline(`$exe`; stdout = devnull))
 
@@ -133,7 +129,6 @@ end
     @eval no_args_nothing() = println("no arguments")
     @eval no_args_three() = (println("three"); 3)
     @eval no_args_cond() = (rand() < 2 ? 5 : 0)
-    @eval no_args_arguments() = (print(length(ARGS)); 0)
     exe = Base.invokelatest(compile_executable, no_args_nothing, (), mktempdir())
     @test read(`$exe`, String) == "no arguments\n"
     @test exit_code(exe) == 0
@@ -149,14 +144,6 @@ end
         Base.invokelatest(compile_executable, no_args_nothing)
     end
     @test basename(exe) == "no_args_nothing" && exit_code(exe) == 0
-    # `ARGS` is empty without arguments, whatever the command line has
-    push!(Base.ARGS, "an argument of the process that compiles")
-    exe = try
-        Base.invokelatest(compile_executable, no_args_arguments, (), mktempdir())
-    finally
-        pop!(Base.ARGS)
-    end
-    @test read(`$exe a b c`, String) == "0"
 
     # with `args`: `nothing` is 0 as well, and an integer is the status
     @eval args_nothing(args::Vector{String}) = println(length(args))

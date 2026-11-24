@@ -471,10 +471,10 @@ function allocation_is_finite(mod::LLVM.Module; bounded::Bool = false)
     for (stub, target) in stubs # (what calls the stub calls the function)
         haskey(calls, Ptr{Cvoid}(target.ref)) && haskey(calls, Ptr{Cvoid}(stub.ref)) && append!(calls[Ptr{Cvoid}(target.ref)], calls[Ptr{Cvoid}(stub.ref)])
     end
-    # What makes the arguments of the command line (`command_line_arguments`, `set_base_args`) allocates as much as
+    # What makes the arguments of the command line (`command_line_arguments`) allocates as much as
     # there are arguments, which the system limits and the program does not decide: it is not counted, in any function
     # that they call (that is only called from them, or where the program is about to stop) either
-    ignored(fn) = startswith(LLVM.name(fn), "julia_command_line_arguments") || startswith(LLVM.name(fn), "julia_set_base_args")
+    ignored(fn) = startswith(LLVM.name(fn), "julia_command_line_arguments")
     stops = Dict{Ptr{Cvoid},Bool}() # (the blocks that only lead to `unreachable`)
     dying_is_final = Ref(stops_at_throw) # (whether what is after a throw is no more of the program)
     block_dies(b) = dying_is_final[] && get!(() -> dies(b), stops, Ptr{Cvoid}(b.ref))

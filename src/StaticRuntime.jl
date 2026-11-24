@@ -299,30 +299,19 @@ end
     return args
 end
 
-# `ARGS` of the binary is the vector of the Julia that compiled it, with what that had in it: the arguments of the
-# command line of that. (Not inlined, like `command_line_arguments`: what these two allocate is as much as the arguments
-# are, and `allocation_is_finite` ignores it: it knows them by their names.)
-@noinline function set_base_args(args::Vector{String})
-    empty!(Base.ARGS)
-    append!(Base.ARGS, args)
-    return nothing
-end
-
 # The exit status of the program is the integer that `f` returns, and 0 if it returns something else (`nothing`, for
 # one): the entry point that StaticCompiler makes of `f` itself has whatever is in the register of the result, when `f`
 # does not return an integer.
 exit_status(status) = status isa Integer ? Int(status) : 0
 
-# what the entry point of `f(args::Vector{String})` does: `ARGS` is also set, as it is in Julia
+# what the entry point of `f(args::Vector{String})` does:
 function run_entry(f, argc::Int, argv::Ptr{Ptr{UInt8}})
     args = command_line_arguments(argc, argv)
-    set_base_args(args)
     return exit_status(f(args))
 end
 
-# what the entry point of `f()` does: `ARGS` is empty (and not what it has when compiling)
+# what the entry point of `f()` does
 function run_entry_without_arguments(f, argc::Int, argv::Ptr{Ptr{UInt8}})
-    empty!(Base.ARGS)
     return exit_status(f())
 end
 
@@ -342,10 +331,11 @@ end
     compile_executable(f, (), [path], [name]; kwargs...)
     compile_executable(f; kwargs...)
 
-Compile an executable that runs `f(args)`, where `args` are the arguments of the command line, as
-`ARGS` is in Julia (they are also available as `ARGS`), or `f()`, for a program that takes no arguments
-(`compile_executable(f)` is the same; `ARGS` is empty). If `f` returns an integer, it is the exit
-status of the program, and it is 0 if `f` returns anything else (`nothing`, for one). This is the convention of Julia's `main(args)`:
+Compile an executable that runs `f(args)`, where `args` are the arguments of the command line, 
+as `ARGS` is in a Julia script, or `f()`, for a program that takes no arguments. 
+If `f` returns an integer, it is the exit status of the program, 
+and it is 0 if `f` returns anything else (`nothing`, for example). 
+This is the convention of Julia's `main(args)`:
 
 ```julia
 function main(args::Vector{String})
@@ -354,8 +344,10 @@ end
 compile_executable(main, (Vector{String},))
 ```
 
-The third form of the entry point is C's: `compile_executable(f, (Int, Ptr{Ptr{UInt8}}))` compiles `f(argc, argv)` to the `main` of a C program,
-with the arguments as C has them. The exit status is then what `f` returns, which has to be an integer (`Int` or `Int32`): for anything else it is not defined.
+The third form of the entry point is C's: `compile_executable(f, (Int, Ptr{Ptr{UInt8}}))` 
+compiles `f(argc, argv)` to the `main` of a C program,
+with the arguments as C has them. The exit status is then what `f` returns, 
+which has to be an integer (`Int` or `Int32`): for anything else it is not defined.
 """
 function compile_executable(f::Function, types::Tuple{DataType}, args...; kwargs...)
     # (the type of a tuple of types is a tuple of `DataType`s: it is the value that tells)

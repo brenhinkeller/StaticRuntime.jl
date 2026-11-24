@@ -5,8 +5,8 @@ An executable is compiled from a function, in one of three forms:
 
 | form                                    | `compile_executable(f, ...)`  | command line arguments passed as  |
 |:----------------------------------------|:------------------------------|:----------------------------------|
-| `main()`                                | `()`, or omitted              | none (`ARGS` is empty)            |
-| `main(args::Vector{String})`            | `(Vector{String},)`           | `args` (and `ARGS`)               |
+| `main()`                                | `()`, or omitted              | none                              |
+| `main(args::Vector{String})`            | `(Vector{String},)`           | `args`                            |
 | `main(argc::Int, argv::Ptr{Ptr{UInt8}})` | `(Int, Ptr{Ptr{UInt8}})`      | `argc` & `argv`, as in C          |
 
 That is to say:
