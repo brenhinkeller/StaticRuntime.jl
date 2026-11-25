@@ -54,6 +54,58 @@ function null_methoderror_arguments!(mod::LLVM.Module)
     return changed
 end
 
+# The errors that the runtime reports by stopping (`ABORTING_RUNTIME_FUNCTIONS`, one message for all) say where they are: the
+# function and the lines of Julia code that the call is in (the debug information is there until the program is accepted: see
+# `strip` in `link_runtime!`), and what the call knows: the type that a type assertion wanted. `x::String` of a `nothing` is
+# `TypeError: in typeassert, expected String (in f, at file.jl:12 in `f`)`.
+const LOCATED_ABORTS = ("ijl_type_error", "ijl_bounds_error_int", "ijl_bounds_error_unboxed_int", "ijl_bounds_error", "ijl_undefined_var_error", "ijl_has_no_field_error")
+
+# the type or the function that the operand `v` of a call is, as text (it is a constant: the address of the object, or a global that is named by it)
+function constant_object_text(v)
+    addr = nothing
+    if v isa LLVM.GlobalVariable && startswith(LLVM.name(v), "static_type_")
+        addr = tryparse(UInt, LLVM.name(v)[13:end]; base = 16)
+    elseif v isa LLVM.ConstantExpr && isinttoptr(v)
+        a = constant_address(v)
+        a === nothing || (addr = UInt(a))
+    elseif v isa LLVM.LoadInst
+        # (a type that has a small tag, `String`, `Int64`, `Symbol`: the code reads it from the table of those, by the number of its tag)
+        m = match(r"@jl_small_typeof, i64 (\d+)\)", string(LLVM.operands(v)[1]))
+        m === nothing || (addr = UInt(unsafe_load(cglobal(:jl_small_typeof, Ptr{Ptr{Cvoid}}), parse(Int, m[1]) ÷ 8 + 1)))
+    end
+    (addr === nothing || addr == 0) && return nothing
+    return function_name_at(addr)
+end
+
+function locate_runtime_errors!(mod::LLVM.Module)
+    fns = LLVM.functions(mod)
+    generic = Dict(ABORTING_RUNTIME_FUNCTIONS)
+    changed = false
+    for fname in LOCATED_ABORTS
+        haskey(fns, fname) || continue
+        for use in collect(LLVM.uses(fns[fname]))
+            call = LLVM.user(use)
+            call isa LLVM.CallInst || continue
+            ops = LLVM.operands(call)
+            text = generic[fname]
+            if fname == "ijl_type_error" && length(ops) >= 3
+                what = constant_cstring(ops[1])
+                expected = constant_object_text(ops[2])
+                text = string("TypeError: in ", what === nothing || isempty(what) ? "a type assertion" : what, expected === nothing ? "" : string(", expected ", expected))
+            end
+            frames = debug_frames(call)
+            at = isempty(frames) ? "" : string(", at ", join(first(frames, 3), ", inlined into "))
+            msg = string(text, " (in ", function_of(call), at, ")")
+            @dispose builder = LLVM.IRBuilder() begin
+                LLVM.position!(builder, LLVM.before(call))
+                abort_message!(builder, mod, msg)
+            end
+            changed = true
+        end
+    end
+    return changed
+end
+
 # The name of the function that is the object at `addr` (a function is an object of a type of its own, without contents,
 # that may not be aligned as the others are; a type that is called is the type), or `nothing`
 function function_name_at(addr::UInt)

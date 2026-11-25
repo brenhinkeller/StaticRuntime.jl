@@ -97,6 +97,7 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     define_field_index!(mod)
     define_subtype_builtins!(mod)
     null_methoderror_arguments!(mod)
+    locate_runtime_errors!(mod)
     stub_cancel_handlers!(mod)
     e = ObjectEmbedder(mod, Dict())
     define_well_known_objects!(e)

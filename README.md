@@ -6,10 +6,10 @@
 
 This experimental package attempts to allow the compilation of as much generic Julia code as possible into a single binary, without requiring `libjulia`, using [StaticCompiler.jl](https://github.com/tshort/StaticCompiler.jl) (and in turn [GPUCompiler.jl](https://github.com/JuliaGPU/GPUCompiler.jl)), and to a lesser extent [StaticTools.jl](https://github.com/brenhinkeller/StaticTools.jl). 
 
-The approach invloves (1) liberal use of `@device_override` (as in StaticCompiler, but defined again here so as to not pollute the default StaticCompiler method table) to avoid un-StaticCompiler-able code, (2) some custom GPUCompiler params and LLVM IR transformations, and (3) a minimal runtime, including a small optional garbage collector (written in pure Julia), linkers, IO handling, and anything else we need to compile into the binary.
+The approach invloves (1) liberal use of `@device_override` to avoid un-StaticCompiler-able code (as in StaticCompiler.jl, but defined again here so as to not pollute the default StaticCompiler method table), (2) some custom compiler passes, GPUCompiler params and LLVM IR transformations, and (3) a minimal runtime, including a small optional garbage collector (written in pure Julia), linkers, IO handling, and anything else we need to compile into the binary.
 
 The code and documentation in this package is (unlike StaticCompiler and StaticTools) almost entirely LLM-generated, 
-specifically via Claude code running Sonnet 5.5. I'm not yet sure how far we'll be able to get, but it's worth a try.
+specifically via Claude code, primarily running Sonnet 5.5. I'm not yet sure how far we'll be able to get, but it's worth a try.
 
 Currently targets Julia 1.14
 
