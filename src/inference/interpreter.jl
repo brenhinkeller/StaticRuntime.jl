@@ -149,6 +149,23 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::Core.IntrinsicF
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
 end
 
+# `Core.stderr`, `Core.stdout` and `Core.stdin` are read as `getproperty(Core, :stderr)`,
+# which inference folds to the object that Julia has (and evaluates, without looking at what is in it): 
+# the same streams as for Base's globals.
+function standard_stream_of_call(arginfo::CC.ArgInfo)
+    at = arginfo.argtypes
+    length(at) == 3 && at[2] isa Core.Const && at[3] isa Core.Const && at[2].val isa Module && at[3].val isa Symbol || return nothing
+    return standard_stream(GlobalRef(at[2].val, at[3].val))
+end
+for getter in (:getglobal, :getproperty) # (`getfield` is in boxes.jl)
+    @eval function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof($getter), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+        stream = standard_stream_of_call(arginfo)
+        stream === nothing || return CC.Future(CC.CallMeta(Core.Const(stream), Union{}, CC.EFFECTS_TOTAL, CC.NoCallInfo()))
+        return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+    end
+end
+
 ## Reading code
 
 # Whether a binding partition (how optimized code refers to a global) is a constant's: then it holds the value.

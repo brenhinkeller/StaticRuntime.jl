@@ -298,6 +298,9 @@ end
 
 function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Core.getfield), arginfo::CC.ArgInfo, si::CC.StmtInfo,
                                 vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    # (`getfield(Core, :stderr)`: the stream that a program has, see `standard_stream_of_call`)
+    stream = standard_stream_of_call(arginfo)
+    stream === nothing || return CC.Future(CC.CallMeta(Core.Const(stream), Union{}, CC.EFFECTS_TOTAL, CC.NoCallInfo()))
     # (a field of a struct by a name or an index that is not a constant: a comparison with each, see
     # `dynamic_field_plan`. The elements of a tuple that is a constant, and has types in it, are each a type that is
     # known, see `types_of_constant_tuple`, where the callee gives the `DataType` that they are all of)
