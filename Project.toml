@@ -47,7 +47,7 @@ StaticRuntimeUnicodePlotsExt = "UnicodePlots"
 [compat]
 CairoMakie = "0.15"
 FunctionWrappers = "1"
-GPUCompiler = "2.23"
+GPUCompiler = "~2.23"
 InteractiveUtils = "1"
 LLVM = "10"
 Libdl = "1"
