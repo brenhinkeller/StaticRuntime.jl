@@ -122,6 +122,51 @@ function note_universe!(c::Compilation, @nospecialize(T); force::Bool = false)
     return
 end
 
+# the type of an exception that is thrown (`throw(x)` with `x` of a concrete type): a `catch e` is made over these
+function note_thrown!(c::Compilation, @nospecialize(T))
+    c.settings.universe || return
+    isconcretetype(T) && T <: Exception || return
+    s = c.slots
+    s.facts_sink === nothing ? push!(s.thrown_seen, T) : push!(s.facts_sink, ((:thrown, T, nothing), Any))
+    return
+end
+
+# the types of the exceptions that are thrown that are subtypes of `T`
+function thrown_extras(c::Compilation, @nospecialize(T))
+    s = c.slots
+    (c.settings.universe && !isempty(s.thrown)) || return Any[]
+    found = Any[]
+    for t in s.thrown
+        t <: T && push!(found, t)
+    end
+    return sort!(found; by = string)
+end
+
+# whether the argument `i` of a call (as the code that makes it has it) is the exception that a `catch` has caught
+is_the_exception(@nospecialize(st)) = st isa Expr && st.head === :the_exception
+function is_caught_exception(c::Compilation, arginfo::CC.ArgInfo, i::Int, @nospecialize(sv))
+    sv isa CC.InferenceState || return false # (the code of an inlined or interpreted method has been looked at in the inference of the one it is of)
+    fargs = arginfo.fargs
+    (fargs === nothing || i > length(fargs)) && return false
+    x = fargs[i]
+    x isa Union{Core.SSAValue,Core.SlotNumber} || return false
+    stmts = sv.src.code
+    # (the statements that are `the_exception`, and the slots that only it is assigned to, once for each method)
+    holders = get!(c.slots.caught_vars, stmts) do
+        ssa = Set{Int}()
+        slots = Dict{Int,Bool}()
+        for (pc, st) in enumerate(stmts)
+            is_the_exception(st) && push!(ssa, pc)
+            if st isa Expr && st.head === :(=) && st.args[1] isa Core.SlotNumber
+                n = st.args[1].id
+                slots[n] = get(slots, n, true) && is_the_exception(st.args[2])
+            end
+        end
+        (ssa, Set{Int}(n for (n, only) in slots if only))
+    end
+    return x isa Core.SSAValue ? x.id in holders[1] : x.id in holders[2]
+end
+
 # the types of the universe that are subtypes of `T` (for the types that a call is made over)
 function universe_extras(c::Compilation, @nospecialize(T))
     s = c.slots
@@ -156,6 +201,13 @@ function note_universe_statements!(c::Compilation, types, stmts, mi::Core.Method
             VT = v isa Core.SSAValue ? (v.id <= length(types) ? types[v.id] : Any) : operand_type_of_constant(v)
             VT isa Core.Const && (VT = typeof(VT.val))
             VT isa Type && foreach(t -> note_universe!(c, t; force = true), Base.uniontypes(CC.widenconst(VT)))
+        end
+        # (what is thrown: a `catch e` is made over the types that are thrown, Julia's own exceptions too, which the program has nothing else to say of)
+        if st isa Expr && st.head === :call && length(st.args) == 2 && called_function(stmts, st.args[1]) === Core.throw
+            v = st.args[2]
+            VT = v isa Core.SSAValue ? (v.id <= length(types) ? types[v.id] : Any) : operand_type_of_constant(v)
+            VT isa Core.Const && (VT = typeof(VT.val))
+            VT isa Type && foreach(t -> note_thrown!(c, t), Base.uniontypes(CC.widenconst(VT)))
         end
         # (a `PiNode` and a `PhiNode` have the type of values that are made elsewhere, and what a `typeassert` gives is
         # the type of its argument: a type that is only there because a call was made over it is not one that is made)
@@ -650,6 +702,8 @@ function replay_slot_facts!(c::Compilation, ci::Core.CodeInstance)
             push!(s.raw_store_types, key[2])
         elseif k === :universe
             push!(s.universe_seen, key[2])
+        elseif k === :thrown
+            push!(s.thrown_seen, key[2])
         elseif k === :truncated
             s.scan_truncated = true
         elseif k === :flowarg
@@ -897,6 +951,14 @@ function analyze_slots!(c::Compilation, interp, root)
     c.settings.why && report_why(c)
     changed = update_slot_types!(c)
     changed |= update_objects!(c) # (what is known of the objects, see objects.jl)
+    # the exceptions that are thrown, that a `catch e` is made over
+    if c.settings.universe && (used || s.catch_seen)
+        new = Any[t for t in s.thrown_seen if !(t in s.thrown)]
+        if !isempty(new)
+            union!(s.thrown, new)
+            changed = true
+        end
+    end
     # Program types, that a call over an `Any` splits over; any new finds that were not used in this pass are used in
     # the next
     if c.settings.universe && used

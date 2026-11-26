@@ -229,12 +229,15 @@ function pass_answers(c::Compilation)
     s, cl = c.slots, c.closures
     u = UInt(0)
     for t in s.universe; u += type_hash(t); end
+    th = UInt(0)
+    for t in s.thrown; th += type_hash(t); end # (the exceptions that a `catch e` is made over: part of the same answer)
+    u = hash(th, u)
     tv = UInt(0)
     for T in s.type_values; tv += T isa Type ? type_hash(T) : hash(T); end # (a set: the order that they were found in does not matter)
     tv = hash(s.type_slots, hash(length(s.type_values), tv))
     lt = UInt(0)
     for F in cl.listener_types; lt += type_hash(F); end
-    return PassAnswers(hash(length(s.universe), u), tv, hash(closures_hash(cl), hash(cl.listeners_complete, hash(length(cl.listener_types), lt))))
+    return PassAnswers(hash(length(s.thrown), hash(length(s.universe), u)), tv, hash(closures_hash(cl), hash(cl.listeners_complete, hash(length(cl.listener_types), lt))))
 end
 
 # The answer to a question about the state of the compilation, as it is now

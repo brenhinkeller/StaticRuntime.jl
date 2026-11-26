@@ -154,6 +154,7 @@ Base.@kwdef mutable struct SlotState
     open::Set{SlotKey} = Set{SlotKey}()                               # slots given up: reads are `Any`
     universe::Set{Any} = Set{Any}()                                   # the types that a call over `Any` is made over
     universe_extras::Dict{Any,Vector{Any}} = Dict{Any,Vector{Any}}()  # (the subtypes of a type among them, once asked)
+    thrown::Set{Any} = Set{Any}()                                     # the types of the exceptions that the code throws: what a `catch e` is made over
     type_slots::Bool = false                                          # some of `types` are slots of types (`Vector{Type}`)
     type_values::Vector{Any} = Any[]                                  # the types that slots of types hold
     holds_types::Dict{SlotKey,Bool} = Dict{SlotKey,Bool}()            # (whether each slot holds types, once asked)
@@ -162,6 +163,9 @@ Base.@kwdef mutable struct SlotState
     seen_members::Dict{SlotKey,Vector{Any}} = Dict{SlotKey,Vector{Any}}() # stored types not yet in `seen` (see `note_slot_store!`)
     seen_unknown::Set{SlotKey} = Set{SlotKey}()                       # slots that something of an unknown type was stored in
     universe_seen::Set{Any} = Set{Any}()
+    thrown_seen::Set{Any} = Set{Any}()
+    catch_seen::Bool = false                                          # a caught exception is the argument of a call that is made over what is thrown
+    caught_vars::IdDict{Any,Any} = IdDict{Any,Any}()                  # for the code of a method: the slots and statements that hold a caught exception (see `is_caught_exception`)
     stored_by_slot::Dict{SlotKey,Set{Any}} = Dict{SlotKey,Set{Any}}() # (see `note_stored_type!`)
     raw_store_types::Set{Any} = Set{Any}()                            # declared types that a store through a pointer writes
     scan_truncated::Bool = false                                      # a constant was too large to scan
@@ -183,7 +187,7 @@ Base.@kwdef mutable struct SlotState
 end
 SlotState(mode::Symbol) = SlotState(; mode)
 function begin_pass!(s::SlotState)
-    empty!(s.seen); empty!(s.seen_members); empty!(s.seen_unknown); empty!(s.universe_seen); empty!(s.stored_by_slot)
+    empty!(s.seen); empty!(s.seen_members); empty!(s.seen_unknown); empty!(s.universe_seen); empty!(s.thrown_seen); empty!(s.caught_vars); empty!(s.stored_by_slot)
     empty!(s.raw_store_types); s.scan_truncated = false
     empty!(s.argstores); empty!(s.argpasses); empty!(s.callargs); empty!(s.unknown_stores)
     return s

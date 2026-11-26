@@ -85,3 +85,14 @@ struct RtCodeError <: Exception; code::Int; end
     p = run(ignorestatus(pipeline(`$exe $(fill("x", 8))`; stdout = out, stderr = err)))
     @test p.exitcode == 0 && read(out, String) == "before\nafter\n" && isempty(read(err, String))
 end
+
+# A caught exception (`catch e`) is a value of the type `Any`, and a call on it is made over the registered types, the exceptions of the program's own, and the common ones of Base that the code throws:
+# `showerror(io, e)` of an `ArgumentError` or an `ErrorException` gives Julia's text
+@testset "showerror of a caught exception" begin
+    @eval @noinline caught_argument(s::String) = try; parse(Int, s); 0; catch e; showerror(STDERR, e); println(STDERR); 1; end
+    @eval caught_main(argc::Int, argv::Ptr{Ptr{UInt8}}) = caught_argument(opaque(1) == 1 ? "x" : "1") + (try; error("boom ", opaque(2)); 0; catch e; showerror(STDERR, e); println(STDERR); 0; end)
+    code, err = run_main_failing(caught_main)
+    expected = try parse(Int, "x") catch e; sprint(showerror, e) end * "\n" * sprint(showerror, ErrorException("boom 2")) * "\n"
+    @test err == expected
+    @test code == 1
+end

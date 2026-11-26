@@ -123,6 +123,7 @@ what it prints with what Julia prints.
 ## The manual
 
 * [Basic Usage](usage.md): Entry points and compilation options, as well as overrides, and how to write your own.
+* [Compiling scripts](scripts.md)
 * [The Runtime](runtime.md): Memory and the garbage collector, exceptions, and support for Julia types.
 * [Binary size and performance](performance.md): Size and performance of compiled binaries, including comparison with C/C++.
 * [Compiling: overrides, passes, and inference](compiling.md): How a compilation works, what is done to help inference, dynamic dispatch, and finding out why something does not compile.

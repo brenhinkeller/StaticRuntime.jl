@@ -93,6 +93,15 @@ end
 # passes)
 reads_universe(c::Compilation, @nospecialize(T), show::Bool) = c.settings.universe && T isa Type && !(T <: Type) && (T === Any || isabstracttype(Base.unwrap_unionall(T)) || T isa UnionAll)
 
+# the exceptions of Base that a program is likely to catch and show (when it throws them: see `note_thrown!`)
+const COMMON_EXCEPTIONS = Set{Any}([ErrorException, ArgumentError, OverflowError, AssertionError, EOFError, DivideError, StringIndexError])
+
+# the registered types that are subtypes of `T` (`Any`)
+function registered_types(c::Compilation, @nospecialize(T), show::Bool)
+    candidates = show ? c.registered.show : c.registered.dispatch
+    return Type[C for C in candidates if C <: T]
+end
+
 function registered_union_(c::Compilation, @nospecialize(T), show::Bool, universe::Bool)
     # (a `UnionAll` that is not abstract is a type that has parameters that are not known, `Dates.DatePart`: its
     # instances are of the types of it that were registered)
@@ -140,6 +149,33 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
         end
         u = listed_union(c, T)
         reg = false
+        if u === nothing && T === Any && is_caught_exception(c, arginfo, i, sv)
+            # (`catch e`: the registered types, the exceptions of the program's own that it makes, and the exceptions of Base that are
+            # commonly caught, for those of them that the code throws. Not all of the exceptions that it throws: a call that is split over
+            # more than a few dozen is not one that inference can do.)
+            c.slots.catch_seen = true
+            depends!(c, sv, (:universe,))
+            found = Any[t for t in registered_types(c, T, isshow)]
+            for t in universe_extras(c, Exception)
+                t in found || push!(found, t)
+            end
+            for t in thrown_extras(c, Exception)
+                (t in COMMON_EXCEPTIONS || user_relevant(t)) && !(t in found) && push!(found, t)
+            end
+            if !isempty(found) && length(found) <= c.settings.split_limit
+                note_dispatch_used!(c, sv)
+                u = Union{found...}
+                reg = true
+                depends!(c, sv, (:pruned,))
+                u = without_pruned(c, arginfo, u)
+                u === nothing && continue
+                u = with_methods(c, interp, arginfo, i, u, max_methods)
+                    registered |= reg
+                argtypes[i] = u
+                changed = true
+                continue
+            end
+        end
         if u === nothing
             reads_universe(c, T, isshow) && depends!(c, sv, (:universe,)) # (see passes.jl)
             u = registered_union(c, T, isshow)
