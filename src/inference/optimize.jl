@@ -271,8 +271,19 @@ function assert_field_receivers!(ir::CC.IRCode)
         CC.singleton_type(CC.argextype(st.args[1], ir)) in FIELD_BUILTINS || continue
         receiver = CC.widenconst(CC.argextype(st.args[2], ir))
         receiver isa Union || continue
-        parts = filter(T -> !(T === Nothing || T === Missing), Base.uniontypes(receiver))
-        length(parts) == 1 && isconcretetype(only(parts)) && length(Base.uniontypes(receiver)) > 1 || continue
+        members = Base.uniontypes(receiver)
+        parts = filter(T -> !(T === Nothing || T === Missing), members)
+        if !(length(parts) == 1 && isconcretetype(only(parts)) && length(members) > 1)
+            # (a union of types of which one has the field that is read or written, `info.bound` where `info` is a `VariableIndex` or a
+            # `_VariableInfo`: Julia narrows the receiver after an `isa` or a call that only one of them has a method for, and the narrowed
+            # type is that of the field. Where the code does not have the narrowing, the access of a field of a union is a call at run time)
+            name = CC.argextype(st.args[3], ir)
+            name isa Core.Const && (name.val isa Symbol || name.val isa Int) || continue
+            having = [T for T in members if T isa DataType && isconcretetype(T) && isstructtype(T) && !(T <: Type) &&
+                                          (name.val isa Symbol ? hasfield(T, name.val) : 1 <= name.val <= fieldcount(T))]
+            length(having) == 1 && length(members) > 1 || continue
+            parts = having
+        end
         T = only(parts)
         checked = CC.insert_node!(ir, pc, CC.NewInstruction(Expr(:call, Core.typeassert, st.args[2], T), T), false)
         st.args[2] = checked

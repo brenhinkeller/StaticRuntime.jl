@@ -172,3 +172,22 @@ kwu_splat() = (nt = (a = @opaque(1) > 100 ? 1 : 2.0,); Int(kwu_two(; nt...)))
 @testset "Keywords and NamedTuples of unions of types" begin
     check_cases([kwu_one, kwu_two_values, kwu_merge, kwu_merge_keywords, kwu_splat])
 end
+
+# The field of a value that is one of a few types, of which one has the field: Julia narrows the value to that one after a call that only that one has a method for (and
+# after a test with `isa`), and the field is read and written in the type that has it. A `Dict` of MathOptInterface (`CleverDicts.get`) gives its key where the dictionary is the identity,
+# so what it gives is `Union{Nothing,Key,Value}`, though the program never has the key there (HiGHS's `_update_info(info, set)` of two sets in one call)
+struct UfKey; value::Int; end
+mutable struct UfInfo; bound::Int; index::Int; end
+@noinline uf_get(flag::Int, info::UfInfo, key::UfKey) = flag == 0 ? info : flag == 1 ? key : nothing
+uf_update!(info::UfInfo, v::Int) = (info.bound += v; info.index = info.bound; nothing)
+function uf_update_twice(flag::Int, a::Int, b::Int)
+    info = UfInfo(0, 0)
+    x = uf_get(flag, info, UfKey(7))
+    x === nothing && return -1
+    uf_update!(x, a)
+    uf_update!(x, b)
+    return info.bound * 10 + info.index
+end
+@testset "A field of a union of types, of which one has it" begin
+    check_cases(["twice" => () -> uf_update_twice(@opaque(0), 2, 3), "nothing" => () -> uf_update_twice(@opaque(2), 2, 3)])
+end
