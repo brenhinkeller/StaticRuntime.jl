@@ -79,3 +79,24 @@ end
                         n + 100 * haskey(d, "thr" * "ee") + 1000 * (("a" * "b") == "ab") + 10000 * (Set(["x"]) == Set(["x" * ""])))
     @test static_result(keys_by_text) == keys_by_text()
 end
+
+# The tables of the properties of characters (src/overrides/strings.jl) are the functions that they were made of at every code point: a table of runs is kept as the low 16 bits of
+# the first code point of each run and where each plane starts, so the ends of the runs, the planes and what is not a code point are where it can go wrong
+@testset "Tables of runs of code points are the functions that they stand for" begin
+    S = StaticRuntime
+    refs = [
+        :ISPRINT => cp -> Base.Unicode.UTF8PROC_CATEGORY_LU <= Base.Unicode.category_code(cp) <= Base.Unicode.UTF8PROC_CATEGORY_ZS,
+        :ISLOWER => cp -> !iszero(ccall(:utf8proc_islower, Cint, (UInt32,), cp)),
+        :ISUPPER => cp -> !iszero(ccall(:utf8proc_isupper, Cint, (UInt32,), cp)),
+        :ISSPACE => cp -> isvalid(Char, cp) && Base.isspace(Char(cp)),
+        :ID_START => cp -> isvalid(Char, cp) && ccall(:jl_id_start_char, Cint, (UInt32,), cp) != 0,
+        :ID_CHAR => cp -> isvalid(Char, cp) && ccall(:jl_id_char, Cint, (UInt32,), cp) != 0,
+    ]
+    for (name, f) in refs
+        table = getfield(S, name)
+        @test count(cp -> S.lookup(table, cp) != f(cp), UInt32(0):UInt32(0x10ffff)) == 0
+        # (what is not a code point is in the last run, as it was when the first code points were kept whole)
+        @test all(x -> S.lookup(table, UInt32(x)) == S.lookup(table, UInt32(0x10ffff)), (0x110000, 0x1fffff, 0xffff0000, 0xffffffff))
+        @test length(table.planes) == 18 && issorted(table.planes) && Int(table.planes[end]) == length(table.low)
+    end
+end

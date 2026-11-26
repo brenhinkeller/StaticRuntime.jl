@@ -117,23 +117,63 @@ function RunTable(f, ::Type{T}) where {T}
             push!(values, value)
         end
     end
-    return RunTable{T}(starts, values)
+    # (exactly as long as they are: `push!` leaves room for more, and the room is in the binary, with the table)
+    return RunTable{T}(copy(starts), copy(values))
 end
 
 """
     BoolRunTable
 
 A function of the code points that is `true` or `false`, as the first code point of each run: the runs alternate, so the
-values are not kept (only whether the first is `true`). It is a fraction of the size of a [`RunTable`](@ref) of `Bool`s.
+values are not kept (only whether the first is `true`). It is a fraction of the size of a [`RunTable`](@ref) of `Bool`s,
+and the first code points of the runs are kept as 16 bits each: `low` has the low 16 bits of them, in the order of the
+runs, and `planes[p + 1]` is how many of the runs start before the plane `p` (the code points `p << 16` to `(p + 1) << 16 - 1`,
+0 to 16), so those of the plane `p` are `low[planes[p + 1] + 1:planes[p + 2]]`, and `planes` has 18 elements. (With the
+first code points in 32 bits the table of what is printable was 6 kB, and with this it is 3 kB.)
 """
 struct BoolRunTable
-    starts::Vector{UInt32}
+    low::Vector{UInt16}
+    planes::Vector{UInt16}
     first::Bool
 end
 
-@inline lookup(table::BoolRunTable, cp::UInt32) = table.first ⊻ iseven(searchsortedlast(table.starts, cp))
+# how many of the runs start at or before the code point `cp`: the index of the run that it is in
+function run_index(low::Vector{UInt16}, planes::Vector{UInt16}, cp::UInt32)
+    cp > 0x0010ffff && return Int(@inbounds planes[18]) # (not a code point: in the last run, as it was with the first code points whole)
+    p = Int(cp >> 16)
+    a = Int(@inbounds planes[p + 1]) # (the runs of the planes before this one)
+    b = Int(@inbounds planes[p + 2]) # (and those of this one)
+    x = UInt16(cp & 0x0000ffff)
+    # the last index of `a:b` whose run starts at or before `x` (the one at `a` is of a plane before: it does)
+    while a < b
+        m = (a + b + 1) >> 1
+        if @inbounds(low[m]) <= x
+            a = m
+        else
+            b = m - 1
+        end
+    end
+    return a
+end
 
-function BoolRunTable(f)
+@inline lookup(table::BoolRunTable, cp::UInt32) = table.first ⊻ iseven(run_index(table.low, table.planes, cp))
+
+# the table of the first code points of the runs, in sorted order (the first is 0): what `BoolRunTable(f)` makes of the runs of `f`
+function BoolRunTable(starts::Vector{UInt32}, first::Bool)
+    length(starts) < typemax(UInt16) || throw(ArgumentError("too many runs"))
+    low = UInt16[UInt16(s & 0x0000ffff) for s in starts] # (a comprehension has the room that it needs and no more)
+    planes = zeros(UInt16, 18)
+    for s in starts
+        planes[Int(s >> 16) + 2] += 1
+    end
+    for i in 2:18
+        planes[i] += planes[i - 1]
+    end
+    return BoolRunTable(low, planes, first)
+end
+
+# the runs of `f`: the first code point of each, and whether `f` is true for the first
+function bool_runs(f)
     starts = UInt32[]
     last = nothing
     for cp in UInt32(0):UInt32(0x10ffff)
@@ -143,8 +183,10 @@ function BoolRunTable(f)
         last = value
     end
     # (`starts[1]` is 0: the code points are all in a run)
-    return BoolRunTable(starts, f(UInt32(0)))
+    return starts, f(UInt32(0))
 end
+
+BoolRunTable(f) = BoolRunTable(bool_runs(f)...)
 
 # the properties, by the functions of utf8proc that Base uses
 const CATEGORY = RunTable(cp -> UInt8(Base.Unicode.category_code(cp)), UInt8)
