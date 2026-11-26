@@ -53,5 +53,7 @@ end
 # a program in which nothing can go on stops with a message that says so (in Julia it would wait for ever)
 @eval task_deadlock(argc::Int, argv::Ptr{Ptr{UInt8}}) = (c = Channel{Int}(1); println(take!(c)); 0)
 @testset "A deadlock is an error" begin
-    @test_throws ProcessFailedException run_main(task_deadlock)
+    code, err = run_main_failing(task_deadlock)
+    @test code != 0
+    @test occursin("deadlock: every task waits for something that no task gives", err)
 end

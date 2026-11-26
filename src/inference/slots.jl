@@ -530,7 +530,7 @@ function record_slot_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInstan
         record_call_arguments!(facts, ir, mi)
         flow_shadow_on() && record_flow_arguments!(facts, ir, mi)
         note_universe_statements!(c, (ir.stmts[pc][:type] for pc in 1:length(ir.stmts)), (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)), mi)
-        note_slots_in_constants!(c, ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts))
+        note_slots_in_constants!(c, ir.stmts.stmt)
     finally
         s.facts_sink = nothing
         s.fact_mi = nothing
@@ -801,12 +801,45 @@ function constant_operand(a)
     return a isa Core.SSAValue || a isa Core.Argument || a isa Expr ? nothing : a
 end
 
+# (the operands of the statements of a method that are what Julia's own types make up: they are not what slots hold, and are not types of the universe
+# either (that has the types that are not Julia's): looked at only after the common ones that are never constants)
+const PLAIN_CONSTANTS = Union{Bool,Int8,Int16,Int32,Int64,Int128,UInt8,UInt16,UInt32,UInt64,UInt128,Float16,Float32,Float64,Symbol,String,Char,Core.SSAValue,Core.Argument,Expr,Nothing}
+
+@inline function note_operand!(c::Compilation, a)
+    a isa PLAIN_CONSTANTS && return
+    v = constant_operand(a)
+    v === nothing && return
+    v isa PLAIN_CONSTANTS || note_slots_in!(c, v)
+    return
+end
+
+# (the loops over the statements are written out, not made of `statement_operands`, which makes a generator for each: this is made for every method that is
+# inferred, in each pass, and what the optimizer folded into the code is looked at again after it is inlined)
 function note_slots_in_constants!(c::Compilation, code)
     for st in code
-        for a in statement_operands(st)
-            v = constant_operand(a)
-            v === nothing && continue
-            note_slots_in!(c, v)
+        if st isa Expr
+            head = st.head
+            head === :foreigncall && continue
+            skip = head === :call ? 1 : head === :invoke ? 2 : head === :new ? 2 : 1
+            args = st.args
+            for i in skip:length(args)
+                note_operand!(c, args[i])
+            end
+        elseif st isa Core.ReturnNode
+            isdefined(st, :val) && note_operand!(c, st.val)
+        elseif st isa Core.PiNode
+            note_operand!(c, st.val)
+        elseif st isa Core.UpsilonNode
+            isdefined(st, :val) && note_operand!(c, st.val)
+        elseif st isa Core.PhiNode || st isa Core.PhiCNode
+            vals = st.values
+            for i in eachindex(vals)
+                isassigned(vals, i) && note_operand!(c, vals[i])
+            end
+        elseif st isa Union{Core.GotoNode,Core.GotoIfNot,Core.EnterNode,Core.SlotNumber,Core.NewvarNode,LineNumberNode,Core.SSAValue,Core.Argument,Nothing}
+            continue
+        else
+            note_operand!(c, st) # (a statement that is a constant itself: a global, a `QuoteNode`, an object)
         end
     end
     return

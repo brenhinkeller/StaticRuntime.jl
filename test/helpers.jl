@@ -43,6 +43,14 @@ function run_main(main; dir = mktempdir())
     return readchomp(`$exe`)
 end
 
+# The exit status and the standard error of a program that is expected to fail (what it says when it stops is not for the log of the tests)
+function run_main_failing(main; dir = mktempdir())
+    exe = Base.invokelatest(compile_executable, main, ENTRY_TYPES, dir, string(nameof(main)))
+    out, err = tempname(), tempname()
+    p = run(ignorestatus(pipeline(`$exe`; stdout = out, stderr = err)))
+    return p.exitcode, read(err, String)
+end
+
 # a value that the compiler does not know the type of
 any_value(x) = Base.inferencebarrier(x)
 # (a value that comes through `any_value` or `Base.inferencebarrier` has a type that the compiler is not told of: the types of such values in the

@@ -97,7 +97,7 @@ function CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState{<:Override
     mi isa Core.MethodInstance && c.slots.mode !== :off && record_slot_facts!(c, ir, mi)
     # (without the slots, the constants are still looked at for their listeners, which are not known otherwise: see
     # "Listeners" in closures.jl)
-    c.slots.mode === :off && note_slots_in_constants!(c, (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)))
+    c.slots.mode === :off && note_slots_in_constants!(c, ir.stmts.stmt)
     inlined = @invoke CC.ssa_inlining_pass!(ir::CC.IRCode, state::CC.InliningState, propagate_inbounds::Bool)
     mi isa Core.MethodInstance && c.slots.mode !== :off && c.settings.objects && record_object_facts!(c, inlined, mi)
     return inlined

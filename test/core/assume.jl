@@ -46,7 +46,10 @@ end
 @eval assume_wrong_field(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println(abag_liar(opaque(1)).v.x); 0)
 @eval assume_wrong_embedded(argc::Int, argv::Ptr{Ptr{UInt8}}) = (eset!(EB, Base.inferencebarrier(opaque(1) + 0.5)); println(eget(EB.v)); 0)
 @testset "What is @assumed is checked" begin
-    @test_throws ProcessFailedException run_main(assume_wrong_embedded)
-    @test_throws ProcessFailedException run_main(assume_wrong_call)
-    @test_throws ProcessFailedException run_main(assume_wrong_field)
+    # (the program stops, and says which assertion it was: the type that was assumed, and where)
+    for main in (assume_wrong_embedded, assume_wrong_call, assume_wrong_field)
+        code, err = run_main_failing(main)
+        @test code != 0
+        @test occursin("TypeError: in typeassert, expected AInfo", err)
+    end
 end
