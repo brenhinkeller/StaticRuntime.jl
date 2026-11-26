@@ -1,18 +1,21 @@
 # Basic Usage 
 ## Entry points
 
-An executable is compiled from a function, in one of three forms:
+An executable is compiled from a function, in one of three forms, or from a whole script:
 
 | form                                    | `compile_executable(f, ...)`  | command line arguments passed as  |
 |:----------------------------------------|:------------------------------|:----------------------------------|
 | `main()`                                | `()`, or omitted              | none                              |
 | `main(args::Vector{String})`            | `(Vector{String},)`           | `args`                            |
 | `main(argc::Int, argv::Ptr{Ptr{UInt8}})` | `(Int, Ptr{Ptr{UInt8}})`      | `argc` & `argv`, as in C          |
+| a file, `script.jl`                     | `compile_script("script.jl")` | `ARGS`, as in `julia script.jl`   |
 
 That is to say:
 * `main()`, for a program that has no arguments, and wants none. You may return an integer status, or nothing (in which case `0` will be returned by default).
 * `main(args)` is the form to use for a program that is written like a Julia script: it has the command-line arguments in the same form and order as `Base.ARGS` has them. Again, you may return an integer status, or nothing (in which case `0` will be returned by default).
 * The third form is C's: it compiles `f(argc, argv)` to the `main` of a C program, with no code of ours between the two, which is as small as a program can be (the others add a kilobyte or less). Its status is the return value as C has it, so the function has to return an `Int` (or an `Int32`); if you try to return `nothing`, the return value is then whatever the machine had in the register, and the compiler will warn of this.
+
+`compile_script(path)` (or `compile_script_string(code)`) is the entry point for a `.jl` file that runs from the top, as in `julia script.jl args...`: the program has `ARGS`, and the top-level code is the program. See [Compiling scripts](scripts.md) for what is done when compiling and how the variables of a script are treated.
 
 ## Compilation
 

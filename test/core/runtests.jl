@@ -21,6 +21,7 @@ end
     @testset verbose=true "Default Entry" include_timed("executables.jl")
     @testset verbose=true "Files and the system" include_timed("files.jl")
     @testset verbose=true "Processes" include_timed("process.jl")
+    @testset verbose=true "Scripts" include_timed("scripts.jl")
 end
 
 # Dynamic dispatch, closures and C callbacks

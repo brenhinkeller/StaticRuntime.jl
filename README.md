@@ -49,7 +49,7 @@ The 10 primes up to 30: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
 Their mean is 12.9
 ```
 
-The entry point used in the example above is `main(args)`, though `main()` is also an option for a program with no arguments, as is a C-style `main(argc, argv)` (`(Int, Ptr{Ptr{UInt8}})`, which must return an integer); see [Entry points](docs/src/usage.md).
+The entry point used in the example above is `main(args)`, though `main()` is also an option for a program with no arguments, as is a C-style `main(argc, argv)` (`(Int, Ptr{Ptr{UInt8}})`, which must return an integer); see [Entry points](docs/src/usage.md). A whole script can be compiled too, with `compile_script("script.jl", "build")`, which gives the program `ARGS` as in `julia script.jl` (see [Compiling scripts](docs/src/scripts.md)).
 
 If not otherwise specified, the garbage collector will be included only if it is thought to be needed (`gc = :auto`, the default). This includes the GC for anything that allocates repeatedly in a loop or other cycle (not counting error paths), and excludes it otherwise. Alternatively, a program compiled with `gc = true` always has one, and with `gc = false` never does. Meanwhile, the `small = true` option attempts to make the file smaller where possible (no names of functions or segment of constants in the file). A small program is then a few tens of kilobytes, depending on architecture (see [Binary size](docs/src/runtime.md)).
 
