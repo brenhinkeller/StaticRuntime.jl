@@ -47,6 +47,7 @@ function abort_message!(builder::LLVM.IRBuilder, mod::LLVM.Module, message)
     return
 end
 
+include("target.jl")      # the system and the architecture that the program is made for
 include("heap.jl")        # the allocator and the collector, in Julia (compiled into the program)
 include("shims.jl")       # the runtime in LLVM IR, and the functions that a program may call
 include("strict.jl")      # what is refused, and what aborts

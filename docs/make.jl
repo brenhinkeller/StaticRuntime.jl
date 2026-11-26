@@ -18,6 +18,7 @@ makedocs(;
         "Home" => "index.md",
         "Basic Usage" => "usage.md",
         "Compiling scripts" => "scripts.md",
+        "Cross-compiling" => "cross.md",
         "The Runtime" => "runtime.md",
         "Binary size and performance" => "performance.md",
         "Compiling: overrides, passes, and inference" => "compiling.md",

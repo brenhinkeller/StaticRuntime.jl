@@ -17,6 +17,8 @@ That is to say:
 
 `compile_script(path)` (or `compile_script_string(code)`) is the entry point for a `.jl` file that runs from the top, as in `julia script.jl args...`: the program has `ARGS`, and the top-level code is the program. See [Compiling scripts](scripts.md) for what is done when compiling and how the variables of a script are treated.
 
+`target = "x86_64-apple-macosx11.0.0"` (or any triple) makes the program for another architecture than the host's: see [Cross-compiling](cross.md).
+
 ## Compilation
 
 See [Compiling: overrides, passes, and inference](compiling.md) and [The Runtime](runtime.md) for how it works, and [`compile_executable`](@ref) or [`compile_shlib`](@ref) for options and syntax:

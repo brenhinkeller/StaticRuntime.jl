@@ -889,6 +889,18 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Base.sho
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
 end
 
+## The target of the program, a constant
+
+# `target_system()` and `target_arch()` (see runtime/target.jl): what the program is made for, which is the host's unless `target` says another. A constant, so that
+# the code of the other systems is not looked at.
+for (f, scoped) in ((:target_system, :TARGET_SYSTEM), (:target_arch, :TARGET_ARCH))
+    @eval function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof($f), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                          vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+        length(arginfo.argtypes) == 1 && return CC.Future(CC.CallMeta(CC.Const($scoped[]), Union{}, CC.EFFECTS_TOTAL, CC.NoCallInfo()))
+        return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+    end
+end
+
 ## `pkgversion` of a module, made when compiling
 
 # `pkgversion(m)` reads the `Project.toml` of the package from its path (`ijl_module_uuid`, the file system): a program has the version that

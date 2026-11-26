@@ -15,7 +15,7 @@ include("registry.jl")
 
 # The runtime that is linked into programs (a module of its own), our method table, and our LLVM passes
 include("runtime/runtime.jl")
-using .Runtime: link_runtime!, UnsupportedCodeError
+using .Runtime: link_runtime!, UnsupportedCodeError, target_system, target_arch, target_macos, target_choice, with_target, TARGET_SYSTEM, TARGET_ARCH
 include("method_table.jl")   # our method table, `@device_override`, and the parameters of our compilations
 include("extensions.jl")     # functions that package extensions add methods to (Makie)
 include("llvm/tags.jl")      # the type tags of the objects that a program allocates
@@ -189,11 +189,17 @@ function early_entry_check(c, args, rooted; method_table, params, target)
     return
 end
 
+include("cross.jl")                       # programs for another architecture or system: `target = "x86_64-apple-macosx11.0.0"`
+
 for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_module)
     @eval begin
         function $f(args...; method_table = method_table, params = nothing, strict::Bool = true, stub_errors::Bool = true, allow = (), gc = default_gc(), target = default_target(),
                     libraries::Symbol = :system, small::Bool = false, optimize::Bool = default_optimize(), strip::Bool = true, llvm_postprocess = nothing, inspect_llvm = nothing, kwargs...)
             libraries in (:system, :bundle) || throw(ArgumentError("`libraries` is `:system` or `:bundle`, not `$(repr(libraries))`"))
+            # (a target that is not the host's: the code is made for the host and the last steps are the target's, see cross.jl)
+            target = resolve_target(target)
+            cross = target isa CrossTarget ? target : nothing
+            cross === nothing || (target = default_target())
             check_gc(gc)
             register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
             explicit_params = params
@@ -205,14 +211,16 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked
             # to it, and does not change it; see `input_dependent_cases` in testing.jl)
             postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); started = time(); linked = link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = vcat(comp.objects.keyed_objects, collect(Any, keys(comp.slots.scan_cache)))); trace_on() && trace("linking the runtime (and embedding the constants): ", round(time() - started; digits = 1), " s"); linked)) : llvm_postprocess
-            result, c = compile_passes(; strict) do c
+            result, c = with_cross_target(cross) do
+            compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 entry_args = rooted_arguments(c, args)
                 $(f in (:compile_executable, :compile_shlib) ?
                     :(length(args) >= 2 && args[1] isa Function && args[2] isa Tuple && early_entry_check(c, args, entry_args; method_table, params = job_params, target)) : :nothing)
-                Base.invokelatest(StaticCompiler.$f, entry_args...; method_table, params = job_params, target, llvm_postprocess = postprocess, strip = !ours && strip,
-                                  $(f === :compile_executable ? :(executable_kwargs(args, merge((; cflags = default_cflags(small)), NamedTuple(kwargs)))...) :
-                                    f === :compile_shlib ? :(merge((; cflags = default_cflags(small)), NamedTuple(kwargs))...) : :(NamedTuple(kwargs)...)))
+                Base.invokelatest(cross === nothing ? StaticCompiler.$f : cross_generator($(QuoteNode(f))), entry_args...; method_table, params = job_params, target, llvm_postprocess = postprocess, strip = !ours && strip,
+                                  $(f === :compile_executable ? :((cross === nothing ? executable_kwargs(args, merge((; cflags = default_cflags(small)), NamedTuple(kwargs))) : merge((; cross, small), NamedTuple(kwargs)))...) :
+                                    f === :compile_shlib ? :((cross === nothing ? merge((; cflags = default_cflags(small)), NamedTuple(kwargs)) : merge((; cross, small), NamedTuple(kwargs)))...) : :(NamedTuple(kwargs)...)))
+            end
             end
             $(f in (:compile_executable, :compile_shlib) ? :(libraries === :bundle && result isa AbstractString && Runtime.bundle_libraries(result, c.libraries[])) : :nothing)
             return result
@@ -367,7 +375,7 @@ function compile_executable_with_arguments(f::Function, path::String = pwd(), na
     return Base.invokelatest(compile_executable, entry, (Int, Ptr{Ptr{UInt8}}), path, String(name); kwargs...)
 end
 
-export compile_script, compile_script_string
+export compile_script, compile_script_string, cross_target, CrossTarget
 export compile_executable, compile_shlib, static_code_llvm, static_code_typed, static_code_native,
        static_llvm_module, @device_override
 export UnsupportedCodeError, InferenceError, add_dispatch_candidates!, add_deserialize_types!, @assume, @assume_field, @assume_field_embedded

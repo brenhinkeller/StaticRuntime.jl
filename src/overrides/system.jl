@@ -42,9 +42,9 @@ end
 
 const CLOCK_REALTIME = Int32(0)
 
-const CLOCK_MONOTONIC = Sys.isapple() ? Int32(6) : Int32(1)
+@inline clock_monotonic() = target_choice(Int32(6), Int32(1))
 
-@device_override Base.time_ns() = clock_nanoseconds(CLOCK_MONOTONIC)
+@device_override Base.time_ns() = clock_nanoseconds(clock_monotonic())
 
 @device_override Base.time() = clock_nanoseconds(CLOCK_REALTIME) / 1e9
 
@@ -153,7 +153,7 @@ end
 # Not kept: `DL_LOAD_PATH`, `@executable_path/` in a name. The library is tried as it is and then with the extension.
 function dl_flags(flags::UInt32)
     f = Cint(0)
-    @static if Sys.isapple()
+    if target_macos()
         flags & Runtime.Libdl.RTLD_LAZY != 0 && (f |= 0x1)
         flags & Runtime.Libdl.RTLD_NOW != 0 && (f |= 0x2)
         flags & Runtime.Libdl.RTLD_LOCAL != 0 && (f |= 0x4)
@@ -232,23 +232,24 @@ end
 # `sysctl` (macOS) or `sysconf` (Linux); what is free as libuv has it, the free pages of Mach's statistics (macOS) or
 # `MemAvailable` of `/proc/meminfo` (Linux). The limit of a control group (`uv_get_constrained_memory`, Linux) is not
 # read: the total is the physical memory.
-@static if Sys.isapple()
-    function physical_memory()
+function physical_memory()
+    if target_macos()
         v = Ref{UInt64}(0)
         n = Ref{Csize_t}(sizeof(UInt64))
         ok = ccall(:sysctlbyname, Cint, (Cstring, Ptr{UInt64}, Ptr{Csize_t}, Ptr{Cvoid}, Csize_t), "hw.memsize", v, n, C_NULL, 0) == 0
         return ok ? v[] : UInt64(0)
+    else
+        return UInt64(ccall(:sysconf, Clong, (Cint,), 85)) * UInt64(ccall(:sysconf, Clong, (Cint,), 30)) # (`_SC_PHYS_PAGES`, `_SC_PAGESIZE`)
     end
-    function free_memory_bytes()
+end
+function free_memory_bytes()
+    if target_macos()
         info = zeros(UInt32, 40) # (a `vm_statistics_data_t`: the number of free pages is its first field)
         count = Ref{UInt32}(15)  # (`HOST_VM_INFO_COUNT`)
         host = ccall(:mach_host_self, UInt32, ())
         ok = GC.@preserve info ccall(:host_statistics, Cint, (UInt32, Cint, Ptr{UInt32}, Ptr{UInt32}), host, 2, pointer(info), count) == 0
         return ok ? UInt64(info[1]) * UInt64(ccall(:sysconf, Clong, (Cint,), 29)) : UInt64(0) # (2: `HOST_VM_INFO`; 29: `_SC_PAGESIZE`)
-    end
-else
-    physical_memory() = UInt64(ccall(:sysconf, Clong, (Cint,), 85)) * UInt64(ccall(:sysconf, Clong, (Cint,), 30)) # (`_SC_PHYS_PAGES`, `_SC_PAGESIZE`)
-    function free_memory_bytes()
+    else
         for line in eachline("/proc/meminfo")
             startswith(line, "MemAvailable:") && return parse(UInt64, split(line)[2]) * UInt64(1024)
         end

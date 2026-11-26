@@ -758,7 +758,7 @@ const LIBC_FUNCTIONS = Set([
     "atoi", "atol", "atoll", "atof", "strtol", "strtoul", "strtoll", "strtoull", "strtod", "strtof", "qsort", "bsearch",
     "write", "read", "puts", "putchar", "getchar", "fflush", "fputc", "fputs", "fwrite", "fread",
     "usleep", "nanosleep", "atexit", "clock_gettime", "time", "getentropy", "gettimeofday", "localtime_r", "gmtime_r",
-    "stat", "lstat", "stat\$INODE64", "lstat\$INODE64", "access", "mkdir", "rmdir", "unlink", "rename", "opendir", "readdir", "closedir", "getcwd", "chdir", "realpath",
+    "stat", "lstat", "stat\$INODE64", "lstat\$INODE64", "opendir\$INODE64", "readdir\$INODE64", "access", "mkdir", "rmdir", "unlink", "rename", "opendir", "readdir", "closedir", "getcwd", "chdir", "realpath",
     "mkstemp", "mkdtemp", "fdopen", "getpid", "setenv", "unsetenv", "strerror", "close", "__error", "__errno_location",
     "open", "lseek", "ftruncate", "mmap", "munmap", "getpagesize", "msync",
     "gethostname", "wcsftime", "strftime", "chmod", "symlink", "readlink", "sysconf", "sysctlbyname", "mach_host_self", "host_statistics",

@@ -153,11 +153,9 @@ calling `f(io)`.
 @device_override Base.open(path::AbstractString, mode::AbstractString) = open_file(path, mode)
 
 # the flags of `open` of each system (the access is `O_RDONLY` 0, `O_WRONLY` 1 or `O_RDWR` 2)
-@static if Sys.isapple()
-    const O_APPEND, O_CREAT, O_TRUNC = Cint(0x8), Cint(0x200), Cint(0x400)
-else
-    const O_APPEND, O_CREAT, O_TRUNC = Cint(0x400), Cint(0x40), Cint(0x200)
-end
+@inline o_append() = target_choice(Cint(0x8), Cint(0x400))
+@inline o_creat() = target_choice(Cint(0x200), Cint(0x40))
+@inline o_trunc() = target_choice(Cint(0x400), Cint(0x200))
 
 # The file as Base opens it: the flags are those that Base works out from the keywords (`Base.open_flags`), as `open` of the
 # system takes them, and the stream is made from the descriptor with the mode that its access is (what is there is not
@@ -165,7 +163,7 @@ end
 function open_file_with_flags(path::AbstractString, read::Bool, write::Bool, create::Bool, truncate::Bool, append::Bool)
     path = String(path)
     access = read && write ? Cint(2) : write ? Cint(1) : Cint(0)
-    flags = access | (create ? O_CREAT : Cint(0)) | (truncate ? O_TRUNC : Cint(0)) | (append ? O_APPEND : Cint(0))
+    flags = access | (create ? o_creat() : Cint(0)) | (truncate ? o_trunc() : Cint(0)) | (append ? o_append() : Cint(0))
     fd = GC.@preserve path ccall(:open, Cint, (Cstring, Cint, Base.Cmode_t...), path, flags, Base.Cmode_t(0o666))
     fd < 0 && throw(ErrorException(string("could not open file ", path)))
     mode = append ? (read ? "a+" : "a") : read && write ? "r+" : write ? "w" : "r"

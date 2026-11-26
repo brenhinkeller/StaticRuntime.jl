@@ -178,6 +178,75 @@ const HEAP_IR = Dict{Tuple{Bool,Bool},String}()
 # has no finalizers has them do nothing, so that they and what only they call (several kilobytes) are not in it.
 const FINALIZER_FUNCTIONS = ("julia_run_finalizers_", "julia_run_pending_finalizers_", "julia_add_finalizer_")
 
+# The functions that the collector asks of the system, for the system that the program is made for: the highest address of the stack of the main thread, and how far below it
+# the stack reaches (for Linux the limit of the process). The heap is compiled once, with the host's (`stack_base` and `stack_size` in `heap.jl`); for a
+# program made for another system their bodies are replaced.
+function stack_functions_ir(system::Symbol)
+    system === :macos && return """
+        declare ptr @pthread_self()
+        declare ptr @pthread_get_stackaddr_np(ptr)
+        declare i64 @pthread_get_stacksize_np(ptr)
+        define i64 @static_stack_base() {
+          %t = call ptr @pthread_self()
+          %b = call ptr @pthread_get_stackaddr_np(ptr %t)
+          %i = ptrtoint ptr %b to i64
+          ret i64 %i
+        }
+        define i64 @static_stack_size() {
+          %t = call ptr @pthread_self()
+          %n = call i64 @pthread_get_stacksize_np(ptr %t)
+          ret i64 %n
+        }"""
+    system === :linux && return """
+        @__libc_stack_end = external global ptr
+        define i64 @static_stack_base() {
+          %b = load ptr, ptr @__libc_stack_end
+          %i = ptrtoint ptr %b to i64
+          ret i64 %i
+        }
+        declare i32 @getrlimit(i32, ptr)
+        define i64 @static_stack_size() {
+          ; the limit of the process (RLIMIT_STACK is 3), which is 1 GiB where it is not set, or can not be read
+          %buffer = alloca [2 x i64], align 16
+          %status = call i32 @getrlimit(i32 3, ptr %buffer)
+          %current = load i64, ptr %buffer
+          %failed = icmp ne i32 %status, 0
+          %unlimited = icmp eq i64 %current, -1
+          %none = icmp eq i64 %current, 0
+          %any = or i1 %failed, %unlimited
+          %bad = or i1 %any, %none
+          %size = select i1 %bad, i64 1073741824, i64 %current
+          ret i64 %size
+        }"""
+    return """
+        define i64 @static_stack_base() {
+          ret i64 0
+        }
+        define i64 @static_stack_size() {
+          ret i64 0
+        }"""
+end
+
+const HOST_SYSTEM = Sys.isapple() ? :macos : Sys.islinux() ? :linux : Sys.iswindows() ? :windows : :unknown
+
+# a program for another system than the host's: the functions of the heap that ask the system for the stack are the ones of that system
+function replace_stack_functions!(heap::LLVM.Module)
+    system = target_system()
+    system === HOST_SYSTEM && return
+    replacement = parse(LLVM.Module, stack_functions_ir(system))
+    LLVM.datalayout!(replacement, LLVM.datalayout(heap))
+    LLVM.triple!(replacement, LLVM.triple(heap))
+    LLVM.link!(heap, replacement)
+    fns = LLVM.functions(heap)
+    for (prefix, new) in (("julia_stack_base_", "static_stack_base"), ("julia_stack_size_", "static_stack_size"))
+        for fn in collect(fns)
+            startswith(LLVM.name(fn), prefix) || continue
+            LLVM.replace_uses!(fn, fns[new])
+        end
+    end
+    return
+end
+
 function heap_ir(gc::Bool, finalizers::Bool = true)
     key = (gc, gc && finalizers)
     haskey(HEAP_IR, key) && return HEAP_IR[key]
@@ -254,7 +323,7 @@ function link_heap!(mod::LLVM.Module; gc = false, finalizers = true)
     haskey(fns, "static_alloc") && LLVM.isdeclaration(fns["static_alloc"]) || return false
     collect_garbage = gc !== false
     if collect_garbage
-        Sys.isapple() || Sys.islinux() || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
+        target_system() in (:macos, :linux) || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
         run!(GlobalDCEPass(), mod) # (the roots refer to the objects, which would keep those that the code does not use)
         define_gc_roots!(mod)
         define_gc_stress!(mod, !(gc isa Bool) && gc isa Integer && gc > 0 ? gc : 0) # (`true` is an `Integer` too)
@@ -271,6 +340,7 @@ function link_heap!(mod::LLVM.Module; gc = false, finalizers = true)
     heap = parse(LLVM.Module, heap_ir(collect_garbage, finalizers))
     LLVM.datalayout!(heap, LLVM.datalayout(mod))
     LLVM.triple!(heap, LLVM.triple(mod))
+    collect_garbage && replace_stack_functions!(heap)
     LLVM.link!(mod, heap) # consumes `heap`
     return true
 end

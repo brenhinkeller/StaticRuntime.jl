@@ -114,9 +114,9 @@ const S_PARTIAL = S_CUR + 2 * NCLASSES # and the list of those with free cells
       %r = call i32 @_setjmp(ptr %p)
       ret i32 %r
     }""", "save"), Int32, Tuple{UInt}, buffer)
-# the highest address of the stack of the main thread
+# the highest address of the stack of the main thread (not inlined: for a program made for another system than the host's these two are replaced where the heap is linked, see `link_heap!`)
 @static if Sys.isapple()
-    @inline stack_base() = Base.llvmcall(("""
+    @noinline stack_base() = Base.llvmcall(("""
         declare ptr @pthread_self()
         declare ptr @pthread_get_stackaddr_np(ptr)
         define i64 @base() alwaysinline {
@@ -126,7 +126,7 @@ const S_PARTIAL = S_CUR + 2 * NCLASSES # and the list of those with free cells
           ret i64 %i
         }""", "base"), UInt, Tuple{})
 elseif Sys.islinux()
-    @inline stack_base() = Base.llvmcall(("""
+    @noinline stack_base() = Base.llvmcall(("""
         @__libc_stack_end = external global ptr
         define i64 @base() alwaysinline {
           %b = load ptr, ptr @__libc_stack_end
@@ -134,7 +134,7 @@ elseif Sys.islinux()
           ret i64 %i
         }""", "base"), UInt, Tuple{})
 else
-    stack_base() = UInt(0) # (the stack is not known: the collector can't be used)
+    @noinline stack_base() = UInt(0) # (the stack is not known: the collector can't be used)
 end
 
 # The stack size limit of the process (`getrlimit(RLIMIT_STACK)`): how far below the base the stack of the main thread
@@ -159,7 +159,7 @@ end
 # how far below the base the stack of the thread can reach, which is known on macOS, and on Linux is the limit of the
 # process
 @static if Sys.isapple()
-    @inline stack_size() = Base.llvmcall(("""
+    @noinline stack_size() = Base.llvmcall(("""
         declare ptr @pthread_self()
         declare i64 @pthread_get_stacksize_np(ptr)
         define i64 @size() alwaysinline {
@@ -168,7 +168,7 @@ end
           ret i64 %n
         }""", "size"), UInt, Tuple{})
 else
-    @inline stack_size() = rlimit_stack_size()
+    @noinline stack_size() = rlimit_stack_size()
 end
 
 @noinline function out_of_memory()

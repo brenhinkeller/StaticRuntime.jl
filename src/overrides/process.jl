@@ -10,20 +10,21 @@
 # can not be started (not found, not executable) throws a `SystemError`, where Base's is an `IOError`.
 
 # the flags of `open`, as the system has them
-@static if Sys.isapple()
-    const O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND = 0x0, 0x1, 0x200, 0x400, 0x8
-else
-    const O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND = 0x0, 0x1, 0x40, 0x200, 0x400
-end
+@inline spawn_o_creat() = target_choice(0x200, 0x40)
+@inline spawn_o_trunc() = target_choice(0x400, 0x200)
+@inline spawn_o_append() = target_choice(0x8, 0x400)
+const SPAWN_O_RDONLY, SPAWN_O_WRONLY = 0x0, 0x1
 
 # (`posix_spawn_file_actions_t` is a pointer on macOS and 80 bytes on glibc: a buffer that is larger than both)
 const SPAWN_ACTIONS_BYTES = 256
 
 # the environment of the program, as `execve` has it
-@static if Sys.isapple()
-    spawn_environ() = unsafe_load(ccall(:_NSGetEnviron, Ptr{Ptr{Ptr{UInt8}}}, ()))
-else
-    spawn_environ() = unsafe_load(cglobal(:environ, Ptr{Ptr{UInt8}}))
+function spawn_environ()
+    if target_macos()
+        return unsafe_load(ccall(:_NSGetEnviron, Ptr{Ptr{Ptr{UInt8}}}, ()))
+    else
+        return unsafe_load(cglobal(:environ, Ptr{Ptr{UInt8}}))
+    end
 end
 
 spawn_error(cmd::Base.Cmd, what::AbstractString, code::Integer) = throw(SystemError(string(what, " ", join(cmd.exec, ' ')), Int(code)))
@@ -57,10 +58,10 @@ end
 # one redirect of file descriptor `fd`
 function spawn_redirect!(actions::Ptr{Cvoid}, fd::Int, handle)
     if handle isa Base.FileRedirect
-        flags = fd == 0 ? O_RDONLY : (O_WRONLY | O_CREAT | (handle.append ? O_APPEND : O_TRUNC))
+        flags = fd == 0 ? SPAWN_O_RDONLY : (SPAWN_O_WRONLY | spawn_o_creat() | (handle.append ? spawn_o_append() : spawn_o_trunc()))
         spawn_action_open!(actions, fd, handle.filename, flags)
     elseif handle isa Base.DevNull
-        spawn_action_open!(actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY)
+        spawn_action_open!(actions, fd, "/dev/null", fd == 0 ? SPAWN_O_RDONLY : SPAWN_O_WRONLY)
     elseif handle isa StaticIO{:stdin}
         spawn_action_dup!(actions, 0, fd)
     elseif handle isa StaticIO{:stdout}
@@ -94,7 +95,7 @@ function spawn_and_wait(cmds::Base.AbstractCmd, capture::Bool)
         try
             if capture
                 ccall(:pipe, Cint, (Ptr{Cint},), pointer(fds)) == 0 || throw(SystemError("pipe", Int(unsafe_load(errno_pointer()))))
-                spawn_action_open!(ap, 0, "/dev/null", O_RDONLY)
+                spawn_action_open!(ap, 0, "/dev/null", SPAWN_O_RDONLY)
                 spawn_action_dup!(ap, Int(fds[2]), 1)
                 ccall(:posix_spawn_file_actions_addclose, Cint, (Ptr{Cvoid}, Cint), ap, fds[1])
                 ccall(:posix_spawn_file_actions_addclose, Cint, (Ptr{Cvoid}, Cint), ap, fds[2])

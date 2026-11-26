@@ -9,11 +9,7 @@
 # others that Base has.
 
 # `errno`, as libc has it (a function that gives where it is: its name is not the same on the systems)
-@static if Sys.isapple()
-    @inline errno_pointer() = ccall(:__error, Ptr{Cint}, ())
-else
-    @inline errno_pointer() = ccall(:__errno_location, Ptr{Cint}, ())
-end
+@inline errno_pointer() = target_macos() ? ccall(:__error, Ptr{Cint}, ()) : ccall(:__errno_location, Ptr{Cint}, ())
 @device_override Base.Libc.errno() = unsafe_load(errno_pointer())
 @device_override Base.Libc.errno(e::Integer) = (unsafe_store!(errno_pointer(), Cint(e)); nothing)
 @device_override Base.Libc.getpid() = ccall(:getpid, Int32, ())
@@ -26,13 +22,12 @@ fs_error(what::AbstractString, path::AbstractString, code::Integer = unsafe_load
 
 # `struct stat` of the C library of each system: where the fields are (macOS has the layout with 64-bit inodes, and its
 # `stat` of x86 is `stat$INODE64`)
-@static if Sys.isapple() && Sys.ARCH === :x86_64
-    @eval stat_call(path, buf) = ccall($(QuoteNode(Symbol("stat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
-    @eval lstat_call(path, buf) = ccall($(QuoteNode(Symbol("lstat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
-else
-    stat_call(path, buf) = ccall(:stat, Cint, (Cstring, Ptr{UInt8}), path, buf)
-    lstat_call(path, buf) = ccall(:lstat, Cint, (Cstring, Ptr{UInt8}), path, buf)
-end
+@eval stat_inode64(path, buf) = ccall($(QuoteNode(Symbol("stat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
+@eval lstat_inode64(path, buf) = ccall($(QuoteNode(Symbol("lstat\$INODE64"))), Cint, (Cstring, Ptr{UInt8}), path, buf)
+stat_plain(path, buf) = ccall(:stat, Cint, (Cstring, Ptr{UInt8}), path, buf)
+lstat_plain(path, buf) = ccall(:lstat, Cint, (Cstring, Ptr{UInt8}), path, buf)
+@inline stat_call(path, buf) = target_macos() && target_arch() === :x86_64 ? stat_inode64(path, buf) : stat_plain(path, buf)
+@inline lstat_call(path, buf) = target_macos() && target_arch() === :x86_64 ? lstat_inode64(path, buf) : lstat_plain(path, buf)
 
 @inline load_at(::Type{T}, buf::Vector{UInt8}, offset::Int) where {T} = GC.@preserve buf unsafe_load(Ptr{T}(pointer(buf) + offset))
 @inline time_at(buf::Vector{UInt8}, offset::Int) = Float64(load_at(Int64, buf, offset)) + 1e-9 * Float64(load_at(Int64, buf, offset + 8))
@@ -45,11 +40,11 @@ function stat_struct(path::AbstractString, call)
         # (the code is the one of libuv, which is the negative of the number of the system)
         return Base.Filesystem.StatStruct(path, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, Int32(-unsafe_load(errno_pointer())))
     end
-    @static if Sys.isapple()
+    if target_macos()
         return Base.Filesystem.StatStruct(path, UInt(load_at(Int32, buf, 0) % UInt32), UInt(load_at(UInt64, buf, 8)), UInt(load_at(UInt16, buf, 4)), Int(load_at(UInt16, buf, 6)),
             UInt(load_at(UInt32, buf, 16)), UInt(load_at(UInt32, buf, 20)), UInt(load_at(Int32, buf, 24) % UInt32), load_at(Int64, buf, 96), Int64(load_at(Int32, buf, 112)),
             load_at(Int64, buf, 104), time_at(buf, 48), time_at(buf, 64), Int32(0))
-    elseif Sys.ARCH === :aarch64
+    elseif target_arch() === :aarch64
         return Base.Filesystem.StatStruct(path, UInt(load_at(UInt64, buf, 0)), UInt(load_at(UInt64, buf, 8)), UInt(load_at(UInt32, buf, 16)), Int(load_at(UInt32, buf, 20)),
             UInt(load_at(UInt32, buf, 24)), UInt(load_at(UInt32, buf, 28)), UInt(load_at(UInt64, buf, 32)), load_at(Int64, buf, 48), Int64(load_at(Int32, buf, 56)),
             load_at(Int64, buf, 64), time_at(buf, 88), time_at(buf, 104), Int32(0))
@@ -80,20 +75,23 @@ end
 end
 
 # the names in a directory, sorted (not "." and ".."): `d_name` is at 21 on macOS, and at 19 on Linux
-@static if Sys.isapple()
-    const DIRENT_NAME_OFFSET = 21
-else
-    const DIRENT_NAME_OFFSET = 19
-end
+@inline dirent_name_offset() = target_choice(21, 19)
+# (macOS on x86-64 has the functions that make the entries with 64-bit inode numbers, which the offset above is of, under other names, as it has `stat`)
+@eval opendir_inode64(dir) = ccall($(QuoteNode(Symbol("opendir\$INODE64"))), Ptr{Cvoid}, (Cstring,), dir)
+@eval readdir_inode64(handle) = ccall($(QuoteNode(Symbol("readdir\$INODE64"))), Ptr{UInt8}, (Ptr{Cvoid},), handle)
+opendir_plain(dir) = ccall(:opendir, Ptr{Cvoid}, (Cstring,), dir)
+readdir_plain(handle) = ccall(:readdir, Ptr{UInt8}, (Ptr{Cvoid},), handle)
+@inline opendir_call(dir) = target_macos() && target_arch() === :x86_64 ? opendir_inode64(dir) : opendir_plain(dir)
+@inline readdir_call(handle) = target_macos() && target_arch() === :x86_64 ? readdir_inode64(handle) : readdir_plain(handle)
 @device_override function Base.readdir(dir::AbstractString; join::Bool = false, sort::Bool = true)
     dir = String(dir)
-    handle = ccall(:opendir, Ptr{Cvoid}, (Cstring,), dir)
+    handle = opendir_call(dir)
     handle == C_NULL && fs_error("readdir", dir)
     entries = String[]
     while true
-        entry = ccall(:readdir, Ptr{UInt8}, (Ptr{Cvoid},), handle)
+        entry = readdir_call(handle)
         entry == C_NULL && break
-        name = unsafe_string(entry + DIRENT_NAME_OFFSET)
+        name = unsafe_string(entry + dirent_name_offset())
         (name == "." || name == "..") && continue
         push!(entries, join ? joinpath(dir, name) : name)
     end
@@ -130,10 +128,9 @@ end
 end
 
 # `chmod`, `symlink` and `readlink` (Base calls libjulia's and libuv's functions of the same name)
-const ModeT = Sys.isapple() ? UInt16 : UInt32
 @device_override function Base.chmod(path::AbstractString, mode::Integer; recursive::Bool = false)
     path = String(path)
-    ccall(:chmod, Cint, (Cstring, ModeT), path, ModeT(mode)) == 0 || fs_error("chmod", path)
+    ccall(:chmod, Cint, (Cstring, UInt32), path, UInt32(mode)) == 0 || fs_error("chmod", path)
     if recursive && isdir(path)
         for p in readdir(path)
             islink(joinpath(path, p)) || chmod(joinpath(path, p), mode; recursive = true)
