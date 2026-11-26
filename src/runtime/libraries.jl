@@ -446,7 +446,7 @@ llvm_cstring(name, s) = "@$name = private unnamed_addr constant [$(ncodeunits(s)
 function blas_loader_ir(lbt::String, libs, names::Vector{String})
     n = length(names)
     io = IOBuffer()
-    println(io, "declare ptr @dlopen(ptr, i32)\ndeclare ptr @dlsym(ptr, ptr)\ndeclare i32 @puts(ptr)\ndeclare void @exit(i32)")
+    println(io, "declare ptr @dlopen(ptr, i32)\ndeclare ptr @dlsym(ptr, ptr)\ndeclare void @static_errputs(ptr)\ndeclare void @exit(i32)")
     print(io, llvm_cstring("blas.lbt", lbt))
     print(io, llvm_cstring("blas.forward", "lbt_forward"))
     print(io, llvm_cstring("blas.noload", "Cannot load libblastrampoline (for BLAS), which was at $lbt when compiling"))
@@ -479,7 +479,7 @@ open:
   %ok = icmp ne ptr %h, null
   br i1 %ok, label %forward, label %noload
 noload:
-  %r = call i32 @puts(ptr @blas.noload)
+  call void @static_errputs(ptr @blas.noload)
   call void @exit(i32 1)
   unreachable
 forward:
@@ -502,7 +502,7 @@ store:
   store ptr %sym, ptr %slot, align 8
   ret ptr %sym
 nosymbol:
-  %r2 = call i32 @puts(ptr @blas.nosymbol)
+  call void @static_errputs(ptr @blas.nosymbol)
   call void @exit(i32 1)
   unreachable
 }""")

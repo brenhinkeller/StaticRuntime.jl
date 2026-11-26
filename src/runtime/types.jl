@@ -16,6 +16,7 @@ function null_methoderror_arguments!(mod::LLVM.Module)
         call isa LLVM.CallInst || continue
         frame = LLVM.operands(call)[2]
         name = nothing # of the function that had no method, which is the first of the arguments
+        callee_is_type = false # (a call of a type: a constructor)
         todo = Any[frame]
         while !isempty(todo)
             v = pop!(todo)
@@ -26,13 +27,19 @@ function null_methoderror_arguments!(mod::LLVM.Module)
                     value = LLVM.operands(user)[1]
                     if value isa LLVM.ConstantExpr && isinttoptr(value)
                         addr = constant_address(value)
-                        name === nothing && addr !== nothing && (name = function_name_at(UInt(addr)))
+                        if name === nothing && addr !== nothing
+                            r = callee_text_at(UInt(addr))
+                            r === nothing || ((name, callee_is_type) = r)
+                        end
                         LLVM.operands(user)[1] = LLVM.null(ptrT)
                         changed = true
                     elseif value isa LLVM.GlobalVariable && startswith(LLVM.name(value), "static_type_")
                         # (a type that is called, `Foo(x, y)`, is a global that is named by its address)
                         addr = tryparse(UInt, LLVM.name(value)[13:end]; base = 16)
-                        name === nothing && addr !== nothing && (name = function_name_at(addr))
+                        if name === nothing && addr !== nothing
+                            r = callee_text_at(addr)
+                            r === nothing || ((name, callee_is_type) = r)
+                        end
                         LLVM.operands(user)[1] = LLVM.null(ptrT)
                         changed = true
                     end
@@ -44,7 +51,13 @@ function null_methoderror_arguments!(mod::LLVM.Module)
         # say which call it was: where the types that were split on were the ones that are registered, it is what an
         # object of another type reaches (see `dispatch.jl`)
         what = (name === nothing) ? "a call" : "`$name`"
-        msg = "MethodError: no method matching $what with the given argument types.\n This may be due to a type that the program was not found to make when compiling: `add_dispatch_candidates!(T)` adds one."
+        msg = if callee_is_type
+            # (a type that is called, `Foo(x, y)`: no constructor of it has a method for what the call is given. That is a `MethodError` in Julia too, for
+            # arguments of those types: it is not that a type of the program is not known)
+            "MethodError: no method matching $what with the given argument types: no constructor of it takes them."
+        else
+            "MethodError: no method matching $what with the given argument types.\n This may be due to a type that the program was not found to make when compiling: `add_dispatch_candidates!(T)` adds one."
+        end
         @dispose builder = LLVM.IRBuilder() begin
             LLVM.position!(builder, LLVM.before(call))
             abort_message!(builder, mod, msg)
@@ -106,9 +119,55 @@ function locate_runtime_errors!(mod::LLVM.Module)
     return changed
 end
 
+# What an exception that nothing catches says (`_static_report_uncaught`, in `shims.jl`): the exception types that are in the
+# program (embedded, since the objects of them have them as their tags), their names as `show` gives them in this process,
+# and whether the first field of one is a pointer, which can be a string (`msg` of `ErrorException`, `ArgumentError`, ...:
+# it is not looked at where it holds bits, which are not an address). Four globals that the shim has by name: the number of
+# types, and the arrays of the types, of the names, and of the flags. Only for a program that has a `throw`.
+function define_exception_names!(e)
+    mod = e.mod
+    fns = LLVM.functions(mod)
+    any(n -> haskey(fns, n), ("ijl_throw", "ijl_rethrow", "ijl_rethrow_other")) || return
+    host_string = getfield(parentmodule(@__MODULE__), :host_string)
+    found = Tuple{UInt,String,Bool}[]
+    for (addr, g) in e.globals
+        g === nothing && continue
+        object_type(addr) === DataType || continue
+        T = unsafe_pointer_to_objref(Ptr{Cvoid}(addr))
+        (T isa DataType && T <: Exception) || continue
+        text = try Base.invokelatest(host_string, show, T)::String catch; continue end
+        inspect = isconcretetype(T) && fieldcount(T) >= 1 && !Base.allocatedinline(fieldtype(T, 1))
+        push!(found, (addr, text, inspect))
+    end
+    sort!(found; by = first)
+    ptrT, i64, i8 = LLVM.PointerType(), LLVM.Int64Type(), LLVM.Int8Type()
+    n = length(found)
+    names = LLVM.Constant[]
+    for (k, (_, text, _)) in enumerate(found)
+        bytes = Vector{UInt8}(codeunits(text)); push!(bytes, 0x00)
+        g = LLVM.GlobalVariable(mod, LLVM.ArrayType(i8, length(bytes)), "static_exception_text_$k")
+        LLVM.initializer!(g, LLVM.ConstantDataArray(i8, bytes))
+        LLVM.constant!(g, true); LLVM.linkage!(g, LLVM.API.LLVMPrivateLinkage)
+        push!(names, g)
+    end
+    m = max(n, 1) # (an array of no elements is not one that a global has)
+    count_g = LLVM.GlobalVariable(mod, i64, "static_exception_count")
+    LLVM.initializer!(count_g, LLVM.ConstantInt(Int64(n))); LLVM.constant!(count_g, true)
+    types_g = LLVM.GlobalVariable(mod, LLVM.ArrayType(ptrT, m), "static_exception_types")
+    LLVM.initializer!(types_g, LLVM.ConstantArray(ptrT, LLVM.Constant[[embed_ref!(e, addr) for (addr, _, _) in found]; fill(LLVM.null(ptrT), m - n)]))
+    LLVM.constant!(types_g, true)
+    names_g = LLVM.GlobalVariable(mod, LLVM.ArrayType(ptrT, m), "static_exception_names")
+    LLVM.initializer!(names_g, LLVM.ConstantArray(ptrT, LLVM.Constant[names; fill(LLVM.null(ptrT), m - n)]))
+    LLVM.constant!(names_g, true)
+    flags_g = LLVM.GlobalVariable(mod, LLVM.ArrayType(i8, m), "static_exception_flags")
+    LLVM.initializer!(flags_g, LLVM.ConstantDataArray(i8, UInt8[[UInt8(f) for (_, _, f) in found]; zeros(UInt8, m - n)]))
+    LLVM.constant!(flags_g, true)
+    return
+end
+
 # The name of the function that is the object at `addr` (a function is an object of a type of its own, without contents,
 # that may not be aligned as the others are; a type that is called is the type), or `nothing`
-function function_name_at(addr::UInt)
+function callee_text_at(addr::UInt)
     object_type(UInt(0x10000)) # (which sets what the tag of a type is)
     word = safe_load(addr - 8)
     word === nothing && return nothing
@@ -116,14 +175,20 @@ function function_name_at(addr::UInt)
     # (a type that is called, `Foo(x, y)`: the object is a type, of the type `DataType` or `UnionAll`, which have tags that are not
     # addresses)
     if tag == DATATYPE_TAG[] || tag == (unsafe_load(Ptr{UInt}(UInt(pointer_from_objref(UnionAll)) - 8)) & ~UInt(15))
-        return string(unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
+        return (string(unsafe_pointer_to_objref(Ptr{Cvoid}(addr))), true)
     end
     tag < (64 << 4) && return nothing
     typetag = safe_load(tag - 8)
     (typetag === nothing || typetag & ~UInt(15) != DATATYPE_TAG[]) && return nothing
     T = unsafe_pointer_to_objref(Ptr{Cvoid}(tag))
     T isa DataType && Base.issingletontype(T) && T <: Function || return nothing
-    return string(nameof(T.instance))
+    return (string(nameof(T.instance)), false)
+end
+
+# (the text of the callee, for what does not need to know whether it is a type)
+function function_name_at(addr::UInt)
+    r = callee_text_at(addr)
+    return r === nothing ? nothing : r[1]
 end
 
 # `getfield(x, name)` with a name that is only known at run time (`getproperty(::QRPivoted, ::Symbol)` is, when it is

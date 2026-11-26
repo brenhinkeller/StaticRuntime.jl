@@ -6,12 +6,26 @@
 const RUNTIME_SHIM_IR = raw"""
 declare ptr @malloc(i64)
 declare ptr @calloc(i64, i64)
-declare i32 @puts(ptr)
 declare void @exit(i32)
+declare i64 @strlen(ptr)
+declare i64 @write(i32, ptr, i64)
+declare i32 @fflush(ptr)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
 
 @_static_oom_msg = private unnamed_addr constant [20 x i8] c"Out of memory error\00"
+@_static_newline = private unnamed_addr constant [1 x i8] c"\0A"
+
+; What a program says when it stops (the message and a line break, to the standard error: not to the standard output, which
+; is the data of the program): what it has written to the standard output is flushed first, so that the two are in
+; the order that they happened in when they go to the same place.
+define linkonce_odr void @static_errputs(ptr %msg) {
+  %f = call i32 @fflush(ptr null)
+  %n = call i64 @strlen(ptr %msg)
+  %w = call i64 @write(i32 2, ptr %msg, i64 %n)
+  %w2 = call i64 @write(i32 2, ptr @_static_newline, i64 1)
+  ret void
+}
 ; a zeroed dummy task: `julia.get_pgcstack` points into the middle of it, since compiled code
 ; addresses the task and its fields relative to that pointer
 ; (the field of the task that has the current scope, 120 bytes before it (152 in Julia 1.14.0-alpha2), is `nothing`, the object that the program has (see `link_runtime!`): the
@@ -20,7 +34,7 @@ declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
 @_static_task = internal global { [49 x i64], ptr, [78 x i64] } { [49 x i64] zeroinitializer, ptr getelementptr inbounds (i8, ptr @static_jl_nothing, i64 16), [78 x i64] zeroinitializer }, align 16
 
 define internal void @_static_oom() noreturn {
-  %s = call i32 @puts(ptr @_static_oom_msg)
+  call void @static_errputs(ptr @_static_oom_msg)
   call void @exit(i32 1)
   unreachable
 }
@@ -231,7 +245,7 @@ next:
   %inext = add i64 %i, 1
   br label %loop
 unsupported:
-  %s = call i32 @puts(ptr @_static_egal_msg)
+  call void @static_errputs(ptr @_static_egal_msg)
   call void @exit(i32 1)
   unreachable
 yes:
@@ -241,7 +255,7 @@ no:
 }
 
 define linkonce_odr void @jl_argument_error(ptr %msg) noreturn {
-  %s = call i32 @puts(ptr %msg)
+  call void @static_errputs(ptr %msg)
   call void @exit(i32 1)
   unreachable
 }
@@ -357,7 +371,6 @@ define linkonce_odr ptr @jl_pchar_to_string(ptr %p, i64 %n) {
 }
 
 ; a String with a copy of the C string at `p`
-declare i64 @strlen(ptr)
 define linkonce_odr ptr @ijl_cstr_to_string(ptr %p) {
   %n = call i64 @strlen(ptr %p)
   %s = call ptr @ijl_pchar_to_string(ptr %p, i64 %n)
@@ -492,14 +505,101 @@ define linkonce_odr ptr @"julia.get_pgcstack_or_new"() {
 ; the scope of the task (`ScopedValue`s), as it was when each handler was entered: a handler that is left puts it back, as Julia's does (`jl_handler_t` has it), which is what ends a `with`
 @_static_scopes = internal global [256 x ptr] zeroinitializer, align 16
 @_static_nexc = internal global i64 0
-@_static_uncaught_msg = private unnamed_addr constant [51 x i8] c"fatal: uncaught exception (no handler to catch it)\00"
 @_static_overflow_msg = private unnamed_addr constant [40 x i8] c"fatal: exception handler stack overflow\00"
 @_static_nocurrent_msg = private unnamed_addr constant [31 x i8] c"fatal: rethrow() outside catch\00"
 
 declare void @siglongjmp(ptr, i32) noreturn
 
 define internal void @_static_fatal(ptr %msg) noreturn {
-  %s = call i32 @puts(ptr %msg)
+  call void @static_errputs(ptr %msg)
+  call void @exit(i32 1)
+  unreachable
+}
+
+; What a program says when an exception has no `try` to go to: `ERROR: ` and the name of the type of the exception, and what
+; the first field of it says if that is a string (`ArgumentError`, `ErrorException`, `AssertionError`: the message). The names
+; are of the exception types that are in the program (`define_exception_names!` in `types.jl`: the types, their names, and
+; whether the first field is one that can hold a string), and what is not among them is `uncaught exception`.
+@static_exception_count = external hidden global i64
+@static_exception_types = external hidden global i8
+@static_exception_names = external hidden global i8
+@static_exception_flags = external hidden global i8
+@_static_error_prefix = private unnamed_addr constant [8 x i8] c"ERROR: \00"
+@_static_error_unnamed = private unnamed_addr constant [19 x i8] c"uncaught exception\00"
+@_static_error_colon = private unnamed_addr constant [3 x i8] c": \00"
+
+define internal void @_static_errwrite(ptr %s) {
+  %n = call i64 @strlen(ptr %s)
+  %w = call i64 @write(i32 2, ptr %s, i64 %n)
+  ret void
+}
+
+define internal void @_static_errwrite_string(ptr %s) {
+  %n = load i64, ptr %s, align 8
+  %data = getelementptr inbounds i8, ptr %s, i64 8
+  %w = call i64 @write(i32 2, ptr %data, i64 %n)
+  ret void
+}
+
+define internal void @_static_report_uncaught(ptr %exc) noreturn {
+entry:
+  %f = call i32 @fflush(ptr null)
+  call void @_static_errwrite(ptr @_static_error_prefix)
+  %tagp = getelementptr inbounds i8, ptr %exc, i64 -8
+  %tag0 = load i64, ptr %tagp, align 8
+  %tag = and i64 %tag0, -16
+  %isstr = icmp eq i64 %tag, {{TAG_STRING}}
+  br i1 %isstr, label %string_exception, label %search
+string_exception:
+  call void @_static_errwrite_string(ptr %exc)
+  br label %done
+search:
+  %count = load i64, ptr @static_exception_count, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %search ], [ %i1, %next ]
+  %more = icmp ult i64 %i, %count
+  br i1 %more, label %body, label %unnamed
+body:
+  %tslot = getelementptr inbounds ptr, ptr @static_exception_types, i64 %i
+  %t = load ptr, ptr %tslot, align 8
+  %ti = ptrtoint ptr %t to i64
+  %hit = icmp eq i64 %ti, %tag
+  br i1 %hit, label %found, label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+found:
+  %nslot = getelementptr inbounds ptr, ptr @static_exception_names, i64 %i
+  %name = load ptr, ptr %nslot, align 8
+  call void @_static_errwrite(ptr %name)
+  %fslot = getelementptr inbounds i8, ptr @static_exception_flags, i64 %i
+  %flag = load i8, ptr %fslot, align 1
+  %inspect = icmp ne i8 %flag, 0
+  br i1 %inspect, label %field, label %done
+field:
+  %f0 = load ptr, ptr %exc, align 8
+  %f0i = ptrtoint ptr %f0 to i64
+  %nonnull = icmp uge i64 %f0i, 4096
+  %low = and i64 %f0i, 15
+  %aligned = icmp eq i64 %low, 0
+  %plausible = and i1 %nonnull, %aligned
+  br i1 %plausible, label %fieldcheck, label %done
+fieldcheck:
+  %ftagp = getelementptr inbounds i8, ptr %f0, i64 -8
+  %ftag0 = load i64, ptr %ftagp, align 8
+  %ftag = and i64 %ftag0, -16
+  %fisstr = icmp eq i64 %ftag, {{TAG_STRING}}
+  br i1 %fisstr, label %fstring, label %done
+fstring:
+  call void @_static_errwrite(ptr @_static_error_colon)
+  call void @_static_errwrite_string(ptr %f0)
+  br label %done
+unnamed:
+  call void @_static_errwrite(ptr @_static_error_unnamed)
+  br label %done
+done:
+  %w = call i64 @write(i32 2, ptr @_static_newline, i64 1)
   call void @exit(i32 1)
   unreachable
 }
@@ -569,7 +669,7 @@ push:
   %none = icmp eq i64 %n, 0
   br i1 %none, label %uncaught, label %jump
 uncaught:
-  call void @_static_fatal(ptr @_static_uncaught_msg)
+  call void @_static_report_uncaught(ptr %exc)
   unreachable
 jump:
   %i = sub i64 %n, 1
@@ -638,7 +738,7 @@ end
 const RUNTIME_SHIM_FUNCTIONS = (
     "gpu_gc_pool_alloc", "gpu_gc_pool_alloc_atomic", "gpu_unsupported_allocation",
     "jl_alloc_genericmemory_unchecked", "jl_alloc_genericmemory_atomic",
-    "jl_argument_error", "jl_egal__unboxed", "julia.get_pgcstack", "julia.gc_alloc_bytes", "julia.safepoint", "julia.cancellation_point", "julia.get_pgcstack_or_new",
+    "static_errputs", "jl_argument_error", "jl_egal__unboxed", "julia.get_pgcstack", "julia.gc_alloc_bytes", "julia.safepoint", "julia.cancellation_point", "julia.get_pgcstack_or_new",
     "ijl_enter_handler", "ijl_pop_handler", "ijl_pop_handler_noexcept", "ijl_excstack_state",
     "ijl_restore_excstack", "ijl_throw", "ijl_rethrow", "ijl_rethrow_other",
     "ijl_current_exception", "jl_current_exception",

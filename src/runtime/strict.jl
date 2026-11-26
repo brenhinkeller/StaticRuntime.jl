@@ -28,7 +28,7 @@ const DYNAMIC_RUNTIME_FUNCTIONS = [
     )
 ]
 
-# Give the body `puts(msg); exit(1)` to the declaration `fn`
+# Give the body `static_errputs(msg); exit(1)` to the declaration `fn`
 function define_aborting!(mod::LLVM.Module, fn::LLVM.Function, msg::AbstractString)
     LLVM.linkage!(fn, LLVM.API.LLVMLinkOnceODRLinkage)
     @dispose builder = LLVM.IRBuilder() begin

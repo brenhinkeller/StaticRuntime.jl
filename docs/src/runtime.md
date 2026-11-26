@@ -90,11 +90,12 @@ Standard `try`/`catch`/`finally` and `rethrow` should work, as long as the excep
 
 `catch e` gives the exception object, and `e isa T` works with concrete types, and with abstract ones for constants (objects have type tags, and the types that the code mentions are in the binary; see [Type tags](@ref)). 
 
-The following cases stop the program, each with a message on standard output (via `puts`) and exit status 1:
+The following cases stop the program with a message on the **standard error** (what the program has written to the standard output is flushed first, and the standard output has nothing else) and exit status 1:
 
-* An exception that no `try` catches: `fatal: uncaught exception (no handler to catch it)`. The message will not say which exception it was, and there is no backtrace.
+* An exception that no `try` catches: `ERROR: ` and the type of the exception, and its message if the first field of it is a string (`ArgumentError`, `ErrorException`, `AssertionError`, and exceptions of your own types, `struct MyError <: Exception; msg::String; end`), as in `ERROR: ArgumentError: invalid base 10 digit 'a' in "abc"`. Other exceptions say their type only (`ERROR: BoundsError`), and a thrown string is the string; the details that Julia gives (the array and the index of a `BoundsError`) and the backtrace are not given.
 * More than 256 nested `try` blocks: `fatal: exception handler stack overflow`.
 * `rethrow()` outside a `catch`: `fatal: rethrow() outside catch`.
+* A call that no method fits (`nothing + 1`; a constructor given arguments that none takes) says which function or type it was. A type assertion that fails says the type that was wanted and where it is (`TypeError: in typeassert, expected String (in f, at file.jl:12 in `f`)`), and `BoundsError`s and `UndefVarError`s of the runtime say where they are.
 
 Code that needs dynamic dispatch, or other things from the Julia runtime, is not an exception matter: it is rejected when compiling, by default (see [Code that needs the Julia runtime is rejected](@ref)). With `strict = false`, it compiles and aborts with `Dynamic behavior is not supported in standalone binaries (...)` if the call is reached.
 

@@ -100,7 +100,8 @@ dopen(a::DOpenE) = 5
             main = StaticRuntime.make_main(f)
             exe = Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(main)); kwargs...)
             out = IOBuffer()
-            p = run(ignorestatus(pipeline(`$exe`; stdout = out, stderr = devnull)))
+            # (what the program says when it stops is on the standard error)
+            p = run(ignorestatus(pipeline(`$exe`; stdout = devnull, stderr = out)))
             return p.exitcode, String(take!(out))
         end
         # (a type that the program stores in the slot is dispatched on as well, registered or not)

@@ -173,7 +173,13 @@ end
 
 @noinline function out_of_memory()
     msg = c"Out of memory error"
-    GC.@preserve msg @symbolcall puts(pointer(msg)::Ptr{UInt8})::Int32
+    nl = c"\n"
+    GC.@preserve msg nl begin
+        @symbolcall fflush(Ptr{UInt8}(0)::Ptr{UInt8})::Int32 # (what the program wrote is out before the message)
+        n = @symbolcall strlen(pointer(msg)::Ptr{UInt8})::UInt
+        @symbolcall write(Int32(2)::Int32, pointer(msg)::Ptr{UInt8}, n::UInt)::Int # (to the standard error)
+        @symbolcall write(Int32(2)::Int32, pointer(nl)::Ptr{UInt8}, UInt(1)::UInt)::Int
+    end
     @symbolcall exit(Int32(1)::Int32)::Int32
     return nothing
 end

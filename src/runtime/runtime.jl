@@ -36,13 +36,13 @@ function declare!(mod::LLVM.Module, name::AbstractString, ftype::LLVM.FunctionTy
     return haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ftype)
 end
 
-# `puts(message); exit(1)` at the position of `builder`: what a program says when it reaches what it can't do. `message`
+# `static_errputs(message)` (to the standard error) and `exit(1)` at the position of `builder`: what a program says when it reaches what it can't do. `message`
 # is the text, or a pointer to a C string.
 function abort_message!(builder::LLVM.IRBuilder, mod::LLVM.Module, message)
-    puts_t = LLVM.FunctionType(LLVM.Int32Type(), [LLVM.PointerType()])
+    errputs_t = LLVM.FunctionType(LLVM.VoidType(), [LLVM.PointerType()])
     exit_t = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int32Type()])
     text = message isa AbstractString ? LLVM.globalstring_ptr!(builder, message) : message
-    LLVM.call!(builder, puts_t, declare!(mod, "puts", puts_t), [text])
+    LLVM.call!(builder, errputs_t, declare!(mod, "static_errputs", errputs_t), [text])
     LLVM.call!(builder, exit_t, declare!(mod, "exit", exit_t), [LLVM.ConstantInt(Int32(1))])
     return
 end
@@ -109,6 +109,7 @@ function link_runtime_resolving!(mod::LLVM.Module; strict::Bool = true, stub_err
     clamp_embedded_alignment!(mod) # (the alignment of the accesses was found from the addresses of the objects in this process: see there)
     queries === nothing ? define_subtype_table!(e) : define_subtype!(e, queries)
     define_type_name_table!(e)
+    define_exception_names!(e)
     finalizers = uses_finalizers(mod) # (before they are linked: see `link_finalizers!`)
     link_finalizers!(mod)
     resolve_lazy_lookups!(mod)

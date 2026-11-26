@@ -52,6 +52,36 @@ mutable struct NoMethodFor; name::String; NoMethodFor(name::String) = new(name);
     err = tempname()
     p = run(ignorestatus(pipeline(`$exe`; stderr = err, stdout = err)))
     @test p.exitcode != 0
-    @test occursin("no method matching `NoMethodFor`", read(err, String))
+    @test occursin("no method matching `NoMethodFor`", read(err, String)) && !occursin("add_dispatch_candidates", read(err, String))
 end
 
+
+# An exception that nothing catches says what it was, on the standard error (the type, and the message where the first field of it is
+# a string); what the program wrote to the standard output is only what it wrote
+struct RtMessageError <: Exception; msg::String; end
+struct RtCodeError <: Exception; code::Int; end
+@noinline rt_fail(k::Int) = k == 1 ? throw(ArgumentError("bad argument 7")) :
+                            k == 2 ? error("plain text") :
+                            k == 3 ? throw(RtMessageError("custom message")) :
+                            k == 4 ? throw(RtCodeError(42)) :
+                            k == 5 ? (@assert k > 9 "k is too small") :
+                            k == 6 ? [1, 2][k] :
+                            k == 7 ? throw("a thrown string") :
+                            0
+@eval rt_fail_main(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println("before"); rt_fail(argc - 1); println("after"); 0)
+@testset "An exception that is not caught says what it was" begin
+    exe = compile_executable(rt_fail_main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), "rt_fail_main")
+    expected = ["ERROR: ArgumentError: bad argument 7", "ERROR: ErrorException: plain text", "ERROR: RtMessageError: custom message",
+                "ERROR: RtCodeError", "ERROR: AssertionError: k is too small", "ERROR: BoundsError", "ERROR: a thrown string"]
+    for (k, text) in enumerate(expected)
+        out, err = tempname(), tempname()
+        p = run(ignorestatus(pipeline(Cmd(`$exe $(fill("x", k))`); stdout = out, stderr = err)))
+        @test p.exitcode == 1
+        @test read(out, String) == "before\n"
+        @test read(err, String) == text * "\n"
+    end
+    # (a program that does not throw is the same as it was: nothing on the standard error)
+    out, err = tempname(), tempname()
+    p = run(ignorestatus(pipeline(`$exe $(fill("x", 8))`; stdout = out, stderr = err)))
+    @test p.exitcode == 0 && read(out, String) == "before\nafter\n" && isempty(read(err, String))
+end
