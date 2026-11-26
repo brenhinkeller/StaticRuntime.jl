@@ -23,6 +23,7 @@ include("llvm/pipeline.jl")  # the LLVM pipeline of our compilations: vectorizer
 
 # The overrides of Base that make what it does compile, by what they are for
 include("overrides/strings.jl")    # building strings, CRC32c, `LazyString`, properties of characters
+include("overrides/graphemes.jl")   # grapheme breaks (`graphemes`, `titlecase`), tabulated from utf8proc
 include("overrides/collections.jl") # vector literals, tuples, `prod`, `splice!`, `unsafe_wrap`, `Dict` of pairs
 include("overrides/system.jl")     # time, `sleep`, locks, `exit` and `atexit`, libraries
 include("overrides/io.jl")         # streams of libc, files, and `IOContext`
@@ -203,7 +204,7 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             ours = llvm_postprocess === nothing
             # (`inspect_llvm`, for the tests: a function that is given the module as it is before the runtime is linked
             # to it, and does not change it; see `input_dependent_cases` in testing.jl)
-            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); started = time(); linked = link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = comp.objects.keyed_objects); trace_on() && trace("linking the runtime (and embedding the constants): ", round(time() - started; digits = 1), " s"); linked)) : llvm_postprocess
+            postprocess = ours ? (mod -> (comp = compilation(); report_registered_dispatch(comp); inspect_llvm === nothing || inspect_llvm(mod); started = time(); linked = link_runtime!(mod; strict, stub_errors, allow, gc, libraries, optimize, strip, bounded = $(f in (:compile_executable, :static_llvm_module)), cfunctions = comp.closures.cfunction_roots, libraries_used = comp.libraries, known_objects = vcat(comp.objects.keyed_objects, collect(Any, keys(comp.slots.scan_cache)))); trace_on() && trace("linking the runtime (and embedding the constants): ", round(time() - started; digits = 1), " s"); linked)) : llvm_postprocess
             result, c = compile_passes(; strict) do c
                 job_params = explicit_params === nothing ? OverridesParams(c) : explicit_params
                 entry_args = rooted_arguments(c, args)

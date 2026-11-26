@@ -52,8 +52,6 @@ const REFUSAL = r"Julia runtime|by their address|does not infer to a concrete ty
         "eval"                        => () -> Core.eval(Main, :(1 + 1)),
         # functions of the libraries that Julia has (utf8proc) and does not have as libraries of their own
         "Unicode.normalize"           => () -> length(Unicode.normalize(opaque("é"))),
-        "graphemes"                   => () -> length(collect(graphemes(opaque("ab")))),
-        "titlecase of a string"       => () -> length(titlecase(opaque("hello world"))),
         # the system, and the state of the compiling Julia
         "@allocated"                  => () -> (@allocated zeros(opaque(100))) > 0 ? 1 : 0,
         "TOML.parse"                  => () -> length(TOML.parse(opaque("a = 1"))),

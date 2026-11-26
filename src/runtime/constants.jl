@@ -425,10 +425,23 @@ function embed_type_numbers!(e::ObjectEmbedder)
 end
 
 # The objects that the code is known to refer to (the objects with a key, that code was made for: see
-# src/inference/object_calls.jl), as (address, size): an address in one of them is in it, before any object that a look
-# at the memory before the address finds (the code of such an object reads its fields at their addresses: what a look
-# finds there may be a number in the data that looks like the tag of a type)
-known_object_ranges(objects) = Tuple{UInt,Int}[(UInt(pointer_from_objref(x)), max(object_extent(typeof(x), UInt(pointer_from_objref(x))), 8)) for x in objects if ismutable(x) && typeof(x) isa DataType]
+# src/inference/object_calls.jl, and the immutable structs that are constants of the code), as (address, size): an address in one
+# of them is in it, before any object that a look at the memory before the address finds (the code of such an object reads its
+# fields at their addresses: what a look finds there may be a number in the data that looks like the tag of a type, as the
+# count that is before the vectors of a struct of tables is)
+function known_object_ranges(objects)
+    ranges = Tuple{UInt,Int}[]
+    for x in objects
+        T = typeof(x)
+        T isa DataType || continue
+        if ismutable(x)
+            push!(ranges, (UInt(pointer_from_objref(x)), max(object_extent(T, UInt(pointer_from_objref(x))), 8)))
+        elseif !(x isa Type) && !isbits(x) && isconcretetype(T) && fieldcount(T) > 0 && !(T <: Core.GenericMemory) && T !== String
+            push!(ranges, (UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x)), max(definite_size(T), 8))) # (`pointer_from_objref` is an error for an immutable)
+        end
+    end
+    return ranges
+end
 
 function embed_constants!(e::ObjectEmbedder; known_objects::AbstractVector = Any[])
     # (the types of the tags, checked once each while the constants are embedded: see `TAG_TYPES`)
@@ -459,11 +472,18 @@ function embed_constants_with_tags!(e::ObjectEmbedder; known_objects::AbstractVe
         n = definite_size(T) # (a struct: the data of a large `Memory` may be elsewhere)
         n > MAX_INTERIOR && push!(known, (addr, n))
     end
+    sort!(known; by = first)
+    known_bases = UInt[first(r) for r in known]
+    MAX_KNOWN_EXTENT = isempty(known) ? 0 : maximum(last, known) # (no object that starts farther back than the longest one is long has the address in it)
     for (addr, ops) in consts
         replacement = nothing
         candidates = find_objects(addr)
-        for (base, n) in known
+        # (the objects that it is in: found in the list in order of address, which is long for a program of many constants)
+        k = searchsortedlast(known_bases, addr)
+        while k >= 1 && addr - known_bases[k] < MAX_KNOWN_EXTENT
+            base, n = known[k]
             base <= addr < base + n && pushfirst!(candidates, (base, Int(addr - base)))
+            k -= 1
         end
         for (base, delta) in candidates
             # embedding may fail halfway, leaving globals behind that nothing refers to

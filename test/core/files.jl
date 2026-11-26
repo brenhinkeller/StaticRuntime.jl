@@ -228,3 +228,9 @@ end
         "sleep with a bad time"   => () -> (try; sleep(-1); catch e; println(e isa ArgumentError); end; 0),
     ], folded_ok = ("nthreads",)) # (the number of threads is the same for the whole run: a constant)
 end
+
+# `pkgversion` of a module that is known is the version that the package had when the program was compiled (it is not read from the `Project.toml` when the program runs)
+@testset "pkgversion" begin
+    @eval pkgversion_main(argc::Int, argv::Ptr{Ptr{UInt8}}) = (println("v ", pkgversion(StaticRuntime), " ", pkgversion(Base) === nothing); 0)
+    @test run_main(pkgversion_main) == "v $(pkgversion(StaticRuntime)) $(pkgversion(Base) === nothing)"
+end

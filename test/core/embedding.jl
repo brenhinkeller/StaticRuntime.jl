@@ -133,6 +133,27 @@ many_sum(m::ManyFields) = m.a1[1] + m.b8[1] + m.c3[1] + m.d8[1] + m.e1[1] + m.e8
     @static_test many_sum(MANY)
 end
 
+# A field of a constant is read at its own address by the compiled code, which is inside the constant. A number in the field before it (`ntypes = 19` here)
+# looks like the small number that is the tag of a type of Julia's own, so the address looked like the start of an object of that type, and not like what it is
+struct InteriorTable{T}
+    starts::Vector{UInt32}
+    values::Vector{T}
+end
+struct InteriorHolder
+    table::InteriorTable{UInt8}
+    flag::UInt8
+    count::Int
+    first::Vector{Bool}
+    second::Vector{UInt8}
+    third::Vector{Bool}
+end
+const INTERIOR = InteriorHolder(InteriorTable{UInt8}(UInt32[0, 5], UInt8[1, 2]), 0x3, 19, [false, true, true], UInt8[7, 8, 9], [true, false, false])
+interior_sum(i::Int) = Int(INTERIOR.first[i]) * 100 + Int(INTERIOR.second[i]) * 10 + Int(INTERIOR.third[i]) + INTERIOR.count
+@testset "A field of a constant that follows a number" begin
+    @test static_result(() -> interior_sum(opaque(2))) == interior_sum(2)
+    @test static_result(() -> interior_sum(opaque(3))) == interior_sum(3)
+end
+
 # Constants that are vectors of unions of types without references (a byte for the type of each element), and one that was shifted, so that its reference is an element number
 const UNION_VEC = Union{Int,Nothing}[1, nothing, 2, 3]
 const UNION_VEC_SHIFTED = (v = Union{Int8,Float32,Nothing}[Int8(1), 2.5f0, nothing, Int8(4)]; popfirst!(v); v)

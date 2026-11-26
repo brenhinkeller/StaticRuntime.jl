@@ -100,3 +100,33 @@ end
         @test length(table.planes) == 18 && issorted(table.planes) && Int(table.planes[end]) == length(table.low)
     end
 end
+
+# Grapheme breaks (src/overrides/graphemes.jl): the automaton that is tabulated from utf8proc answers as utf8proc does, for sequences of characters of the kinds that the rules need (combining marks,
+# emoji and their joiners, regional indicators, Hangul, Indic scripts), with the state carried from each pair to the next; and a program that uses them does what Julia does
+@testset "Grapheme breaks" begin
+    S = StaticRuntime
+    rng = Random.Xoshiro(7)
+    interesting = Char[Char(cp) for cp in UInt32(0):UInt32(0x10ffff) if isvalid(Char, cp) &&
+                       (cp < 0x300 || cp in 0x300:0x36f || cp in 0x900:0xdff || cp in 0x1100:0x11ff || cp in 0x1f1e6:0x1f1ff || cp in 0x1f300:0x1f3ff || cp in (0x200d, 0x200c) || cp in 0xac00:0xac40 || cp in 0xe0000:0xe00ff)]
+    everything = Char[Char(cp) for cp in UInt32(0):UInt32(0x10ffff) if isvalid(Char, cp)]
+    mismatches = 0
+    for trial in 1:3000
+        seq = rand(rng, trial % 3 == 0 ? everything : interesting, rand(rng, 2:10))
+        s1, s2 = Ref{Int32}(0), Ref{Int32}(0)
+        c0 = Char(0)
+        for c in seq
+            mismatches += Base.Unicode.isgraphemebreak!(s1, c0, c) != S.automaton_break!(S.GRAPHEMES, s2, c0, c)
+            c0 = c
+        end
+        for k in 1:length(seq)-1
+            mismatches += Base.Unicode.isgraphemebreak(seq[k], seq[k+1]) != S.automaton_break(S.GRAPHEMES, seq[k], seq[k+1])
+        end
+    end
+    @test mismatches == 0
+
+    check_cases([
+    "graphemes"  => () -> (s = "éa🇸🇪🇳🇴👨‍👩‍👧xक्षy"; println(length(graphemes(s)), " ", [length(g) for g in graphemes(opaque(s))]); 1),
+    "titlecase of a string" => () -> (println(titlecase(opaque("hello wörld foo-bar")), " ", titlecase("ǆ is a digraph")); 1),
+    "textwidth of a string" => () -> (println(textwidth(opaque("é 日本 🇸🇪"))); 1),
+    ])
+end

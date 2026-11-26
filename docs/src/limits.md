@@ -20,8 +20,7 @@ What does not work yet, or works differently from Julia, gathered in one place. 
 Works: see [Supported libraries and packages](support.md).
 
 Does not work:
-* `Unicode.normalize`, `graphemes` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own)
-* `titlecase` of a string needs the grapheme breaks of utf8proc, which are in libjulia, and is not supported.
+* `Unicode.normalize` and `isequal_normalized` (the tables are in libjulia's copy of utf8proc, which is not a library of its own). Grapheme breaks (`graphemes`, `titlecase` of a string, `textwidth` of a string) work: they are tabulated when this package is compiled, from the utf8proc of the Julia that compiles it.
 * `base64encode` of several values of different types in one call, and `base64encode(f, args...)` of a function with arguments. 
 * `with_logger`
 * `Test` (`@test` and `@testset`)
