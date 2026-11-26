@@ -780,7 +780,9 @@ const LIBC_DATA = Set(["environ"])
 
 # Functions of libjulia that are the C library's (SuiteSparse is given them as its allocators): they are those, here
 const LIBJULIA_ALIASES = Dict("jl_malloc" => "malloc", "ijl_malloc" => "malloc", "jl_calloc" => "calloc", "ijl_calloc" => "calloc",
-                              "jl_realloc" => "realloc", "ijl_realloc" => "realloc", "jl_free" => "free", "ijl_free" => "free")
+                              "jl_realloc" => "realloc", "ijl_realloc" => "realloc", "jl_free" => "free", "ijl_free" => "free",
+                              # (libjulia's `strtod` and `strtof` that do not depend on the locale: a program does not set one, so it is the C locale, which these are the same in)
+                              "jl_strtod_c" => "strtod", "ijl_strtod_c" => "strtod", "jl_strtof_c" => "strtof", "ijl_strtof_c" => "strtof")
 
 # Julia binds `ccall`s lazily, through `ijl_load_and_lookup(lib, name, handle)`. For the symbols the
 # runtime shim implements, and those of the C library, resolve the lookup statically instead.

@@ -96,6 +96,16 @@ reads_universe(c::Compilation, @nospecialize(T), show::Bool) = c.settings.univer
 # the exceptions of Base that a program is likely to catch and show (when it throws them: see `note_thrown!`)
 const COMMON_EXCEPTIONS = Set{Any}([ErrorException, ArgumentError, OverflowError, AssertionError, EOFError, DivideError, StringIndexError])
 
+# the functions that a caught exception is given to to say what it is (and not those that keep it, as the constructor of an exception that has it
+# in a field, or `rethrow`, which a call over the types that it can be would only make more of)
+const EXCEPTION_SHOWERS = Any[Base.showerror, Base.show, Base.print, Base.println, Base.string, Base.repr, Base.sprint]
+function shows_exception(arginfo::CC.ArgInfo)
+    f = CC.singleton_type(arginfo.argtypes[1])
+    f === nothing && return false
+    f === Core.kwcall && length(arginfo.argtypes) >= 4 && (f = CC.singleton_type(arginfo.argtypes[3])) # (`sprint(f, e; context = ...)`)
+    return f !== nothing && any(g -> g === f, EXCEPTION_SHOWERS)
+end
+
 # the registered types that are subtypes of `T` (`Any`)
 function registered_types(c::Compilation, @nospecialize(T), show::Bool)
     candidates = show ? c.registered.show : c.registered.dispatch
@@ -149,7 +159,7 @@ function close_abstract_arguments(c::Compilation, interp, arginfo::CC.ArgInfo, m
         end
         u = listed_union(c, T)
         reg = false
-        if u === nothing && T === Any && is_caught_exception(c, arginfo, i, sv)
+        if u === nothing && T === Any && shows_exception(arginfo) && is_caught_exception(c, arginfo, i, sv)
             # (`catch e`: the registered types, the exceptions of the program's own that it makes, and the exceptions of Base that are
             # commonly caught, for those of them that the code throws. Not all of the exceptions that it throws: a call that is split over
             # more than a few dozen is not one that inference can do.)
@@ -875,6 +885,27 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Base.sho
     if length(argtypes) == 3 && !(argtypes[3] isa Core.Const) && CC.widenconst(argtypes[3]) === DataType
         IOT = CC.widenconst(argtypes[2])
         (IOT <: ShowStream || IOT <: Base.GenericIOBuffer) && return redirect(interp, show_type_value, Any[], 2, arginfo, si, vtypes, sv)
+    end
+    return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+end
+
+## `pkgversion` of a module, made when compiling
+
+# `pkgversion(m)` reads the `Project.toml` of the package from its path (`ijl_module_uuid`, the file system): a program has the version that
+# the package had when it was compiled, for a module that is known. (Where it is not a constant, the call is Base's, which a program can not have.)
+function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Base.pkgversion), arginfo::CC.ArgInfo, si::CC.StmtInfo,
+                                vtypes::VTypes, sv::CC.AbsIntState, max_methods::Int = CC.get_max_methods(interp, f, sv))
+    argtypes = arginfo.argtypes
+    if length(argtypes) == 2
+        m = CC.singleton_type(argtypes[2])
+        if m isa Module
+            v = try
+                Base.invokelatest(Base.pkgversion, m)
+            catch
+                missing
+            end
+            v === missing || return CC.Future(CC.CallMeta(CC.Const(v), Union{}, CC.EFFECTS_TOTAL, CC.NoCallInfo()))
+        end
     end
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
 end
