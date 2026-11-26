@@ -9,7 +9,7 @@ println("\n")
 include_timed("common.jl")
 
 const STDLIBS = String["dates", "encoding", "future", "libdl", "linearalgebra", "logging", "mmap", "printf", "serialization", "sha", "sockets", "sparsearrays", "statistics", "styledstrings", "uuids"]
-const PACKAGES_TESTED = String["datastructures", "distributions", "graphs", "jump", "makie", "mpi", "nanstatistics", "observables", "orderedcollections", "parsers", "sciml", "staticarrays", "statsbase", "unicodeplots"]
+const PACKAGES_TESTED = String["datastructures", "distributions", "graphs", "jump", "makie", "mpi", "nanstatistics", "observables", "optparse", "orderedcollections", "parsers", "sciml", "staticarrays", "statsbase", "unicodeplots"]
 const ALL = [STDLIBS; PACKAGES_TESTED]
 selected = get(ENV, "PACKAGES", "")
 selected = isempty(selected) ? ALL : [lowercase(strip(s)) for s in split(selected, ',')]

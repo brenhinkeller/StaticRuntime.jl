@@ -479,5 +479,10 @@ as well as a broader range of packages from the ecosystem, including:
   `SimpleGraph` and `SimpleDiGraph` (building, querying, subgraphs, the generators, `erdos_renyi` with a seed), `bfs_tree`, `dfs_tree`, `dijkstra`, `bellman_ford`, `floyd_warshall`, `a_star`, connected and strongly connected components, `topological_sort`, `kruskal_mst` and `prim_mst`, `maximal_cliques`, `greedy_color`, `label_propagation`, `pagerank`, `betweenness_centrality`,
   `closeness_centrality`, `eigenvector_centrality`, and the adjacency and Laplacian matrices.
 
+* **OptParse.jl**: 26 of 26 cases of the survey, with its static (`juliac`) code, which is chosen with a preference:
+  `LocalPreferences.toml` (or `[preferences.OptParse]` in the `Project.toml` of the environment) has `juliac = true`, set before the package is precompiled. Without it OptParse takes types out of values when it runs, and a program is
+  rejected when compiling. `@parser` structs and `record`, `option`, `flag`, `arg`, `optional`, `default`, `many`, `many1`, `choice`, the value parsers (`str`, `integer`, `flt64`, ...), subcommands (`command`, `or`, `lift`),
+  `optparse` and `runparse`, with the parse errors and the help (`--help`, `help`, and that of a subcommand) as Julia gives them on the standard error. The arguments are those of `main(args)`.
+
 * **Parsers.jl** (version 3): 40 of 40 cases of the survey: 
   `parse` and `tryparse` of integers of every width (with `base` and `groupmark`), `Float16`, `Float32` and `Float64` (with `decimal`, hexadecimal floats, `Inf` and `NaN`), `Bool` (with other spellings), `Date`, `DateTime` and `Time` (with a format), `UUID`, `BigInt` and `BigFloat`, from strings and from spans of bytes; and `parsenext` and the kernels (`parseint`, `parsefloat`) that a reader of files is made of, in a loop over the fields of a line. The results of the floats are the same to the last bit as Julia's.
