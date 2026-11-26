@@ -10,6 +10,7 @@ const EMBEDFUZZ_PINNED = UInt[
     0x0000000000003dd1,
     0x0000000000004538,
     0xe27e4d5b304aa4fd,
+    0xacc4b98ebc087417,
 ]
 
 const DISPATCHFUZZ_PINNED = UInt[]
