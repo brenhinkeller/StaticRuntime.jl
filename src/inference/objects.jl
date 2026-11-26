@@ -594,6 +594,9 @@ function record_object_facts!(c::Compilation, ir::CC.IRCode, mi::Core.MethodInst
                 note_object_call!(c, ir, mi, callee, view(st.args, 2:length(st.args)), sig)
             end
         end
+        # (the constants that the code has now: the optimizer folds a call that gives a constant (`Ok(nothing)` of a parser that is a constant) into
+        # the object, which the statements before inlining, that the slot facts were made from, do not have. What it holds is stored in slots all the same)
+        note_slots_in_constants!(c, (ir.stmts[pc][:stmt] for pc in 1:length(ir.stmts)))
     finally
         o.recording = false
         s.facts_sink = nothing
