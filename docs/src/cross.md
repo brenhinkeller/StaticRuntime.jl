@@ -11,7 +11,7 @@ compile_executable(main, (Vector{String},), "build", "hello"; target = "x86_64-a
 
 ## How it is made
 
-Everything up to the last step is the host's: Julia's inference and code generation, the objects that the program has as constants, and the runtime of this package, which is linked in as LLVM IR. The layout of Julia's objects is the host's, so the target has to be 64-bit and little-endian (x86-64, AArch64, and, later, `wasm64`); `wasm32` is not possible.
+Everything up to the last step is the host's: Julia's inference and code generation, the objects that the program has as constants, and the runtime of this package, which is linked in as LLVM IR. The layout of Julia's objects is the host's, so the target has to be 64-bit and little-endian (x86-64, AArch64, and  `wasm64`); `wasm32` is not feasible.
 That IR is then made for the target (its `target triple` is changed, and its data layout is left to the code generator), the machine code is made, and the program is linked.
 
 The machine code is made as it is for the host: by the code generator alone, without optimizing the IR again, which Julia has done (making it with `clang -O2` changes what some programs do). It is made
@@ -50,13 +50,45 @@ The code of this package that differs between the systems (the flags of `open`, 
 
 To check programs for a system that can't run here, `test/cross/build.jl <triple> <outdir> [sysroot]` makes a set of programs for it and records what the same programs do natively, and `test/cross/check.jl <outdir>` (which needs only Julia) runs them on the machine of the target and compares.
 
+## WebAssembly
+
+`target = "wasm64-unknown-unknown"` makes a program for WebAssembly with 64-bit memory (`memory64`), which is the only kind that is possible: the objects of Julia have 8-byte pointers in them, so `wasm32` is not. `compile_executable` writes `name.wasm` and, next to it, `name.mjs`, the host that runs it with Node.js 24 or later (where `memory64` is on by default): `node name.mjs arguments...`. The host is a file of JavaScript, `src/runtime/wasm_host_core.js` (with `wasm_host_node.mjs`), that has the functions of the C library that the runtime and the programs call (`write`, `fwrite`, `printf`, `calloc`, the `memcpy` family, the clock, `getentropy`, the system (process id, host name, time zone, `sysconf`, environment variables), libm (`erf`, `erfc`, `tgamma` and `lgamma` are series and continued fractions that are accurate to a unit or two of the last digit: not those of a C library), and the 128-bit integer arithmetic that WebAssembly has no instructions for). The string functions (`strlen`, `strcmp`, `memcmp`, ...), `qsort` and `bsearch` are not the host's: they are in the module (a call of the host costs a few hundred times a call of a function), and `qsort` is a shell sort, which is not stable.
+
+* The program is made with the code generator for WebAssembly of Julia's LLVM and linked with the `lld` that Julia has. Exceptions are WebAssembly's own: `try` and `throw` of the runtime are `setjmp` and `longjmp`, which the code generator makes into them (with the three functions of the C library for that, in `src/cross.jl`).
+* **Memory.** The memory is the module's linear memory, which grows when the program needs it (4 MiB or more at a time) as far as the machine allows, or as far as `--max-memory` says: `cross_target("wasm64-unknown-unknown"; cflags = ``--max-memory=268435456``)` (the initial size is `--initial-memory`). When it can't grow, `malloc` and `calloc` give `NULL` and the program stops as a native one does: `Out of memory error` on the standard error, and status 1. The host has a `malloc`, `calloc`, `realloc` and `free` of the C library, with the blocks that are freed reused by size.
+* **The collector** of the runtime is in a program for WebAssembly that needs it (one that allocates in a loop), as in a native one (`gc = :auto`; `gc = true`, or a number for stress mode, as for native programs). It looks for what is in use in the memory of the stack, but a WebAssembly function keeps pointers in locals, which are not in memory, where a call that collects could not see them. So before each call that can reach a collection, a pass (`spill_gc_roots!`) stores every pointer that is in use after the call to a slot in the frame: only the calls of functions that can allocate are given stores (a call graph says which), and only pointers that can point into the heap are stored (not those of the stack or of the data). The program has about 22 kB more for it. Stress mode (`gc = 3`: a collection every 3 allocations, what is freed overwritten) is how it is tested: the programs of `test/cross` do what the native ones do in it. Integers that hold addresses (`UInt(pointer(x))`) are not stored, as they are not pointers to the pass.
+* **Files, directories and the environment** are those of the machine that Node.js runs on, through its `fs` module (`open`, `fopen` and the stdio functions, `stat`, `readdir`, `mkdir`, `rename`, `unlink`, `mkstemp`, `getenv`, ...): the position of a file is kept in the host (Node has no `lseek`), the layouts of `struct stat` and of the entries of a directory are Linux's, and the error numbers (`errno`, `strerror`) are Linux's whatever the system. In a browser there is no file system to give: the host has to be another.
+* A program that needs what the host does not have (processes, `Mmap`, ...) is refused when it is made, with a list of what it needs. The host is where to add them.
+* **Linear algebra** has no BLAS or LAPACK to load in a program for WebAssembly, so the functions of them that programs use are replaced by Julia ones when `LinearAlgebra` is loaded (`ext/StaticRuntimeLinearAlgebraExt.jl`; `replace_on_target!`): level 1 (`dot`, `nrm2`, `asum`, `axpy!`, `scal!`), `gemv!`, `gemm!`, `syrk!`, `trsv!` and `trsm!`, and from LAPACK the LU factorization (`getrf!`, `getrs!`, `getri!`: `lu`, `\`, `det`, `inv`), Cholesky (`potrf!`, `potrs!`), pivoted QR (`geqp3!`, `ormqr!`, `laic1!`: the fallback of `\` for singular matrices) and triangular solves. They are the reference algorithms, with the factors that LAPACK gives (the results are the same to rounding: the sums are in another order). Not yet: the eigenvalue and singular value decompositions (`eigen`, `svd`: `dlopen` is refused), the blocked QR (`qr` of a matrix without pivoting), and what is in SuiteSparse (`SparseArrays` factorizations). `STATIC_RUNTIME_CROSS_WHY=1` says which functions of the program call what the host does not have.
+* **What works** was surveyed by running the cases of the test suite as programs for WebAssembly (`test/cross/survey.jl` for the files of `test/core`, and `STATIC_RUNTIME_SURVEY=report.tsv GROUP=Packages PACKAGES=dates,statistics julia --project -e 'using Pkg; Pkg.test()'` for the packages; `test/cross/classify.jl report.tsv` groups what fails by reason; `STATIC_RUNTIME_NODE` is the `node` that runs them). The cases that fail do so for one reason: the program needs a native library (`dlopen`: `eigen`/`svd`, SuiteSparse, GMP and MPFR (`BigInt`, `BigFloat`), `Rmath` and other libraries of JLL packages, which have no WebAssembly build) or something of the system that has no equivalent (`/proc`, `wcsftime`, processes).
+* Not yet: vectors of `Float16` (the code generator can't make them; refused), processes, and files in a browser.
+
+### In a browser
+
+`compile_executable` also writes `name.browser.mjs`, the host for a page (or Deno, Bun, a Web Worker), which has the same functions as the one for Node.js but keeps the files in memory:
+
+```js
+import { run } from './name.browser.mjs';
+const result = await run('name.wasm', {
+    args: ['--iterations', '100'],
+    files: { '/data/input.csv': csvText },          // the files that the program can open (text or bytes)
+    stdin: '',
+    stdout: (text) => output.append(text),
+    stderr: (text) => console.error(text),
+});
+result.exitCode; result.readFile('/out.csv');       // what the program wrote (bytes); result.list('/') lists a directory
+```
+
+The program runs to its end where `run` is called, so in a page it belongs in a Web Worker (`new Worker(url, { type: 'module' })`). `/tmp` is there for `tempname` and `mktempdir`; `env` and `cwd` are options. The browser needs `memory64` (Firefox 134 or later, Chrome 133 or later; not Safari yet), WebAssembly exceptions with `exnref` and SIMD. All 18 programs of `test/cross/build.jl` do what the native ones do in headless Firefox 162: `BROWSER=/Applications/Firefox.app/Contents/MacOS/firefox node test/cross/check_browser.mjs <outdir>` (without `BROWSER`, the same host runs in Node.js, which checks its logic). The layers of the host are `src/runtime/wasm_host_core.js` (the C library and the system, for all platforms), `wasm_host_node.mjs` (Node's `fs`, the clock and the streams) and `wasm_host_browser.mjs` (the in-memory file system, `run`); `cross_link` joins the core to each shell.
+
 ## What works
 
 | host | target | state |
 |:-----|:-------|:------|
 | macOS, AArch64 | `x86_64-apple-macosx...` | works, with the `llc` above; the programs run with Rosetta. 13 programs (files, directories, processes, the collector among them) are checked in `test/cross/build.jl` and `test/core/cross.jl` |
-| macOS, AArch64 | `aarch64-unknown-linux-gnu` | built and linked (13 programs) with Julia's LLVM and a glibc sysroot; to be run on a Linux machine with `test/cross/check.jl` |
-| macOS, AArch64 | `x86_64-unknown-linux-gnu` | the same, with the `llc` above |
-| others | | not tried; WebAssembly needs a runtime of its own |
+| macOS, AArch64 | `aarch64-unknown-linux-gnu` | built and linked (13 programs) with Julia's LLVM and a glibc sysroot; run on a Linux machine of the architecture in CI (`test/cross/check.jl`) |
+| macOS, AArch64 | `x86_64-unknown-linux-gnu` | the same, with the `llc` above; not run in CI yet |
+| any | `wasm64-unknown-unknown` | works, with Node.js 24 or later; 19 of the 21 programs of `test/cross/build.jl` do what the native ones do, exceptions, files and the collector included (the others use processes, or vectors of `Float16`) |
+| others | | not tried |
 
-Code that Base chooses by the host's system when Base is compiled is the host's: what a program that uses it does on another system is not checked (the standard library functions that this package replaces are, see above). Libraries that are loaded when the program runs (BigInt, BLAS) are the host's, and are not for another system. The conversions between `Float16` and `Float32` on x86-64 use the instructions of F16C (a CPU of 2012 or later).
+Code that Base chooses by the host's system when Base is compiled is the host's: what a program that uses it does on another system is not checked (the standard library functions that this package replaces are, see above). Libraries that are loaded when the program runs (BigInt, BLAS) are the host's, and are not for another system. The conversions between `Float16` and `Float32` on x86-64 use the instructions of F16C (a CPU of 2012 or later); on WebAssembly they are made by integer arithmetic.

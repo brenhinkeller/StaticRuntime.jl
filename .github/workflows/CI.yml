@@ -116,6 +116,63 @@ jobs:
           GROUP: Fuzzing
           STATIC_RUNTIME_GC: ${{ matrix.gc }}
           FUZZ_COUNT: 30
+  cross-build:
+    # programs for Linux made on macOS (`target = cross_target("aarch64-unknown-linux-gnu"; sysroot)`, see the manual: Cross-compiling), by Julia's own LLVM and the `lld` that Julia has, and linked with the glibc of the
+    # platform; the programs are then run by the next job on a Linux machine of that architecture, and compared with what the same programs do when they are made natively (`test/cross`)
+    name: Cross-compiling for Linux (aarch64), built on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre'
+      - uses: julia-actions/cache@v1
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Fetch the C library of the target
+        id: sysroot
+        run: echo "dir=$(julia test/cross/sysroot.jl aarch64 | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Make the programs, and record what they do when they are made natively
+        run: julia --project=. test/cross/build.jl aarch64-unknown-linux-gnu cross-out "${{ steps.sysroot.outputs.dir }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-linux-aarch64
+          path: cross-out
+  cross-run:
+    name: Cross-compiled programs (aarch64), run on Linux
+    needs: cross-build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v2
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre'
+          arch: aarch64
+      - uses: actions/download-artifact@v4
+        with:
+          name: cross-linux-aarch64
+          path: cross-out
+      - name: The programs lose their permission to run in the artifact
+        run: find cross-out -name exe -exec chmod +x {} +
+      - name: Run them, and compare
+        run: julia test/cross/check.jl cross-out
+  cross-wasm:
+    # programs for WebAssembly (wasm64: `target = "wasm64-unknown-unknown"`), made with Julia's LLVM and run with Node.js 24 (which has 64-bit memory), compared with what the same programs do natively (`test/cross`)
+    name: Cross-compiling for WebAssembly, run with Node.js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre'
+      - uses: julia-actions/cache@v1
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Make the programs, and record what they do when they are made natively
+        run: julia --project=. test/cross/build.jl wasm64-unknown-unknown cross-wasm
+      - name: Run them with Node.js, and compare
+        run: julia test/cross/check.jl cross-wasm
   docs:
     name: Documentation
     runs-on: ubuntu-latest

@@ -405,6 +405,7 @@ in a way that is the same in every process (`type_hash`).
 inference_key(c::Compilation) = inference_key(c.settings, c.registered, c.closures, c.boxes, c.slots, c.objects)
 function inference_key(settings::Settings, registered::Registered, closures::ClosureState, boxes::BoxState, slots::SlotState, objects::ObjectState)
     h = hash(settings)
+    h = hash((TARGET_SYSTEM[], TARGET_ARCH[], TARGET_CROSS[]), h) # (what a program is made for decides which code inference reads: `TARGET_REPLACEMENTS`, `target_system()`)
     h = hash(registered.version, h)
     h = hash(closures_hash(closures), h)
     h = hash(boxes_hash(boxes), h)

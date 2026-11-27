@@ -6,6 +6,8 @@
 
 const TARGET_SYSTEM = Base.ScopedValues.ScopedValue{Symbol}(Sys.isapple() ? :macos : Sys.islinux() ? :linux : Sys.iswindows() ? :windows : :unknown)
 const TARGET_ARCH = Base.ScopedValues.ScopedValue{Symbol}(Sys.ARCH)
+# whether the program is made for a target other than the host's (what the host has when the program is made, as the library that BLAS is in, is not what the program finds where it runs)
+const TARGET_CROSS = Base.ScopedValues.ScopedValue{Bool}(false)
 
 "The system that the program is made for: `:macos`, `:linux`, ... (a constant while the program is compiled)"
 @inline target_system() = TARGET_SYSTEM[]
@@ -16,4 +18,4 @@ const TARGET_ARCH = Base.ScopedValues.ScopedValue{Symbol}(Sys.ARCH)
 @inline target_choice(macos, other) = target_macos() ? macos : other
 
 # Run `f` with the target of a compilation: `system` and `arch` as symbols
-with_target(f, system::Symbol, arch::Symbol) = Base.ScopedValues.with(f, TARGET_SYSTEM => system, TARGET_ARCH => arch)
+with_target(f, system::Symbol, arch::Symbol; cross::Bool = false) = Base.ScopedValues.with(f, TARGET_SYSTEM => system, TARGET_ARCH => arch, TARGET_CROSS => cross)

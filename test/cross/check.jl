@@ -5,9 +5,10 @@ function check(outdir::AbstractString)
     failed = String[]
     for name in sort(readdir(outdir))
         dir = joinpath(outdir, name)
-        isfile(joinpath(dir, "exe")) || continue
+        # (a program for WebAssembly is `exe.wasm`, with the host `exe.mjs` that runs it with Node.js 24 or later: `NODE` is the path of `node`)
+        command = isfile(joinpath(dir, "exe")) ? `$(joinpath(dir, "exe"))` : isfile(joinpath(dir, "exe.mjs")) ? `$(get(ENV, "NODE", "node")) $(joinpath(dir, "exe.mjs"))` : continue
         out, err = tempname(), tempname()
-        p = run(ignorestatus(pipeline(`$(joinpath(dir, "exe"))`; stdout = out, stderr = err)))
+        p = run(ignorestatus(pipeline(command; stdout = out, stderr = err)))
         got = (read(out, String), read(err, String), p.exitcode)
         want = (read(joinpath(dir, "stdout"), String), read(joinpath(dir, "stderr"), String), parse(Int, read(joinpath(dir, "status"), String)))
         if got == want

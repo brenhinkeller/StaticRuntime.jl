@@ -48,6 +48,9 @@ function static_result(f; dir = mktempdir(), kwargs...)
     end
 end
 
+# how a program that was compiled is run: a program for WebAssembly (`name.wasm`, with the host `name.mjs` next to it) by Node.js 24 or later (`STATIC_RUNTIME_NODE`, or `node`)
+run_command(exe::AbstractString) = endswith(exe, ".wasm") ? `$(get(ENV, "STATIC_RUNTIME_NODE", "node")) $(exe[1:end-5] * ".mjs")` : `$exe`
+
 # whether the error is of a program that was stopped by a signal (a crash: a segmentation fault, an illegal instruction,
 # an abort), not one that exited with a status, as when it stops with a message of its own (`Dynamic behavior is not
 # supported`, an error that is not caught), which says what it is and which is what some tests expect
@@ -135,7 +138,7 @@ function static_status(f; inputs::Union{Nothing,Base.RefValue{Union{Missing,Bool
     end
     err_path = tempname()
     out = try
-        read(pipeline(`$exe`; stderr = err_path), String)
+        read(pipeline(run_command(exe); stderr = err_path), String)
     catch e
         crash_backtrace(exe, e) # (what a crash of the program was, in the log of CI, where it can't be run again by hand)
         # (and what the program said before it stopped: a library that it could not open, an error)
@@ -223,7 +226,7 @@ function static_status_batch(fs::AbstractVector; inputs::Union{Nothing,AbstractV
         inspect = inputs === nothing ? nothing : (mod -> copyto!(inputs, input_dependent_cases(mod, fs)))
         exe = Base.invokelatest(compile_executable, main, (Int, Ptr{Ptr{UInt8}}), mktempdir(), string(nameof(main)); inspect_llvm = inspect, kwargs...)
         err_path = tempname()
-        out = read(pipeline(`$exe`; stderr = err_path), String)
+        out = read(pipeline(run_command(exe); stderr = err_path), String)
         err = read(err_path, String)
         expected_out, expected_err = expected_batch(fs)
         got_out, got_err = split_batch(out, n), split_batch(err, n)

@@ -128,6 +128,26 @@ program for each; a group that does not pass is compiled again case by case, so 
 """
 function check_cases(cases; broken = (), folded_ok = (), batch::Bool = true, chunk::Int = 24, kwargs...)
     named = [c isa Pair ? c : string(nameof(c)) => c for c in cases]
+    # (`STATIC_RUNTIME_SURVEY=<report.tsv>`: not the tests, a survey of what the cases do as programs for WebAssembly (see `test/cross/survey.jl`), which needs Node.js 24: `STATIC_RUNTIME_NODE`)
+    if !isempty(get(ENV, "STATIC_RUNTIME_SURVEY", ""))
+        frames = [string(f.file) for f in stacktrace() if occursin(r"test[/\\](core|packages)[/\\]", string(f.file))]
+        file = isempty(frames) ? "?" : basename(first(frames))
+        todo = [i for i in eachindex(named) if !(named[i][1] in broken)]
+        for group in Iterators.partition(todo, batch ? something(tryparse(Int, get(ENV, "STATIC_RUNTIME_SURVEY_CHUNK", "")), chunk) : 1) # (`STATIC_RUNTIME_SURVEY_CHUNK=1`: a program for each case, to find the one that crashes the compiler)
+            fs = Function[named[i][2] for i in group]
+            statuses = try
+                StaticRuntime.static_status_batch(fs; merge(NamedTuple(kwargs), (; target = "wasm64-unknown-unknown", gc = true))...)
+            catch e
+                [(:survey_error, sprint(showerror, e)) for _ in fs]
+            end
+            open(ENV["STATIC_RUNTIME_SURVEY"], "a") do io
+                for (i, (status, detail)) in zip(group, statuses)
+                    println(io, join((file, named[i][1], status, first(replace(string(detail), r"\s+" => " "), 400)), '\t'))
+                end
+            end
+        end
+        return nothing
+    end
     isbroken = [name in broken for (name, _) in named]
     statuses = Vector{Tuple{Symbol,String}}(undef, length(named))
     inputs = Vector{Union{Missing,Bool}}(missing, length(named)) # (with `TEST_FOLDED`: whether the program of each computes something when it runs, from the module that it was compiled in)

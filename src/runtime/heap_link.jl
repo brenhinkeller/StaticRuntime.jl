@@ -186,26 +186,26 @@ function stack_functions_ir(system::Symbol)
         declare ptr @pthread_self()
         declare ptr @pthread_get_stackaddr_np(ptr)
         declare i64 @pthread_get_stacksize_np(ptr)
-        define i64 @static_stack_base() {
+        define fastcc i64 @static_stack_base() {
           %t = call ptr @pthread_self()
           %b = call ptr @pthread_get_stackaddr_np(ptr %t)
           %i = ptrtoint ptr %b to i64
           ret i64 %i
         }
-        define i64 @static_stack_size() {
+        define fastcc i64 @static_stack_size() {
           %t = call ptr @pthread_self()
           %n = call i64 @pthread_get_stacksize_np(ptr %t)
           ret i64 %n
         }"""
     system === :linux && return """
         @__libc_stack_end = external global ptr
-        define i64 @static_stack_base() {
+        define fastcc i64 @static_stack_base() {
           %b = load ptr, ptr @__libc_stack_end
           %i = ptrtoint ptr %b to i64
           ret i64 %i
         }
         declare i32 @getrlimit(i32, ptr)
-        define i64 @static_stack_size() {
+        define fastcc i64 @static_stack_size() {
           ; the limit of the process (RLIMIT_STACK is 3), which is 1 GiB where it is not set, or can not be read
           %buffer = alloca [2 x i64], align 16
           %status = call i32 @getrlimit(i32 3, ptr %buffer)
@@ -218,11 +218,23 @@ function stack_functions_ir(system::Symbol)
           %size = select i1 %bad, i64 1073741824, i64 %current
           ret i64 %size
         }"""
+    # WebAssembly: the stack is the shadow stack in the memory of the module, which grows down from the top that it had when the program started (the entry point records it, in the global that is defined
+    # there: see `main_wrapper`). Its size is the one that the linker is asked for.
+    system === :wasm && return """
+        @_static_wasm_stack_top = external global ptr
+        define fastcc i64 @static_stack_base() {
+          %b = load ptr, ptr @_static_wasm_stack_top
+          %i = ptrtoint ptr %b to i64
+          ret i64 %i
+        }
+        define fastcc i64 @static_stack_size() {
+          ret i64 4194304
+        }"""
     return """
-        define i64 @static_stack_base() {
+        define fastcc i64 @static_stack_base() {
           ret i64 0
         }
-        define i64 @static_stack_size() {
+        define fastcc i64 @static_stack_size() {
           ret i64 0
         }"""
 end
@@ -323,7 +335,7 @@ function link_heap!(mod::LLVM.Module; gc = false, finalizers = true)
     haskey(fns, "static_alloc") && LLVM.isdeclaration(fns["static_alloc"]) || return false
     collect_garbage = gc !== false
     if collect_garbage
-        target_system() in (:macos, :linux) || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
+        target_system() in (:macos, :linux, :wasm) || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
         run!(GlobalDCEPass(), mod) # (the roots refer to the objects, which would keep those that the code does not use)
         define_gc_roots!(mod)
         define_gc_stress!(mod, !(gc isa Bool) && gc isa Integer && gc > 0 ? gc : 0) # (`true` is an `Integer` too)

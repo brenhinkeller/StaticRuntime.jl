@@ -310,6 +310,17 @@ function CC.abstract_call_gf_by_type(interp::OverridesInterpreter, @nospecialize
                                      sv::Union{CC.IRInterpretationState{I},CC.InferenceState{I}} where I<:CC.AbstractInterpreter,
                                      max_methods::Int)
     c = compilation()
+    if sv isa CC.InferenceState
+        # (a function that the target does not have, replaced by one of Julia's: see `TARGET_REPLACEMENTS`)
+        replacement = target_replacement(f)
+        replacement === nothing || return redirect(interp, replacement, Any[], 2, arginfo, si, vtypes, sv)
+        # (a call with keywords is `Core.kwcall(keywords, f, args...)`: the same, with the function that is called replaced)
+        if f === Core.kwcall && length(arginfo.argtypes) >= 3
+            called = CC.singleton_type(arginfo.argtypes[3])
+            replacement = called === nothing ? nothing : target_replacement(called)
+            replacement === nothing || return redirect(interp, kwcall_with, Any[replacement], 2, arginfo, si, vtypes, sv; positions = Int[2; 4:length(arginfo.argtypes)])
+        end
+    end
     # (a call that is made for an object that is a constant: code of its own for the object, see "Any function, for each
     # object" in object_calls.jl)
     if sv isa CC.InferenceState
@@ -887,6 +898,23 @@ function CC.abstract_call_known(interp::OverridesInterpreter, f::typeof(Base.sho
         (IOT <: ShowStream || IOT <: Base.GenericIOBuffer) && return redirect(interp, show_type_value, Any[], 2, arginfo, si, vtypes, sv)
     end
     return julia_call(interp, f, arginfo, si, vtypes, sv, max_methods)
+end
+
+## Calls that are other calls on a target
+
+# Functions that a target does not have are replaced, in the programs for it, by others that are written in Julia: `TARGET_REPLACEMENTS[system][f] = g` makes each call `f(args...)` in a program for
+# `system` (or `:cross`: any target that is not the host's) the call `g(args...)`, which has a method for each form of call of `f`. A package that gives them (`ext/StaticRuntimeLinearAlgebraExt.jl`: the functions of BLAS and LAPACK, for a program for WebAssembly,
+# which has no library to call) registers them when it is loaded (`replace_on_target!`).
+const TARGET_REPLACEMENTS = Dict{Symbol,Dict{Any,Any}}()
+replace_on_target!(system::Symbol, f, g) = (get!(Dict{Any,Any}, TARGET_REPLACEMENTS, system)[f] = g; nothing)
+kwcall_with(g, keywords, args...) = Core.kwcall(keywords, g, args...)
+function target_replacement(@nospecialize(f))
+    isempty(TARGET_REPLACEMENTS) && return nothing
+    table = get(TARGET_REPLACEMENTS, TARGET_SYSTEM[], nothing)
+    table === nothing || (g = get(table, f, nothing)) === nothing || return g
+    # (`:cross`: for every program that is made for another target than the host's)
+    table = TARGET_CROSS[] ? get(TARGET_REPLACEMENTS, :cross, nothing) : nothing
+    return table === nothing ? nothing : get(table, f, nothing)
 end
 
 ## The target of the program, a constant

@@ -15,7 +15,7 @@ include("registry.jl")
 
 # The runtime that is linked into programs (a module of its own), our method table, and our LLVM passes
 include("runtime/runtime.jl")
-using .Runtime: link_runtime!, UnsupportedCodeError, target_system, target_arch, target_macos, target_choice, with_target, TARGET_SYSTEM, TARGET_ARCH
+using .Runtime: link_runtime!, UnsupportedCodeError, target_system, target_arch, target_macos, target_choice, with_target, TARGET_SYSTEM, TARGET_ARCH, TARGET_CROSS
 include("method_table.jl")   # our method table, `@device_override`, and the parameters of our compilations
 include("extensions.jl")     # functions that package extensions add methods to (Makie)
 include("llvm/tags.jl")      # the type tags of the objects that a program allocates
@@ -145,6 +145,14 @@ end
 # system they are for, and the linker of recent versions of macOS warns about each (`no platform load command found in
 # 'x.o', assuming: macOS`). The oldest version that exists for the architecture is used, which is what the binary says
 # that it needs at least.
+# The host's target with the generic CPU of its architecture, for the code of a program that is made for another target (or only as an object): Julia's code generation chooses the vectors and the
+# instructions by the CPU, and the machine code is made after by the target's own generic machine, which has not the host's extensions (the scalable vectors of SVE, for one, are not made
+# into machine code without it: "Don't know how to legalize this scalable vector type").
+function generic_host_target()
+    triple = LLVM.triple(default_target().tm)
+    return StaticCompiler.StaticTarget(triple, "generic", "")
+end
+
 function default_target()
     Sys.isapple() || return StaticCompiler.StaticTarget()
     arch, minimum = Sys.ARCH === :x86_64 ? ("x86_64", "10.13.0") : ("aarch64", "11.0.0")
@@ -200,6 +208,12 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             target = resolve_target(target)
             cross = target isa CrossTarget ? target : nothing
             cross === nothing || (target = default_target())
+            # (`output = :object` or `:llvmir` is made by the same steps as for another target, with the host's)
+            if cross === nothing && get(kwargs, :output, :executable) !== :executable
+                cross = cross_target(LLVM.triple(target.tm))
+            end
+            # (the code for another target does not use what only the host's CPU has)
+            cross === nothing || (target = generic_host_target())
             check_gc(gc)
             register_custom_deepcopy!() # (this can change the registry, which the compilation takes a copy of when it starts)
             explicit_params = params
