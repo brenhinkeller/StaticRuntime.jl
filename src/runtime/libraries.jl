@@ -352,7 +352,7 @@ function bundle_libraries(program::AbstractString, plan::LibraryPlan)
     for path in plan.paths
         system_library(path) && continue
         target = joinpath(dir, basename(path))
-        cp(path, target; force = true)
+        cp(path, target; force = true, follow_symlinks = true)
         push!(copied, target)
     end
     return copied
