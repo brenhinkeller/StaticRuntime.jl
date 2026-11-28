@@ -14,8 +14,11 @@ const TARGET_CROSS = Base.ScopedValues.ScopedValue{Bool}(false)
 "The architecture that the program is made for: `:aarch64`, `:x86_64`, ... (a constant while the program is compiled)"
 @inline target_arch() = TARGET_ARCH[]
 @inline target_macos() = target_system() === :macos
+@inline target_windows() = target_system() === :windows
 # the value for macOS, or the one for the other systems that this package has code for (Linux)
 @inline target_choice(macos, other) = target_macos() ? macos : other
+# the value for each of the systems that this package has code for
+@inline target_value(macos, linux, windows) = target_macos() ? macos : target_windows() ? windows : linux
 
 # Run `f` with the target of a compilation: `system` and `arch` as symbols
 with_target(f, system::Symbol, arch::Symbol; cross::Bool = false) = Base.ScopedValues.with(f, TARGET_SYSTEM => system, TARGET_ARCH => arch, TARGET_CROSS => cross)

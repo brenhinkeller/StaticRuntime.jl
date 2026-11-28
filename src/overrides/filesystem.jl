@@ -9,7 +9,12 @@
 # others that Base has.
 
 # `errno`, as libc has it (a function that gives where it is: its name is not the same on the systems)
-@inline errno_pointer() = target_macos() ? ccall(:__error, Ptr{Cint}, ()) : ccall(:__errno_location, Ptr{Cint}, ())
+@inline errno_pointer() = target_macos() ? ccall(:__error, Ptr{Cint}, ()) : target_windows() ? windows_errno_pointer() : ccall(:__errno_location, Ptr{Cint}, ())
+
+# the numbers of `errno` that the code looks at: the same on the three systems for the first ones, and not for the others
+const E_NOENT, E_ACCES, E_EXIST, E_XDEV, E_NOTDIR, E_ISDIR, E_INVAL = 2, 13, 17, 18, 20, 21, 22
+@inline errno_enotempty() = target_value(66, 39, 41)
+@inline errno_eloop() = target_value(62, 40, 114)
 @device_override Base.Libc.errno() = unsafe_load(errno_pointer())
 @device_override Base.Libc.errno(e::Integer) = (unsafe_store!(errno_pointer(), Cint(e)); nothing)
 @device_override Base.Libc.getpid() = ccall(:getpid, Int32, ())
@@ -34,6 +39,7 @@ lstat_plain(path, buf) = ccall(:lstat, Cint, (Cstring, Ptr{UInt8}), path, buf)
 
 function stat_struct(path::AbstractString, call)
     path = String(path)
+    target_windows() && return windows_stat_struct(path)
     buf = zeros(UInt8, 256)
     r = GC.@preserve buf call(path, pointer(buf))
     if r != 0
@@ -59,18 +65,18 @@ end
 # `checkstat`)
 function stat_checked(st)
     code = -Int(st.ioerrno)
-    (code == 0 || code == 2 || code == 20 || code == 13 || code == 22 || code == 40) && return st # ENOENT, ENOTDIR, EACCES, EINVAL, ELOOP
+    (code == 0 || code == E_NOENT || code == E_NOTDIR || code == E_ACCES || code == E_INVAL || code == errno_eloop()) && return st
     fs_error("stat", st.desc, code)
 end
 @device_override Base.Filesystem.stat(path::AbstractString) = stat_checked(stat_struct(path, stat_call))
 @device_override Base.Filesystem.lstat(path::AbstractString) = stat_checked(stat_struct(path, lstat_call))
-@device_override Base.ispath(path::String) = ccall(:access, Cint, (Cstring, Cint), path, 0) == 0
+@device_override Base.ispath(path::String) = target_windows() ? win_access(path) == 0 : ccall(:access, Cint, (Cstring, Cint), path, 0) == 0
 
 ## directories and files
 
 @device_override function Base.mkdir(path::AbstractString; mode::Integer = 0o777)
     path = String(path)
-    ccall(:mkdir, Cint, (Cstring, UInt16), path, UInt16(mode)) == 0 || fs_error("mkdir", path)
+    (target_windows() ? win_mkdir(path) : ccall(:mkdir, Cint, (Cstring, UInt16), path, UInt16(mode))) == 0 || fs_error("mkdir", path)
     return path
 end
 
@@ -85,6 +91,12 @@ readdir_plain(handle) = ccall(:readdir, Ptr{UInt8}, (Ptr{Cvoid},), handle)
 @inline readdir_call(handle) = target_macos() && target_arch() === :x86_64 ? readdir_inode64(handle) : readdir_plain(handle)
 @device_override function Base.readdir(dir::AbstractString; join::Bool = false, sort::Bool = true)
     dir = String(dir)
+    if target_windows()
+        names = windows_readdir_names(dir)
+        entries = join ? String[joinpath(dir, name) for name in names] : names
+        sort && sort!(entries)
+        return entries
+    end
     handle = opendir_call(dir)
     handle == C_NULL && fs_error("readdir", dir)
     entries = String[]
@@ -109,28 +121,28 @@ end
         fs_error("unlink", path, 2)
     end
     if islink(st) || !isdir(st)
-        ccall(:unlink, Cint, (Cstring,), path) == 0 || (force && unsafe_load(errno_pointer()) == 2) || fs_error("unlink", path)
+        (target_windows() ? win_unlink(path) : ccall(:unlink, Cint, (Cstring,), path)) == 0 || (force && unsafe_load(errno_pointer()) == E_NOENT) || fs_error("unlink", path)
     else
         if recursive
             for name in readdir(path)
                 rm(joinpath(path, name); force, recursive = true)
             end
         end
-        ccall(:rmdir, Cint, (Cstring,), path) == 0 || (force && unsafe_load(errno_pointer()) == 2) || fs_error("rmdir", path)
+        (target_windows() ? win_rmdir(path) : ccall(:rmdir, Cint, (Cstring,), path)) == 0 || (force && unsafe_load(errno_pointer()) == E_NOENT) || fs_error("rmdir", path)
     end
     return nothing
 end
 
 @device_override function Base.rename(oldpath::AbstractString, newpath::AbstractString)
     oldpath, newpath = String(oldpath), String(newpath)
-    ccall(:rename, Cint, (Cstring, Cstring), oldpath, newpath) == 0 || fs_error("rename", oldpath)
+    (target_windows() ? win_rename(oldpath, newpath) : ccall(:rename, Cint, (Cstring, Cstring), oldpath, newpath)) == 0 || fs_error("rename", oldpath)
     return newpath
 end
 
 # `chmod`, `symlink` and `readlink` (Base calls libjulia's and libuv's functions of the same name)
 @device_override function Base.chmod(path::AbstractString, mode::Integer; recursive::Bool = false)
     path = String(path)
-    ccall(:chmod, Cint, (Cstring, UInt32), path, UInt32(mode)) == 0 || fs_error("chmod", path)
+    (target_windows() ? win_chmod(path, mode) : ccall(:chmod, Cint, (Cstring, UInt32), path, UInt32(mode))) == 0 || fs_error("chmod", path)
     if recursive && isdir(path)
         for p in readdir(path)
             islink(joinpath(path, p)) || chmod(joinpath(path, p), mode; recursive = true)
@@ -191,14 +203,14 @@ end
     if ispath(dst) && !force
         throw(ArgumentError(string("'", dst, "' exists. `force=true` is required to remove '", dst, "' before moving.")))
     end
-    if ccall(:rename, Cint, (Cstring, Cstring), src, dst) != 0
+    if (target_windows() ? win_rename(src, dst) : ccall(:rename, Cint, (Cstring, Cstring), src, dst)) != 0
         code = unsafe_load(errno_pointer())
-        if code == 18 # EXDEV: not the same device
+        if code == E_XDEV # not the same device
             copy_tree(src, dst, true)
             rm(src; recursive = true)
-        elseif force && ispath(dst) && code != 2
+        elseif force && ispath(dst) && code != E_NOENT
             rm(dst; recursive = true)
-            ccall(:rename, Cint, (Cstring, Cstring), src, dst) == 0 || fs_error("rename", src)
+            (target_windows() ? win_rename(src, dst) : ccall(:rename, Cint, (Cstring, Cstring), src, dst)) == 0 || fs_error("rename", src)
         else
             fs_error("rename", src, code)
         end
@@ -207,6 +219,7 @@ end
 end
 
 @device_override function Base.pwd()
+    target_windows() && return windows_pwd()
     buffer = zeros(UInt8, 4096)
     p = GC.@preserve buffer ccall(:getcwd, Ptr{UInt8}, (Ptr{UInt8}, Csize_t), pointer(buffer), 4096)
     p == C_NULL && fs_error("pwd", "")
@@ -214,13 +227,14 @@ end
 end
 @device_override function Base.cd(dir::AbstractString)
     dir = String(dir)
-    ccall(:chdir, Cint, (Cstring,), dir) == 0 || fs_error("cd", dir)
+    (target_windows() ? win_chdir(dir) : ccall(:chdir, Cint, (Cstring,), dir)) == 0 || fs_error("cd", dir)
     return nothing
 end
 @device_override Base.cd() = cd(homedir())
 
 @device_override function Base.realpath(path::AbstractString)
     path = String(path)
+    target_windows() && return windows_realpath(path)
     p = ccall(:realpath, Ptr{UInt8}, (Cstring, Ptr{UInt8}), path, C_NULL)
     p == C_NULL && fs_error("realpath", path)
     s = unsafe_string(p)
@@ -230,11 +244,12 @@ end
 
 ## where things are, and temporary files
 
-@device_override Base.homedir() = (h = get(ENV, "HOME", ""); isempty(h) ? "/" : h)
-@device_override Base.tempdir() = (t = get(ENV, "TMPDIR", ""); isempty(t) ? "/tmp" : (endswith(t, "/") && length(t) > 1 ? t[1:end-1] : t))
+@device_override Base.homedir() = target_windows() ? (h = get(ENV, "USERPROFILE", ""); isempty(h) ? "C:\\" : h) : (h = get(ENV, "HOME", ""); isempty(h) ? "/" : h)
+@device_override Base.tempdir() = target_windows() ? windows_tempdir() : (t = get(ENV, "TMPDIR", ""); isempty(t) ? "/tmp" : (endswith(t, "/") && length(t) > 1 ? t[1:end-1] : t))
 
 # (a name that does not exist, made as `mkstemp` makes one)
 @device_override function Base.tempname(parent::AbstractString = tempdir(); max_tries::Int = 100, cleanup::Bool = true)
+    target_windows() && return windows_tempname(String(parent))
     template = string(joinpath(String(parent), "jl_"), "XXXXXX")
     fd = GC.@preserve template ccall(:mkstemp, Cint, (Ptr{UInt8},), pointer(template))
     fd < 0 && fs_error("tempname", template)
@@ -243,6 +258,7 @@ end
     return template
 end
 @device_override function Base.mktemp(parent::AbstractString = tempdir(); cleanup::Bool = true)
+    target_windows() && return windows_mktemp(String(parent))
     template = Vector{UInt8}(string(joinpath(String(parent), "jl_"), "XXXXXX\0"))
     fd = GC.@preserve template ccall(:mkstemp, Cint, (Ptr{UInt8},), pointer(template))
     fd < 0 && fs_error("mktemp", String(copy(template)))
@@ -260,6 +276,7 @@ end
     end
 end
 @device_override function Base.mktempdir(parent::AbstractString = tempdir(); prefix::AbstractString = "jl_", cleanup::Bool = true)
+    target_windows() && return windows_mktempdir(String(parent), String(prefix))
     template = Vector{UInt8}(string(joinpath(String(parent), String(prefix)), "XXXXXX\0"))
     p = GC.@preserve template ccall(:mkdtemp, Ptr{UInt8}, (Ptr{UInt8},), pointer(template))
     p == C_NULL && fs_error("mktempdir", String(copy(template)))
@@ -278,13 +295,24 @@ end
 
 @device_override function Base.setindex!(::Base.EnvDict, value, name::AbstractString)
     name, value = String(name), String(value)
-    ccall(:setenv, Cint, (Cstring, Cstring, Cint), name, value, 1) == 0 || fs_error("setenv", name)
+    (target_windows() ? windows_setenv(name, value) : ccall(:setenv, Cint, (Cstring, Cstring, Cint), name, value, 1)) == 0 || fs_error("setenv", name)
     return value
 end
 @device_override function Base.delete!(::Base.EnvDict, name::AbstractString)
-    ccall(:unsetenv, Cint, (Cstring,), String(name))
+    target_windows() ? windows_setenv(String(name), "") : ccall(:unsetenv, Cint, (Cstring,), String(name))
     return nothing
 end
+
+# Reading: Base has these (`getindex`, `get`, `haskey` of `ENV` are made of them) for the host's system when it is compiled, and on a Windows host they call functions of Windows by the names that the program does not have
+@device_override function Base.access_env(onError::Function, var::AbstractString)
+    if target_windows()
+        value = windows_getenv(var)
+        return value === nothing ? onError(var) : value
+    end
+    val = ccall(:getenv, Cstring, (Cstring,), var)
+    return val == C_NULL ? onError(var) : unsafe_string(val)
+end
+@device_override Base._hasenv(s::AbstractString) = target_windows() ? windows_getenv(s) !== nothing : ccall(:getenv, Cstring, (Cstring,), s) != C_NULL
 
 ## `memrchr` is not in the C library of macOS (Julia's own is in libjulia)
 

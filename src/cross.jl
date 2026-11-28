@@ -27,6 +27,7 @@ function cross_target(triple::AbstractString; cpu::AbstractString = "generic", f
     triple = String(triple)
     command(x) = x === nothing ? nothing : (x isa Cmd ? x : Cmd([String(x)]))
     sysroot === :glibc && (sysroot = glibc_sysroot(triple))
+    sysroot === :mingw && (sysroot = mingw_sysroot(triple))
     features = isempty(features) && triple_system(triple) === :wasm ? WASM_FEATURES : String(features)
     # (the code is made for the host with its generic CPU, as `generic_host_target` says why, and retargeted)
     return StaticCompiler.StaticTarget(triple, cpu, features; retarget = generic_host_target(), llc = command(llc),
@@ -40,6 +41,13 @@ function glibc_sysroot(triple::AbstractString)
     return StaticCompiler.glibc_sysroot(String(triple))
 end
 
+# the libraries of MinGW-w64 for the architecture of the triple, from StaticCompiler's extension for `Mingw_jll`
+function mingw_sysroot(triple::AbstractString)
+    hasmethod(StaticCompiler.mingw_sysroot, Tuple{String}) ||
+        throw(ArgumentError("`sysroot = :mingw` needs the extension of StaticCompiler that fetches the libraries of MinGW-w64: `using Mingw_jll, Pkg` (or give the directory of a MinGW-w64 as `sysroot`)"))
+    return StaticCompiler.mingw_sysroot(String(triple))
+end
+
 canonical_arch(a::AbstractString) = a in ("arm64", "aarch64") ? "aarch64" : a in ("x86_64", "amd64", "x64") ? "x86_64" : String(a)
 triple_arch(triple::AbstractString) = canonical_arch(first(split(triple, '-')))
 triple_system(triple::AbstractString) = occursin("apple", triple) ? :macos : occursin("linux", triple) ? :linux : startswith(triple, "wasm") ? :wasm : occursin("windows", triple) || occursin("mingw", triple) ? :windows : :unknown
@@ -47,14 +55,17 @@ host_arch() = canonical_arch(string(Sys.ARCH))
 host_system() = Sys.isapple() ? :macos : Sys.islinux() ? :linux : Sys.iswindows() ? :windows : :unknown
 
 # the target that `target` stands for: the host's if it is its architecture and system, and else one that is made for by retargeting (`cross_target`)
+# (A Windows host makes its programs by the steps of a program for another system too: the names of the C library, the streams and the exceptions of Windows are chosen by the target, in the IR
+# of the program, and they are the same for the host's as for the programs that are made on other systems, which is a way that is tried on all of them. The host's own is made by StaticCompiler
+# with `clang` and the C library of the system, which the programs of this package do not have.)
 function resolve_target(target::AbstractString)
-    triple_arch(target) == host_arch() && triple_system(target) == host_system() && return default_target()
+    triple_arch(target) == host_arch() && triple_system(target) == host_system() && host_system() !== :windows && return default_target()
     return cross_target(target)
 end
 function resolve_target(target::StaticCompiler.StaticTarget)
     StaticCompiler.is_retargeted(target) && return target # (already made for by retargeting)
     triple = StaticCompiler.target_triple(target)
-    triple_arch(triple) == host_arch() && triple_system(triple) == host_system() && return target
+    triple_arch(triple) == host_arch() && triple_system(triple) == host_system() && host_system() !== :windows && return target
     # (a target of another architecture or system that StaticCompiler would make with the code generator of its own: here the code is the host's, and retargeted. What the target says of its toolchain is kept)
     resolved = cross_target(triple)
     return isnothing(target.toolchain) ? resolved : StaticCompiler.StaticTarget(resolved; toolchain = target.toolchain)
@@ -143,6 +154,17 @@ struct NoLinker <: StaticCompiler.Toolchain
 end
 StaticCompiler.link(tc::NoLinker, args...; kwargs...) = throw(ArgumentError(tc.why))
 
+# The toolchain of a program for Windows that was not given the libraries of MinGW-w64: it is `lld` with the ones of `Mingw_jll` (for the architecture of the target, fetched for any host), found when a program is
+# linked, and not when the target is made, so that IR and objects, which need none, do not fetch them.
+struct MinGWToolchain <: StaticCompiler.Toolchain
+    triple::String
+    flags::Cmd
+end
+resolve_toolchain(tc::MinGWToolchain) = StaticCompiler.LLDToolchain(:mingw; sysroot = mingw_sysroot(tc.triple), flags = tc.flags)
+StaticCompiler.link(tc::MinGWToolchain, args...; kwargs...) = StaticCompiler.link(resolve_toolchain(tc), args...; kwargs...)
+StaticCompiler.output_name(tc::MinGWToolchain, target, name::AbstractString; kwargs...) = StaticCompiler.output_name(StaticCompiler.LLDToolchain(:mingw), target, name; kwargs...)
+StaticCompiler.uses_builtins(::MinGWToolchain) = true # (as `LLDToolchain`'s: nothing else supplies what the code generator calls)
+
 # How the target is linked: a toolchain of StaticCompiler (see `StaticCompiler.link`). macOS with the system's `clang` and the SDK; Linux and WebAssembly with the `lld` that Julia has, and for Linux the C library
 # of the system root. The object of the program has its `main` (`main_wrapper` of `StaticCompiler.generate_obj`), so none is added. What is missing is said when the program is linked, and not when the target is made
 # (the IR and the objects need neither the SDK nor the C library).
@@ -160,6 +182,12 @@ function cross_toolchain(triple::AbstractString, cc, cflags::Cmd, sysroot)
     elseif system === :linux
         sysroot === nothing && return NoLinker("a program for $triple needs the C library of the target: give `sysroot = ...` to `cross_target` (a directory with the `lib` of a glibc: `sysroot = :glibc`, or the `Glibc_jll` artifact for the platform, or a root of the target's)")
         return StaticCompiler.LLDToolchain(:gnu; sysroot, flags = cflags)
+    elseif system === :windows
+        occursin("msvc", triple) && return NoLinker("a program for $triple (the runtime of MSVC) can not be linked: programs for Windows are linked with the libraries of MinGW-w64, for `x86_64-w64-mingw32`")
+        # (the stack of the main thread is 8 MiB, as it is on Linux and macOS: the linker's own is 1 or 2 MiB, which a program that recurses deeply does not fit in)
+        flags = `--stack=8388608 $cflags`
+        sysroot === nothing && return MinGWToolchain(triple, flags) # (the libraries of `Mingw_jll`, when it is linked)
+        return StaticCompiler.LLDToolchain(:mingw; sysroot, flags)
     elseif system === :wasm
         return StaticCompiler.LLDToolchain(:wasm; flags = `--stack-first -z stack-size=4194304 $cflags`)
     else
@@ -175,7 +203,7 @@ function warn_glibc_too_old(tc::StaticCompiler.LLDToolchain)
 end
 
 # what makes a program smaller: the symbols are left out of it (the options of the linker, which the driver of the C compiler is given as `-Wl,`)
-small_flags(tc, system::Symbol) = system === :macos ? (tc isa StaticCompiler.CCToolchain ? `-Wl,-x -Wl,-no_data_const` : `-x -no_data_const`) : system === :linux ? `-s` : system === :wasm ? `--strip-all` : ``
+small_flags(tc, system::Symbol) = system === :macos ? (tc isa StaticCompiler.CCToolchain ? `-Wl,-x -Wl,-no_data_const` : `-x -no_data_const`) : system === :linux ? `-s` : system === :windows ? `-s` : system === :wasm ? `--strip-all` : ``
 
 # link the objects of the program for the target to the executable `exe` (a module of WebAssembly, `exe.wasm`, with the host that runs it)
 function cross_link(cross::StaticCompiler.StaticTarget, obj::AbstractString, exe::AbstractString, small::Bool, extra::Cmd; objects::Vector{String} = String[])
@@ -205,7 +233,10 @@ wasm_host_source(platform::AbstractString) = read(joinpath(@__DIR__, "runtime", 
 # and the host's CPU are those that `StaticTarget(...; retarget)` gives: see `StaticCompiler.retarget!`.)
 function finalize_cross_module!(mod::LLVM.Module, cross::StaticCompiler.StaticTarget; prepare::Bool = true)
     system = triple_system(StaticCompiler.target_triple(cross))
+    # (for Windows the setjmp and longjmp of the host's system are replaced first: glibc's `__sigsetjmp` is a name that Windows has not, and the refusal in `rename_system_symbols!` would find it)
+    system === :windows && windows_sjlj!(mod, Symbol(triple_arch(StaticCompiler.target_triple(cross))))
     rename_system_symbols!(mod, system)
+    system === :windows && define_windows_streams!(mod)
     if system === :wasm
         wasm_sjlj!(mod)
         define_wasm_streams!(mod)
@@ -222,9 +253,19 @@ end
 # What the C libraries of the systems call the same: the standard streams that StaticTools has as globals (it chooses by the host's system when it is compiled), and `sigsetjmp` (glibc has it as a macro of
 # `__sigsetjmp`). And what the program may not have for a system that is not the host's: what only the host's system has (the code of this package for it is chosen by the target, so
 # these are from what is not: packages that choose by the host's system, as `Mmap` does with the flags of `mmap`, which are Julia's).
-const SYSTEM_RENAMES = Dict(:linux => ["__stdoutp" => "stdout", "__stderrp" => "stderr", "__stdinp" => "stdin", "sigsetjmp" => "__sigsetjmp"])
+# (both directions: the code is made on the host, and the names are those of the host's system, which is Linux on a Linux host, and macOS on a Mac, whichever the target is)
+const SYSTEM_RENAMES = Dict(:linux => ["__stdoutp" => "stdout", "__stderrp" => "stderr", "__stdinp" => "stdin", "sigsetjmp" => "__sigsetjmp"],
+                            :macos => ["stdout" => "__stdoutp", "stderr" => "__stderrp", "stdin" => "__stdinp", "__sigsetjmp" => "sigsetjmp"])
 const ONLY_MACOS = ["_NSGetEnviron", "getattrlist", "mach_host_self", "host_statistics", "sysctlbyname", "__error", "pthread_get_stackaddr_np", "pthread_get_stacksize_np", "_NSGetExecutablePath"]
 const ONLY_LINUX = ["__errno_location", "__libc_stack_end", "__sigsetjmp", "sysinfo"]
+# The functions that a program for Windows must not call: the POSIX ones that the C library of Windows does not have, and those that it has with other arguments or other structures (`open` has other flags, `stat` and `readdir`
+# other layouts, `errno` is a function of another name). The code of this package for files, directories, the environment and the clock does not call them for Windows (`overrides/windows.jl` has the wide functions of the C
+# library and those of Windows, in their place), so this is what is left of them if one is called, and a program that calls one is refused when it is made, with the name, as it would be a wrong call at run time otherwise: processes,
+# links, `mmap`, libraries loaded when the program runs (what Windows has in their place is not made yet), and anything that is called by a name that is in it.
+const ONLY_POSIX = ["open", "fopen", "fdopen", "stat", "lstat", "access", "mkdir", "rmdir", "chmod", "ftruncate", "symlink", "readlink", "realpath", "mkstemp", "mkdtemp", "opendir", "readdir", "closedir", "pipe", "waitpid",
+                    "posix_spawn", "posix_spawnp", "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy", "posix_spawn_file_actions_addopen", "posix_spawn_file_actions_addclose",
+                    "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addchdir_np", "mmap", "dlopen", "dlsym", "dlclose", "dlerror", "dladdr", "sysconf", "getpagesize", "getrlimit", "nanosleep",
+                    "clock_gettime", "getentropy", "setenv", "unsetenv", "strerror_r", "getcwd", "chdir", "gethostname", "pthread_self"]
 const HOST_FLAGS = ["mmap"]
 
 # a function or a global variable of the module
@@ -248,10 +289,89 @@ function rename_system_symbols!(mod::LLVM.Module, system::Symbol)
     for (from, to) in get(SYSTEM_RENAMES, system, Pair{String,String}[])
         rename_symbol!(mod, from, to)
     end
-    wrong = system === :linux ? ONLY_MACOS : system === :macos ? ONLY_LINUX : String[]
-    found = String[w for w in wrong if named_value(mod, w) !== nothing]
-    system === host_system() || append!(found, String[w for w in HOST_FLAGS if named_value(mod, w) !== nothing]) # (what the host's packages chose for the host's system is right for the host's system)
+    wrong = system === :linux ? ONLY_MACOS : system === :macos ? ONLY_LINUX : system === :windows ? [ONLY_MACOS; ONLY_LINUX; ONLY_POSIX] : String[]
+    # (a declaration that nothing calls is no use of the function: the module can have those of code that was not kept, and they are not linked)
+    used(w) = (v = named_value(mod, w); v !== nothing && !isempty(collect(LLVM.uses(v))))
+    found = String[w for w in wrong if used(w)]
+    system === host_system() || append!(found, String[w for w in HOST_FLAGS if used(w)]) # (what the host's packages chose for the host's system is right for the host's system)
     isempty(found) || throw(ArgumentError(string("the program uses ", join(("`$w`" for w in found), ", "), ", which a program for ", system, " does not have, or has other arguments for (the code of the host's system, chosen when a package was compiled)")))
+    return mod
+end
+
+## Windows
+
+# `try` of Julia is `sigsetjmp` and `throw` is `siglongjmp` (in the runtime of this package), which the C library of Windows has not: `_setjmp` of it keeps a buffer of 256 bytes (more than the host's `jmp_buf`, which is
+# the size of the handler that the program has for it) and `longjmp` unwinds the stack by the information that the frames have, and the buffers are not made for that. LLVM has its own: `llvm.eh.sjlj.setjmp`, which
+# keeps where to go in a buffer of five words (the caller keeps the frame in the first and the stack pointer in the third, as `__builtin_setjmp` of C does) and takes the registers as lost (so that what is live is in the
+# frame), and `llvm.eh.sjlj.longjmp`, which goes there with the value 1, which is what a `throw` gives.
+function windows_sjlj!(mod::LLVM.Module, arch::Symbol = :x86_64)
+    arch === :x86_64 || throw(ArgumentError("the exceptions of a program for Windows are made for x86-64 (the register of the frame is `rbp`): not for $arch yet"))
+    ptr, i32 = LLVM.PointerType(), LLVM.IntType(32)
+    intrinsics = Dict{String,LLVM.Function}()
+    intrinsic(name, ret, args) = get!(() -> (haskey(LLVM.functions(mod), name) ? LLVM.functions(mod)[name] : LLVM.Function(mod, name, LLVM.FunctionType(ret, args))), intrinsics, name)
+    for name in ("sigsetjmp", "__sigsetjmp", "siglongjmp", "__siglongjmp", "setjmp", "_setjmp_program", "longjmp")
+        haskey(LLVM.functions(mod), name) || continue
+        old = LLVM.functions(mod)[name]
+        setting = name in ("sigsetjmp", "__sigsetjmp", "setjmp", "_setjmp_program")
+        for use in collect(LLVM.uses(old))
+            call = LLVM.user(use)
+            call isa LLVM.CallBase || continue
+            LLVM.@dispose builder = LLVM.IRBuilder() begin
+                LLVM.position!(builder, LLVM.before(call))
+                buffer = first(LLVM.operands(call)) # (the buffer; the flag for the signal mask, and the value that `siglongjmp` gives, are dropped)
+                if setting
+                    # (the intrinsic keeps where to go, in the second word: the frame register is the first and the stack pointer the third, which the caller keeps. The register itself, which the code of the
+                    # function addresses its frame by, and not `llvm.frameaddress`, which is what `__builtin_setjmp` of C keeps, and on Windows is not the register but 0x80 below it)
+                    stacksave = intrinsic("llvm.stacksave.p0", ptr, LLVM.LLVMType[])
+                    frame_register = LLVM.InlineAsm(LLVM.FunctionType(ptr, LLVM.LLVMType[]), "movq %rbp, \$0", "=r,~{dirflag},~{fpsr},~{flags}", true)
+                    frame = LLVM.call!(builder, LLVM.FunctionType(ptr, LLVM.LLVMType[]), frame_register, LLVM.Value[])
+                    LLVM.alignment!(LLVM.store!(builder, frame, buffer), 8)
+                    stack = LLVM.call!(builder, LLVM.function_type(stacksave), stacksave, LLVM.Value[])
+                    stack_slot = LLVM.gep!(builder, LLVM.IntType(8), buffer, LLVM.Value[LLVM.ConstantInt(LLVM.IntType(64), 16)])
+                    LLVM.alignment!(LLVM.store!(builder, stack, stack_slot), 8)
+                    setjmp = intrinsic("llvm.eh.sjlj.setjmp", i32, [ptr])
+                    replacement = LLVM.call!(builder, LLVM.function_type(setjmp), setjmp, LLVM.Value[buffer])
+                    LLVM.replace_uses!(call, replacement)
+                else
+                    longjmp = intrinsic("llvm.eh.sjlj.longjmp", LLVM.VoidType(), [ptr])
+                    LLVM.call!(builder, LLVM.function_type(longjmp), longjmp, LLVM.Value[buffer])
+                end
+                LLVM.erase!(call)
+            end
+        end
+        isempty(collect(LLVM.uses(old))) && LLVM.erase!(old)
+    end
+    return mod
+end
+
+# The standard streams of the C library of Windows (`msvcrt`, which MinGW-w64 links with) are the elements of an array that `__iob_func()` returns (`stdin`, `stdout` and `stderr` are `&__iob_func()[0]`, `[1]` and `[2]`, each of
+# 48 bytes), and not variables that have the address: where the program has them as the globals of macOS (`__stdoutp`) or of Linux (`stdout`), what it loads from them is the call of a function.
+function define_windows_streams!(mod::LLVM.Module)
+    ptr, i64 = LLVM.PointerType(), LLVM.IntType(64)
+    streams = [(name, index) for (name, index) in ("__stdoutp" => 1, "__stderrp" => 2, "__stdinp" => 0, "stdout" => 1, "stderr" => 2, "stdin" => 0) if haskey(LLVM.globals(mod), name)]
+    isempty(streams) && return mod
+    iob = haskey(LLVM.functions(mod), "__iob_func") ? LLVM.functions(mod)["__iob_func"] : LLVM.Function(mod, "__iob_func", LLVM.FunctionType(ptr, LLVM.LLVMType[]))
+    getter = LLVM.Function(mod, "_static_stdstream", LLVM.FunctionType(ptr, [i64]))
+    LLVM.linkage!(getter, LLVM.API.LLVMInternalLinkage)
+    LLVM.@dispose builder = LLVM.IRBuilder() begin
+        LLVM.position!(builder, LLVM.at_end(LLVM.BasicBlock(getter, "entry")))
+        base = LLVM.call!(builder, LLVM.function_type(iob), iob, LLVM.Value[])
+        offset = LLVM.mul!(builder, LLVM.parameters(getter)[1], LLVM.ConstantInt(i64, 48))
+        LLVM.ret!(builder, LLVM.gep!(builder, LLVM.IntType(8), base, LLVM.Value[offset]))
+    end
+    for (name, index) in streams
+        g = LLVM.globals(mod)[name]
+        for use in collect(LLVM.uses(g))
+            load = LLVM.user(use)
+            load isa LLVM.LoadInst || throw(ArgumentError("the program uses the standard stream `$name` other than by loading it, which a program for Windows can not have: its streams are the elements of an array"))
+            LLVM.@dispose builder = LLVM.IRBuilder() begin
+                LLVM.position!(builder, LLVM.before(load))
+                LLVM.replace_uses!(load, LLVM.call!(builder, LLVM.function_type(getter), getter, LLVM.Value[LLVM.ConstantInt(i64, index)]))
+                LLVM.erase!(load)
+            end
+        end
+        isempty(collect(LLVM.uses(g))) && LLVM.erase!(g)
+    end
     return mod
 end
 
@@ -890,6 +1010,18 @@ function wasm_stack_top_prologue(builder, mod::LLVM.Module)
     return
 end
 
+# What a program for Windows does when it starts, before its entry point: its standard streams are put in binary mode. The C library of Windows opens them in text mode, which writes a line feed as a carriage return
+# and a line feed, and reads them as one (and an end of file for control-Z): what `println` writes in Julia is the line feed alone, on every system, and so are the files that a program reads and writes.
+# (`_setmode(descriptor, _O_BINARY)`, which is 0x8000: of the descriptors 0, 1 and 2.)
+function windows_startup_prologue(builder, mod::LLVM.Module)
+    i32 = LLVM.IntType(32)
+    setmode = haskey(LLVM.functions(mod), "_setmode") ? LLVM.functions(mod)["_setmode"] : LLVM.Function(mod, "_setmode", LLVM.FunctionType(i32, [i32, i32]))
+    for descriptor in 0:2
+        LLVM.call!(builder, LLVM.function_type(setmode), setmode, LLVM.Value[LLVM.ConstantInt(i32, descriptor), LLVM.ConstantInt(i32, 0x8000)])
+    end
+    return
+end
+
 ## Executables
 
 # the generator of `compile_executable` for a target that is not the host's (it is given the entry point as StaticCompiler's is: `f`, its `types`, the `path` and
@@ -908,11 +1040,12 @@ function cross_executable(f::Function, types = (), path::String = pwd(), name = 
     triple = StaticCompiler.target_triple(cross)
     wasm = triple_system(triple) === :wasm
     wasm && wasm_code_generator_options()
+    prologue = wasm ? wasm_stack_top_prologue : triple_system(triple) === :windows ? windows_startup_prologue : nothing
     cross = output === :llvmir ? cross : with_llc(cross) # (the IR needs no `llc`)
     target = codegen_target(cross)
     prepare = output !== :llvmir
     made = obj = joinpath(path, "$filename.$triple.$(output === :llvmir ? "ll" : "o")")
-    _, generated = StaticCompiler.generate_obj(funcs, path, filename; demangle, emit_llvm_only = output === :llvmir, main_wrapper = fn, main_prologue = wasm ? wasm_stack_top_prologue : nothing,
+    _, generated = StaticCompiler.generate_obj(funcs, path, filename; demangle, emit_llvm_only = output === :llvmir, main_wrapper = fn, main_prologue = prologue,
                                                llvm_finalize = mod -> finalize_cross_module!(mod, cross; prepare), kwargs..., target)
     mv(generated, made; force = true)
     output === :llvmir && return made

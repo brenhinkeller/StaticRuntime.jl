@@ -218,6 +218,26 @@ function stack_functions_ir(system::Symbol)
           %size = select i1 %bad, i64 1073741824, i64 %current
           ret i64 %size
         }"""
+    # Windows: the system says where the stack of the thread is, and how far it reaches (`GetCurrentThreadStackLimits` of kernel32, which has both ends: the low one is the end of what is reserved for it,
+    # which the system makes usable as the program needs it, and the high one is the base)
+    system === :windows && return """
+        declare void @GetCurrentThreadStackLimits(ptr, ptr)
+        define fastcc i64 @static_stack_base() {
+          %limits = alloca [2 x i64], align 16
+          %high = getelementptr inbounds [2 x i64], ptr %limits, i64 0, i64 1
+          call void @GetCurrentThreadStackLimits(ptr %limits, ptr %high)
+          %base = load i64, ptr %high
+          ret i64 %base
+        }
+        define fastcc i64 @static_stack_size() {
+          %limits = alloca [2 x i64], align 16
+          %high = getelementptr inbounds [2 x i64], ptr %limits, i64 0, i64 1
+          call void @GetCurrentThreadStackLimits(ptr %limits, ptr %high)
+          %low = load i64, ptr %limits
+          %base = load i64, ptr %high
+          %size = sub i64 %base, %low
+          ret i64 %size
+        }"""
     # WebAssembly: the stack is the shadow stack in the memory of the module, which grows down from the top that it had when the program started (the entry point records it, in the global that is defined
     # there: see `wasm_stack_top_prologue`, which `main` of `StaticCompiler.add_main_wrapper!` starts with). Its size is the one that the linker is asked for.
     system === :wasm && return """
@@ -239,7 +259,8 @@ function stack_functions_ir(system::Symbol)
         }"""
 end
 
-const HOST_SYSTEM = Sys.isapple() ? :macos : Sys.islinux() ? :linux : Sys.iswindows() ? :windows : :unknown
+# (the systems that the heap has the code for when it is compiled: for any other, a Windows host too, the functions of the system are those of the target, which replace the host's, see below)
+const HOST_SYSTEM = Sys.isapple() ? :macos : Sys.islinux() ? :linux : :other
 
 # a program for another system than the host's: the functions of the heap that ask the system for the stack are the ones of that system
 function replace_stack_functions!(heap::LLVM.Module)
@@ -335,7 +356,7 @@ function link_heap!(mod::LLVM.Module; gc = false, finalizers = true)
     haskey(fns, "static_alloc") && LLVM.isdeclaration(fns["static_alloc"]) || return false
     collect_garbage = gc !== false
     if collect_garbage
-        target_system() in (:macos, :linux, :wasm) || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
+        target_system() in (:macos, :linux, :windows, :wasm) || throw(ArgumentError("the garbage collector is not available on this system (use `gc = false`)"))
         run!(GlobalDCEPass(), mod) # (the roots refer to the objects, which would keep those that the code does not use)
         define_gc_roots!(mod)
         define_gc_stress!(mod, !(gc isa Bool) && gc isa Integer && gc > 0 ? gc : 0) # (`true` is an `Integer` too)

@@ -66,7 +66,35 @@ The code generator for the architecture has to be there too: Julia's LLVM has th
 
 ## Windows
 
-StaticCompiler.jl links a program for Windows (`StaticCompiler.LLDToolchain(:mingw)`, with the MinGW-w64 libraries that `StaticCompiler.mingw_sysroot` fetches with `using Mingw_jll, Pkg`), but the runtime of this package has no Windows support yet: the programs of this package are not made for it.
+`target = "x86_64-w64-mingw32"` makes a program for 64-bit Windows, from any host, and on Windows itself (where the programs that are made without a `target` are made this way too). The program is linked by the `lld` that Julia has, with the libraries of
+MinGW-w64 (`Mingw_jll`, fetched for any host, when the program is linked: IR and objects need none) and the C library of Windows that they link with, `msvcrt`; it is an `.exe` that needs no DLL but the system's. A program for the runtime of
+MSVC (`x86_64-pc-windows-msvc`) is refused. The architecture is x86-64 (the code for the host has to be made by a code generator for it, as for any other target: see above).
+
+**What it has, so far:** programs that print, that catch errors, that allocate and have the collector, that read the clock (`time_ns`, `time`), the arguments of the command line, **files, directories and the environment**, and that use the numbers of 128 bits and of
+`Float16` that the C library of Windows has no functions for (the program has them). How it is different from the other systems:
+
+* **Exceptions.** `try` and `throw` are LLVM's `llvm.eh.sjlj.setjmp` and `llvm.eh.sjlj.longjmp`, with a buffer of five words (the frame register, where to go, and the stack pointer), and not `sigsetjmp` and `siglongjmp`, which Windows has not (its `_setjmp`
+  keeps 256 bytes, which the handler of a program is not, and its `longjmp` unwinds by the information of the frames).
+* **The standard streams** are what `__iob_func()` of the C library has, and not the global variables that macOS and Linux have; and they are **binary** (`_setmode`) before the program starts, so that a line feed that a program writes is not turned into a
+  carriage return and a line feed, as it is not in Julia.
+* **The collector** asks the system for the stack of the thread (`GetCurrentThreadStackLimits`); the registers are saved by `_setjmp` of the C library. The stack of the main thread is 8 MiB, as it is on Linux and macOS (the linker's own is smaller).
+* **The clock** is the performance counter (`QueryPerformanceCounter`) and the file time of the system (`GetSystemTimePreciseAsFileTime`); `sleep` is `Sleep`, and the entropy of the system is `SystemFunction036`.
+* **Paths are UTF-8 in Julia**, and what the C library of Windows takes by default is the code page of the system: the functions that take a path are the wide ones (`_wfopen`, `_wopen`, `_wstat64`, `_wmkdir`, `_wunlink`, `_wgetcwd`, ...), given UTF-16 (`wide_cstring` in
+  `src/overrides/windows.jl`), so a file can have any name.
+* **Files** are streams of the C library, **binary** (the mode of `fopen` and the flags of `open` have `b` and `_O_BINARY`), with offsets of 64 bits (`_ftelli64`, `_fseeki64`: `ftell` and `fseek` take a `long`, which is 32 bits on Windows). **`rename`** (and so `mv`)
+  replaces what is there, and works from one volume to another, as Julia's (`MoveFileExW`); **directories** are read with `FindFirstFileW`; **`stat`** is `_wstat64` (the blocks and the size of a block are made up as libuv makes them, the number of links and the
+  times are the system's, and there are no links: `lstat` is `stat`); **`realpath`** is the full path of a file that is there (`GetFullPathNameW`); **temporary names** are made of the system's entropy and made new (`O_EXCL`); **`ENV`** is `_wgetenv` and `_wputenv_s`
+  (a variable that is set to nothing is removed); and **`chmod`** is whether the file can be written, which is all that Windows has of a mode.
+* **The numbers of `errno`** are those of the C library of Windows (`ENOTEMPTY` is 41, where Linux has 39 and macOS 66), and an error of one of Windows's own functions (`GetLastError()`) is turned into the `errno` that the C library would have (`windows_errno`).
+* **The paths follow the host's `Base`** in what is chosen by the system when Base is compiled (the separator of `joinpath`, what an absolute path looks like): a program for Windows that is made on Linux or macOS joins paths with `/`, which Windows accepts.
+
+**What it has not, yet:** processes (`run`, `pipeline`, `success`), links (`symlink` and `readlink` need a privilege), loading libraries when the program runs, `mmap`, locks, ownership and permissions other than whether a file can be written, and paths that are longer than 260
+characters (they need the prefix `\\?\`). A program that uses them is refused when it is made, with the functions that it uses (`ONLY_POSIX` in `src/cross.jl`). Shared libraries (`compile_shlib`) are not made for Windows. The code page of the console is not
+changed: text that is not ASCII is written as UTF-8, which a console shows as it is set to.
+
+**What has been checked.** The programs are made, linked (against the libraries of MinGW-w64, so every function that they call is one that the libraries have) and, on a Mac, the IR and the code that LLVM makes for the exceptions are looked at; the tests
+(`test/core/target.jl`, "A program for Windows") check the IR on any host. That the programs run is checked in CI, on Windows (`.github/workflows/cross.yml`: the programs of `test/cross/programs.jl` that Windows is not refused for are made on every kind of host and
+run on a Windows machine): that is the one thing here that has not been run by the person who wrote it, as there was no Windows machine to run it on.
 
 ## WebAssembly
 
@@ -107,6 +135,7 @@ The program runs to its end where `run` is called, so in a page it belongs in a 
 | macOS, AArch64 | `aarch64-apple-macosx...`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu` | made and linked (21 programs) by `lld` with a glibc sysroot (Linux: with the `llc` above for x86-64), and by Apple's linker for macOS; the Linux ones are run in CI on a Linux machine of the architecture (`cross.yml`) |
 | Linux, x86-64 and AArch64 | Linux and macOS of the architecture | made in CI (macOS with a downloaded SDK), and run on a machine of the target: Linux on both architectures, macOS on Intel and on Apple Silicon |
 | any | `wasm64-unknown-unknown` | works, with Node.js 24 or later; 19 of the 21 programs of `test/cross/programs.jl` do what the native ones do, exceptions, files and the collector included (the others use processes, or vectors of `Float16`) |
+| any | `x86_64-w64-mingw32` | made and linked (20 of the 21 programs: all but the one that uses processes); run in CI on Windows (see above) |
 | others | | not tried |
 
 Code that Base chooses by the host's system when Base is compiled is the host's: what a program that uses it does on another system is not checked (the standard library functions that this package replaces are, see above). Libraries that are loaded when the program runs (BigInt, BLAS) are the host's, and are not for another system. The conversions between `Float16` and `Float32` on x86-64 use the instructions of F16C (a CPU of 2012 or later); on WebAssembly they are made by integer arithmetic.

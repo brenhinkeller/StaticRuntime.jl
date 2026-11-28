@@ -1,6 +1,7 @@
 name: Cross-compiling matrix
 # What programs of StaticRuntime can be made from each kind of host, for each target (test/cross/matrix.jl: a table in the summary of each job), and whether what was made does what the native programs do on a
-# machine of its target (test/cross/run.jl). It is the same as the workflow of StaticCompiler.jl, with the programs of this package, which are made for Linux, macOS and WebAssembly (not Windows yet).
+# machine of its target (test/cross/run.jl). It is the same as the workflow of StaticCompiler.jl, with the programs of this package, which are made for Linux, macOS, Windows (those that need no processes yet) and WebAssembly.
+# Windows is a host too: its programs are made by `lld` and the libraries of MinGW-w64 (Mingw_jll), as they are made on the other hosts for Windows.
 # This is where the cross-compilation of the package is tested in CI: the tests of `CI.yml` do not have the group `Cross` (`test/cross/runtests.jl` is for a machine of someone: `GROUP=Cross`, or `All`).
 # A host makes what Julia's LLVM has the code generator for (its own architecture, and WebAssembly), and what it has the libraries for: those of Linux are fetched (Glibc_jll); the SDK of macOS is Xcode's, or one that is
 # downloaded (phracker/MacOSX-SDKs) on a Linux host; the other architecture's code generator (an `llc` for x86-64 on an Apple Silicon Mac: LLVM_full_jll, which Rosetta runs) is 2 GB and is left out here: a run of the group `Cross` on a machine of someone does that (test/cross/host.jl),
@@ -34,6 +35,7 @@ jobs:
           - ubuntu-24.04-arm
           - macos-latest
           - macos-15-intel # (the last runner with an Intel CPU)
+          - windows-latest
         include:
           - os: ubuntu-latest
             arch: x64
@@ -42,6 +44,8 @@ jobs:
           - os: macos-latest
             arch: aarch64
           - os: macos-15-intel
+            arch: x64
+          - os: windows-latest
             arch: x64
     steps:
       - uses: actions/checkout@v4
@@ -59,8 +63,10 @@ jobs:
           echo "SDKROOT=$PWD/MacOSX11.3.sdk" >> "$GITHUB_ENV"
           rm sdk.tar.xz
       - name: The environment of the matrix
+        shell: bash
         run: julia --project=test/cross -e 'using Pkg; Pkg.instantiate()'
       - name: What is made
+        shell: bash
         run: julia --project=test/cross test/cross/matrix.jl made
       - uses: actions/upload-artifact@v4
         if: always()
@@ -81,6 +87,7 @@ jobs:
           - ubuntu-24.04-arm
           - macos-latest
           - macos-15-intel
+          - windows-latest
         include:
           - os: ubuntu-latest
             arch: x64
@@ -89,6 +96,8 @@ jobs:
           - os: macos-latest
             arch: aarch64
           - os: macos-15-intel
+            arch: x64
+          - os: windows-latest
             arch: x64
     steps:
       - uses: actions/checkout@v4
@@ -105,4 +114,5 @@ jobs:
           path: made
           merge-multiple: true
       - name: Run what was made for this machine
+        shell: bash
         run: julia test/cross/run.jl made

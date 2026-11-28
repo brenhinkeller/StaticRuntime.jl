@@ -1009,7 +1009,8 @@ end
     if scan_stack
         # the registers are saved in the state (a buffer in memory that is not the stack), and the stack is from here to
         # the base
-        buffer = state() + (S_REGS - 1) * 8
+        # (16-byte aligned: the `_setjmp` of Windows keeps `xmm6` to `xmm15` with `movaps`, which faults on an address that is not. It is the last 512 bytes of the state, which is 2048 bytes)
+        buffer = (state() + (S_REGS - 1) * 8 + 15) & ~UInt(15)
         save_registers(buffer)
         scan(buffer, buffer + 512)
         scan(stack_pointer(), stack_base()) # (the base of the stack of the thread that is collecting, where that is known: a library may be called from other threads than that of the first allocation)

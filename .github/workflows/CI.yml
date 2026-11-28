@@ -26,10 +26,9 @@ jobs:
           - 'pre' # the latest prerelease (1.14 has no release yet; change to '1.14' once it does)
         group:
           - Core
-        # the collector as it is by default, and in stress mode (a collection every 3 allocations,
-        # freed memory overwritten), which finds objects that the collector fails to see
+        # the collector in stress mode (a collection every 3 allocations, freed memory overwritten),
+        # which can find objects that the collector fails to see.
         gc:
-          - 'true'
           - '3'
         # Linux and macOS, on x86 and ARM (the compiled code is native, so the platforms differ)
         os:
@@ -45,6 +44,11 @@ jobs:
             arch: aarch64
           - os: macos-latest
             arch: aarch64
+          - os: ubuntu-latest
+            arch: x64
+            version: 'pre'
+            group: Core
+            gc: auto
     steps:
       - uses: actions/checkout@v2
       - uses: julia-actions/setup-julia@v2

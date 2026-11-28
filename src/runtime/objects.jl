@@ -27,16 +27,27 @@ end
 # The globals have no type-tag header, since there is no type object to tag them with.
 
 # A word of memory at `addr`, or `nothing` if it is not readable. The kernel checks the
-# address when we ask it to copy the word into a pipe, so we don't crash on a bad pointer.
+# address when we ask it to copy the word into a pipe (or, on Windows, to read it from this process:
+# `ReadProcessMemory` says whether it could), so we don't crash on a bad pointer.
 const PIPE_FDS = Cint[-1, -1]
 
-function safe_load(addr::UInt)::Union{UInt,Nothing}
-    PIPE_FDS[1] < 0 && (ccall(:pipe, Cint, (Ptr{Cint},), PIPE_FDS) == 0 || error("pipe failed"))
-    n = ccall(:write, Cssize_t, (Cint, UInt, Csize_t), PIPE_FDS[2], addr, 8)
-    n == 8 || return nothing
-    out = Ref{UInt}(0)
-    ccall(:read, Cssize_t, (Cint, Ptr{UInt}, Csize_t), PIPE_FDS[1], out, 8) == 8 || return nothing
-    return out[]
+@static if Sys.iswindows()
+    function safe_load(addr::UInt)::Union{UInt,Nothing}
+        out = Ref{UInt}(0)
+        got = Ref{UInt}(0)
+        process = ccall((:GetCurrentProcess, "kernel32"), Ptr{Cvoid}, ())
+        ok = ccall((:ReadProcessMemory, "kernel32"), Cint, (Ptr{Cvoid}, UInt, Ptr{UInt}, Csize_t, Ptr{UInt}), process, addr, out, 8, got)
+        return ok != 0 && got[] == 8 ? out[] : nothing
+    end
+else
+    function safe_load(addr::UInt)::Union{UInt,Nothing}
+        PIPE_FDS[1] < 0 && (ccall(:pipe, Cint, (Ptr{Cint},), PIPE_FDS) == 0 || error("pipe failed"))
+        n = ccall(:write, Cssize_t, (Cint, UInt, Csize_t), PIPE_FDS[2], addr, 8)
+        n == 8 || return nothing
+        out = Ref{UInt}(0)
+        ccall(:read, Cssize_t, (Cint, Ptr{UInt}, Csize_t), PIPE_FDS[1], out, 8) == 8 || return nothing
+        return out[]
+    end
 end
 
 # throw `EmbedFailure` unless the `n` bytes at `addr` can be read

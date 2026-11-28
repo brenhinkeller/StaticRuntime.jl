@@ -8,8 +8,8 @@
 using Glibc_jll, Pkg # (the extension of StaticCompiler that fetches the glibc of a Linux target)
 include("host.jl")
 
-# the targets: the triples of the systems that StaticRuntime makes programs for (not Windows: its runtime has no support for it yet)
-const CROSS_TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-apple-macosx11.0.0", "x86_64-apple-macosx11.0.0", "wasm64-unknown-unknown"]
+# the targets: the triples of the systems that StaticRuntime makes programs for (Windows too: the programs that need no processes yet, which the others are refused)
+const CROSS_TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-apple-macosx11.0.0", "x86_64-apple-macosx11.0.0", "x86_64-w64-mingw32", "wasm64-unknown-unknown"]
 
 # the version of Julia's LLVM, which an `llc` has to be (`18.1.7`, `23.1.4`: the versions of `LLVM_full_jll`)
 llvm_version() = Base.libllvm_version

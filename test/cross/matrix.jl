@@ -24,10 +24,12 @@ for triple in CROSS_TARGETS
     status = try
         built, refused = CrossPrograms.build_programs(target, dir)
         for (name, reason) in refused; println("   refused ", name, ": ", reason); end
-        (; made = "$(length(built)) of $(length(CrossPrograms.PROGRAMS))", note = isempty(refused) ? "" : "refused: " * join(first.(refused), ", "))
+        (; made = "$(length(built)) of $(length(CrossPrograms.PROGRAMS))", note = isempty(refused) ? "" : string("refused: ", join(first.(refused), ", "), " (", first(replace(string(last(first(refused))), '\n' => " "), 160), ")"))
     catch e
         msg = first(split(sprint(showerror, e), '\n'))
         println("   fails: ", msg)
+        # (an error in a pass of the code generator says only that: the exception that it had, and where, are in the log)
+        println(first(sprint(showerror, e, catch_backtrace()), 6000))
         (; made = "fails", note = first(msg, 120))
     end
     println("   made: ", status.made, isempty(status.note) ? "" : " (" * status.note * ")")

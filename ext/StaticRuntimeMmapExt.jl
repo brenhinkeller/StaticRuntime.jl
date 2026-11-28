@@ -30,7 +30,7 @@ function mmap_file(path::String, ::Type{Array{T,N}}, dims::NTuple{N,Integer}, of
     offset >= 0 || throw(ArgumentError("requested offset must be ≥ 0, got $offset"))
     exists = isfile(path)
     fd = exists ? ccall(:open, Cint, (Cstring, Cint), path, Cint(0)) :
-                  ccall(:open, Cint, (Cstring, Cint, Base.Cmode_t...), path, Cint(2) | O_CREAT | O_TRUNC, Base.Cmode_t(0o666))
+                  ccall(:open, Cint, (Cstring, Cint, Cuint...), path, Cint(2) | O_CREAT | O_TRUNC, Cuint(0o666))
     fd < 0 && mmap_error("open", path)
     wanted = Int(offset) + len
     if exists

@@ -137,16 +137,22 @@ end
         text = string(m)
         @test occursin("@stdout", text) && occursin("@stderr", text) && occursin("@__sigsetjmp", text) && !occursin("__stdoutp", text) && !occursin(r"@sigsetjmp\b", text)
         LLVM.dispose(m)
+        # macOS: the same the other way, for a program that was made on a host with Linux's names (`stdout`, and glibc's `__sigsetjmp`, which macOS has not: it has `sigsetjmp`)
+        m = parse_module("@stdout = external global ptr\n@stderr = external global ptr\ndeclare i32 @__sigsetjmp(ptr, i32)\ndefine ptr @f() {\n  %p = load ptr, ptr @stdout\n  ret ptr %p\n}\n")
+        StaticRuntime.rename_system_symbols!(m, :macos)
+        text = string(m)
+        @test occursin("@__stdoutp", text) && occursin("@__stderrp", text) && occursin(r"@sigsetjmp\b", text) && !occursin(r"@(stdout|stderr)\b", text) && !occursin("@__sigsetjmp", text)
+        LLVM.dispose(m)
         # (a name that is there already: the uses go to it)
         m = parse_module("@stdout = external global ptr\n@__stdoutp = external global ptr\ndefine ptr @f() {\n  %p = load ptr, ptr @__stdoutp\n  ret ptr %p\n}\n")
         StaticRuntime.rename_system_symbols!(m, :linux)
         @test count("@stdout", string(m)) == 2 && !occursin("__stdoutp", string(m))
         LLVM.dispose(m)
         # what the other system has and this has not is refused, as is what the host's packages chose for the host's system
-        m = parse_module("declare ptr @_NSGetEnviron()\n")
+        m = parse_module("declare ptr @_NSGetEnviron()\ndefine ptr @f() {\n  %p = call ptr @_NSGetEnviron()\n  ret ptr %p\n}\n")
         @test_throws ArgumentError StaticRuntime.rename_system_symbols!(m, :linux)
         LLVM.dispose(m)
-        m = parse_module("declare i64 @mmap(ptr, i64, i32, i32, i32, i64)\n")
+        m = parse_module("declare i64 @mmap(ptr, i64, i32, i32, i32, i64)\ndefine i64 @f() {\n  %p = call i64 @mmap(ptr null, i64 1, i32 1, i32 1, i32 1, i64 0)\n  ret i64 %p\n}\n")
         @test_throws ArgumentError StaticRuntime.rename_system_symbols!(m, :wasm)
         LLVM.dispose(m)
 
@@ -173,4 +179,117 @@ end
 @testset "what is refused" begin
     # (the IR of the host is refused by `StaticCompiler.retarget!`, which a program of the host's intrinsics for another architecture meets)
     @test_throws ArgumentError StaticRuntime.cross_link(StaticRuntime.cross_target("x86_64-pc-windows-msvc"), "a.o", "a", false, ``)
+end
+
+# A program for Windows: by the target, in the IR and with no tool that is not Julia (`output = :llvmir`: no code generator for x86-64 is needed, nor the libraries of MinGW-w64), and on any host
+@testset "A program for Windows" begin
+    triple = "x86_64-w64-mingw32"
+    entry = (Int, Ptr{Ptr{UInt8}})
+    ir(f) = (main = StaticRuntime.make_main(f); read(Base.invokelatest(compile_executable, main, entry, mktempdir(), string(nameof(main)); target = triple, output = :llvmir), String))
+    text = ir(() -> (println("hello, ", opaque(6) * 7); try; parse(Int, opaque("x")); catch e; showerror(STDERR, e); println(STDERR); end; println(time_ns() > 0); 0))
+    has(pattern) = occursin(pattern, text) # (so that a failure does not print all of the IR)
+    @test has("target triple = \"x86_64-w64-windows-gnu\"") && !has("target datalayout")
+    # `try` and `throw` are LLVM's own setjmp and longjmp, which keep five words, and not the `sigsetjmp` that the host's Julia has, which Windows has not (and its `_setjmp` is 256 bytes, which a handler is not)
+    @test has("@llvm.eh.sjlj.setjmp") && has("@llvm.eh.sjlj.longjmp") && !has(r"@(sigsetjmp|siglongjmp|__sigsetjmp)\b")
+    # (the buffer has the frame register and the stack pointer as well, which the throw puts back: the register that the code addresses its frame by, which on Windows is not `llvm.frameaddress`)
+    @test has("movq %rbp, \$0") && has("@llvm.stacksave.p0") && !has("@llvm.frameaddress")
+    # the standard streams are what `__iob_func()` has, and no global of macOS or Linux is left
+    @test has("@__iob_func") && !has(r"@(__stdoutp|__stderrp|__stdinp|stdout|stderr|stdin)\b")
+    # they are binary before the entry point runs: no line feed becomes a carriage return and a line feed
+    @test all(has("call i32 @_setmode(i32 $fd, i32 32768)") for fd in 0:2)
+    # the collector asks the system for the stack of the thread
+    @test has("@GetCurrentThreadStackLimits") && !has(r"@(getrlimit|pthread_self|pthread_get_stackaddr_np|__libc_stack_end)\b")
+    # the clock is the performance counter, and the time of day the file time of the system
+    @test has("@QueryPerformanceCounter") && !has("@clock_gettime")
+    # only what the C library of Windows has, or what is for it: none of what a program for it is refused for
+    declared = String[m.captures[1] for m in eachmatch(r"^declare [^@\n]*@\"?([^\"(\s]+)"m, text)]
+    @test isempty(intersect(declared, StaticRuntime.ONLY_POSIX)) && isempty(intersect(declared, ["__errno_location", "__error", "pthread_self"]))
+
+    # the C library has not the 128-bit division, nor the conversions of `Float16` where the CPU has not them: the program has them (the conventions of the library calls of Windows: the code generator for it passes
+    # the operands by address and takes the result from `xmm0`, and passes a `Float16` in `xmm0`)
+    # (a dividend that is larger than 64 bits: the division of what was widened from 64 bits is made in 64)
+    text = ir(() -> (x = (UInt128(opaque(1)) << 100) + UInt128(opaque(5)); y = UInt128(opaque(7)); s = Int128(x) * Int128(opaque(-3)); println(x ÷ y, " ", x % y, " ", s ÷ Int128(opaque(5)), " ", s % Int128(opaque(5)), " ", Float16(opaque(2.5f0)) * Float16(opaque(1.5f0))); 0))
+    @test has(r"define [^\n]*<2 x i64> @__udivti3\(ptr %pa, ptr %pb\)") && has(r"define [^\n]*half @__truncsfhf2\(float") && has("___chkstk_ms:") # (the probe of the stack, in assembly that the module has)
+
+    # what is not made for Windows yet is refused when the program is made, with what it is: processes, and links (which need a privilege there)
+    for (name, f) in ("posix_spawnp" => () -> (run(`echo hi`); 0), "symlink" => () -> (symlink(opaque("a"), opaque("b")); 0), "readlink" => () -> (println(readlink(opaque("a"))); 0))
+        spawn = StaticRuntime.make_main(f)
+        err = try; Base.invokelatest(compile_executable, spawn, entry, mktempdir(), string(nameof(spawn)); target = triple, output = :llvmir); nothing; catch e; e; end
+        @test err isa ArgumentError && occursin(name, err.msg) && occursin("windows", err.msg)
+    end
+
+    # the libraries to link with are found when the program is linked, and not when the target is made (nothing is fetched for IR and objects), and a program for the MSVC runtime is refused: it is linked with MinGW-w64's
+    @test StaticRuntime.cross_target(triple).toolchain isa StaticRuntime.MinGWToolchain
+    @test StaticRuntime.cross_target(triple; sysroot = "/some/root").toolchain isa StaticRuntime.StaticCompiler.LLDToolchain
+    @test StaticRuntime.cross_target("x86_64-pc-windows-msvc").toolchain isa StaticRuntime.NoLinker
+end
+
+# Files, directories, the environment and the system for Windows (src/overrides/windows.jl). The pure part, which is Julia code that runs here whatever the host is; and the programs, in the IR for the target, with the functions that they
+# call: the wide ones of the C library and of Windows, and none that a program for Windows is refused for. The arguments are not constants (a constant is evaluated when the program is compiled, and what is wrong with a call is not seen).
+@testset "Files and the system for Windows" begin
+    SR = StaticRuntime
+    # UTF-8 and UTF-16: what Windows's functions take, and give
+    for s in ("", "abc", "héllo wörld", "日本語/テスト.txt", "emoji 😀 and 𝄞", "C:\\Users\\x\\a b.txt")
+        w = SR.wide_cstring(s)
+        @test w[end] == 0 && SR.narrow_string(w) == s && SR.narrow_string(pointer(w), length(w) - 1) == s
+    end
+    @test SR.wide_cstring("😀") == UInt16[0xd83d, 0xde00, 0] && SR.wide_cstring("é") == UInt16[0x00e9, 0]
+    @test SR.narrow_string(UInt16[0xd83d, 0x0041, 0]) == "\ufffdA" && SR.narrow_string(UInt16[0xdc00, 0]) == "\ufffd" # (half of a pair of surrogates)
+    @test SR.windows_trimmed("a/b//") == "a/b" && SR.windows_trimmed("a\\b\\") == "a\\b" && SR.windows_trimmed("/") == "/" && SR.windows_trimmed("C:\\") == "C:\\" && SR.windows_trimmed("C:/") == "C:/" && SR.windows_trimmed("a") == "a"
+    # the errors of Windows, as `errno`: the numbers of the C library of Windows (`ENOTEMPTY` is 41, and the numbers of the other systems are not)
+    @test SR.windows_errno(UInt32(2)) == 2 && SR.windows_errno(UInt32(3)) == 2 && SR.windows_errno(UInt32(5)) == 13 && SR.windows_errno(UInt32(183)) == 17 && SR.windows_errno(UInt32(80)) == 17
+    @test SR.windows_errno(UInt32(17)) == 18 && SR.windows_errno(UInt32(267)) == 20 && SR.windows_errno(UInt32(123)) == 22 && SR.windows_errno(UInt32(112)) == 28 && SR.windows_errno(UInt32(99999)) == 5
+    SR.Runtime.with_target(:windows, :x86_64) do
+        @test SR.windows_errno(UInt32(145)) == 41 && SR.errno_enotempty() == 41 && SR.errno_eloop() == 114
+    end
+    SR.Runtime.with_target(:linux, :x86_64) do
+        @test SR.errno_enotempty() == 39 && SR.errno_eloop() == 40
+    end
+    SR.Runtime.with_target(:macos, :aarch64) do
+        @test SR.errno_enotempty() == 66 && SR.errno_eloop() == 62
+    end
+    # `struct _stat64`, as the C library of Windows has it (the offsets are those of its header)
+    buf = zeros(UInt8, 64)
+    put(T, offset, x) = GC.@preserve buf unsafe_store!(Ptr{T}(pointer(buf) + offset), x)
+    put(UInt32, 0, UInt32(2)); put(UInt16, 6, UInt16(0o100666)); put(Int16, 8, Int16(1)); put(Int64, 24, Int64(1234)); put(Int64, 32, Int64(1700000000)); put(Int64, 40, Int64(1700000100)); put(Int64, 48, Int64(1600000000))
+    st = SR.windows_stat_fields("a.txt", buf)
+    @test st.size == 1234 && st.mode == 0o100666 && isfile(st) && !isdir(st) && st.mtime == 1700000100.0 && st.ctime == 1600000000.0 && st.nlink == 1 && st.blksize == 4096 && st.blocks == 3 && st.ioerrno == 0
+    put(UInt16, 6, UInt16(0o040777))
+    @test isdir(SR.windows_stat_fields("d", buf))
+    # a mode of `fopen` is binary, a mode of `chmod` is whether the file can be written
+    @test SR.windows_binary_mode("r") == "rb" && SR.windows_binary_mode("r+") == "r+b" && SR.windows_binary_mode("wb") == "wb" && SR.windows_binary_mode("a+") == "a+b"
+    @test SR.windows_chmod_mode(0o644) == 0x180 && SR.windows_chmod_mode(0o444) == 0x100
+
+    # each in a program, and in the IR of it for the target
+    entry = (Int, Ptr{Ptr{UInt8}})
+    ir(f) = (main = StaticRuntime.make_main(f); read(Base.invokelatest(compile_executable, main, entry, mktempdir(), string(nameof(main)); target = "x86_64-w64-mingw32", output = :llvmir), String))
+    programs = [
+        "open with a mode"  => (["_wfopen", "fclose", "fwrite"],        () -> (open(opaque("a.txt"), "w") do io; write(io, "x"); end; 0)),
+        "open with flags"   => (["_wopen", "_fdopen"],                  () -> (io = open(opaque("a.txt"); write = true, create = true, append = true); println(io, "x"); close(io); 0)),
+        "read a file"       => (["_wopen", "_fdopen"],                  () -> (println(read(opaque("a.txt"), String)); 0)),
+        "offsets of 64 bits" => (["_fseeki64", "_ftelli64"],            () -> (io = open(opaque("a.txt")); seek(io, 3); println(position(io), " ", filesize(io)); close(io); 0)),
+        "stat"              => (["_wstat64"],                           () -> (println(isfile(opaque("a")), isdir(opaque("a")), filesize(opaque("a")), mtime(opaque("a"))); 0)),
+        "ispath"            => (["_waccess"],                           () -> (println(ispath(opaque("a"))); 0)),
+        "mkdir and rm"      => (["_wmkdir", "_wrmdir", "_wunlink"],     () -> (mkdir(opaque("d")); rm(opaque("d")); rm(opaque("f")); 0)),
+        "readdir"           => (["FindFirstFileW", "FindNextFileW", "FindClose"], () -> (println(readdir(opaque("."))); 0)),
+        "mv"                => (["MoveFileExW"],                        () -> (mv(opaque("a"), opaque("b"); force = true); 0)),
+        "cd and pwd"        => (["_wchdir", "_wgetcwd"],                () -> (cd(opaque(".")); println(pwd()); 0)),
+        "realpath"          => (["GetFullPathNameW"],                   () -> (println(realpath(opaque("."))); 0)),
+        "chmod"             => (["_wchmod"],                            () -> (chmod(opaque("a"), 0o644); 0)),
+        "temporary names"   => (["GetTempPathW", "SystemFunction036", "_waccess", "_wopen", "_wmkdir"], () -> (println(tempname()); (path, io) = mktemp(); close(io); println(mktempdir()); 0)),
+        "the environment"   => (["_wgetenv", "_wputenv_s"],             () -> (ENV[opaque("A")] = opaque("b"); println(get(ENV, opaque("A"), "none"), haskey(ENV, opaque("A"))); delete!(ENV, opaque("A")); 0)),
+        "sleep"             => (["Sleep"],                              () -> (sleep(0.01); 0)),
+        "entropy"           => (["SystemFunction036"],                  () -> (x = Vector{UInt8}(undef, 8); Base.Libc.getrandom!(x); println(sum(x)); 0)),
+    ]
+    for (name, (wanted, f)) in programs
+        @testset "$name" begin
+            text = ir(f)
+            declared = String[m.captures[1] for m in eachmatch(r"^declare [^@\n]*@\"?([^\"(\s]+)"m, text)]
+            @test all(w in declared for w in wanted)
+            # no function that a program for Windows is refused for (they are the POSIX ones, and the names of the other systems), and no call that is a type error that always throws (the argument of a call of a function of
+            # Windows has to be of the type that is said: `Int32(0)::Int32`, and not `0::Int32`)
+            @test isempty(intersect(declared, SR.ONLY_POSIX)) && isempty(intersect(declared, ["__errno_location", "__error", "pthread_self"]))
+            @test !occursin("in ccall argument", text)
+        end
+    end
 end

@@ -10,13 +10,17 @@ rows = NamedTuple[]
 for made_on in sort(readdir(dir)), triple in sort(readdir(joinpath(dir, made_on)))
     runs_here(triple) || continue
     println("\n## made on ", made_on, " for ", triple)
-    ok = check(joinpath(dir, made_on, triple); node = something(node_command(), `node`))
+    failures = check_programs(joinpath(dir, made_on, triple); node = something(node_command(), `node`))
     count = length(readdir(joinpath(dir, made_on, triple)))
-    push!(rows, (; made_on, triple, count, ok))
+    push!(rows, (; made_on, triple, count, failures, ok = isempty(failures)))
 end
 
 host = string(host_arch(), "-", host_system())
-table = string("| made on | for | programs | run on `", host, "` |\n|:--|:--|:--|:--|\n", join(("| $(r.made_on) | `$(r.triple)` | $(r.count) | $(r.ok ? "ok" : "FAILS") |" for r in rows), "\n"), "\n")
-println("\n", isempty(rows) ? "none of those that were made are for this machine" : table)
-haskey(ENV, "GITHUB_STEP_SUMMARY") && open(io -> println(io, "\n### Programs run on ", host, "\n\n", isempty(rows) ? "none of those that were made are for this machine" : table), ENV["GITHUB_STEP_SUMMARY"], "a")
+status(r) = r.ok ? "ok" : string("FAILS: ", join((f.name for f in r.failures), ", "))
+table = string("| made on | for | programs | run on `", host, "` |\n|:--|:--|:--|:--|\n", join(("| $(r.made_on) | `$(r.triple)` | $(r.count) | $(status(r)) |" for r in rows), "\n"), "\n")
+# what the first of the programs that failed did, and what it should have done: the standard output, the standard error and the exit status (truncated)
+short(x) = (s = repr(x); length(s) > 400 ? string(first(s, 400), "...") : s)
+details = join((string("\n**made on ", r.made_on, " for `", r.triple, "`, `", f.name, "`**\n\n    got   ", short(f.got), "\n    want  ", short(f.want), "\n") for r in rows if !r.ok for f in first(r.failures, 3)), "")
+println("\n", isempty(rows) ? "none of those that were made are for this machine" : table, details)
+haskey(ENV, "GITHUB_STEP_SUMMARY") && open(io -> println(io, "\n### Programs run on ", host, "\n\n", isempty(rows) ? "none of those that were made are for this machine" : string(table, details)), ENV["GITHUB_STEP_SUMMARY"], "a")
 all(r -> r.ok, rows) || exit(1)

@@ -136,6 +136,7 @@ using StaticTools: fopen, fclose, ftell, fseek, frewind, SEEK_SET, SEEK_CUR, SEE
 # A `String` is terminated by a NUL, as C wants it, and a `SubString` is not
 function open_file(path::AbstractString, mode::AbstractString)
     path, mode = String(path), String(mode)
+    target_windows() && return windows_open_file(path, mode)
     fp = GC.@preserve path mode fopen(pointer(path), pointer(mode))
     fp == C_NULL && throw(ErrorException(string("could not open file ", path)))
     return StaticFile(fp)
@@ -153,9 +154,9 @@ calling `f(io)`.
 @device_override Base.open(path::AbstractString, mode::AbstractString) = open_file(path, mode)
 
 # the flags of `open` of each system (the access is `O_RDONLY` 0, `O_WRONLY` 1 or `O_RDWR` 2)
-@inline o_append() = target_choice(Cint(0x8), Cint(0x400))
-@inline o_creat() = target_choice(Cint(0x200), Cint(0x40))
-@inline o_trunc() = target_choice(Cint(0x400), Cint(0x200))
+@inline o_append() = target_value(Cint(0x8), Cint(0x400), Cint(0x8))
+@inline o_creat() = target_value(Cint(0x200), Cint(0x40), Cint(0x100))
+@inline o_trunc() = target_value(Cint(0x400), Cint(0x200), Cint(0x200))
 
 # The file as Base opens it: the flags are those that Base works out from the keywords (`Base.open_flags`), as `open` of the
 # system takes them, and the stream is made from the descriptor with the mode that its access is (what is there is not
@@ -164,9 +165,10 @@ function open_file_with_flags(path::AbstractString, read::Bool, write::Bool, cre
     path = String(path)
     access = read && write ? Cint(2) : write ? Cint(1) : Cint(0)
     flags = access | (create ? o_creat() : Cint(0)) | (truncate ? o_trunc() : Cint(0)) | (append ? o_append() : Cint(0))
-    fd = GC.@preserve path ccall(:open, Cint, (Cstring, Cint, Base.Cmode_t...), path, flags, Base.Cmode_t(0o666))
-    fd < 0 && throw(ErrorException(string("could not open file ", path)))
     mode = append ? (read ? "a+" : "a") : read && write ? "r+" : write ? "w" : "r"
+    target_windows() && return windows_open_file_with_flags(path, flags, mode)
+    fd = GC.@preserve path ccall(:open, Cint, (Cstring, Cint, Cuint...), path, flags, Cuint(0o666))
+    fd < 0 && throw(ErrorException(string("could not open file ", path)))
     fp = GC.@preserve mode ccall(:fdopen, Ptr{FILE}, (Cint, Cstring), fd, mode)
     if fp == C_NULL
         ccall(:close, Cint, (Cint,), fd)
@@ -197,22 +199,26 @@ Base.iswritable(f::StaticFile) = isopen(f)
 
 ## Position
 
-Base.position(f::StaticFile) = Int(ftell(filepointer(f)))
+# (the offsets are 64 bits: `ftell` and `fseek` of Windows's C library take a `long`, which is 32 bits there, and have others for these)
+@inline file_tell(fp::Ptr{FILE}) = target_windows() ? (@symbolcall _ftelli64(fp::Ptr{FILE})::Int64) : Int64(ftell(fp))
+@inline file_seek(fp::Ptr{FILE}, offset::Int64, whence) = target_windows() ? (@symbolcall _fseeki64(fp::Ptr{FILE}, offset::Int64, Int32(whence)::Int32)::Int32) : Int32(fseek(fp, offset, whence))
 
-Base.seek(f::StaticFile, n::Integer) = (fseek(filepointer(f), Int64(n), SEEK_SET); f)
+Base.position(f::StaticFile) = Int(file_tell(filepointer(f)))
 
-Base.seekstart(f::StaticFile) = (fseek(filepointer(f), Int64(0), SEEK_SET); f)
+Base.seek(f::StaticFile, n::Integer) = (file_seek(filepointer(f), Int64(n), SEEK_SET); f)
 
-Base.seekend(f::StaticFile) = (fseek(filepointer(f), Int64(0), SEEK_END); f)
+Base.seekstart(f::StaticFile) = (file_seek(filepointer(f), Int64(0), SEEK_SET); f)
 
-Base.skip(f::StaticFile, n::Integer) = (fseek(filepointer(f), Int64(n), SEEK_CUR); f)
+Base.seekend(f::StaticFile) = (file_seek(filepointer(f), Int64(0), SEEK_END); f)
+
+Base.skip(f::StaticFile, n::Integer) = (file_seek(filepointer(f), Int64(n), SEEK_CUR); f)
 
 function Base.filesize(f::StaticFile)
     fp = filepointer(f)
-    here = ftell(fp)
-    fseek(fp, Int64(0), SEEK_END)
-    size = ftell(fp)
-    fseek(fp, here, SEEK_SET)
+    here = file_tell(fp)
+    file_seek(fp, Int64(0), SEEK_END)
+    size = file_tell(fp)
+    file_seek(fp, here, SEEK_SET)
     return Int(size)
 end
 

@@ -11,6 +11,15 @@
     nanos = round(Int64, (min(Float64(sec), 1e15) - whole) * 1e9)
     whole_s = Int64(whole)
     nanos >= 1_000_000_000 && (whole_s += 1; nanos -= 1_000_000_000)
+    if target_windows() # (`Sleep` takes milliseconds, 32 bits of them: a longer time is some of them; what is left over a millisecond is slept)
+        milliseconds = whole_s * 1000 + (nanos + 999_999) ÷ 1_000_000
+        while milliseconds > 0
+            step = min(milliseconds, Int64(0x7fffffff))
+            @symbolcall Sleep(UInt32(step)::UInt32)::Nothing
+            milliseconds -= step
+        end
+        return nothing
+    end
     request = Ref((whole_s, nanos))
     left = Ref((Int64(0), Int64(0)))
     while ccall(:nanosleep, Cint, (Ref{NTuple{2,Int64}}, Ref{NTuple{2,Int64}}), request, left) != 0
@@ -32,6 +41,7 @@ end
 
 # The clocks of libc (`jl_hrtime` and `jl_clock_now` are libjulia's, which is not there)
 function clock_nanoseconds(id::Int32)
+    target_windows() && return windows_clock_nanoseconds(id == CLOCK_REALTIME)
     ts = Ref((Int64(0), Int64(0))) # `struct timespec`: seconds and nanoseconds
     GC.@preserve ts begin
         @symbolcall clock_gettime(id::Int32, Base.unsafe_convert(Ptr{NTuple{2,Int64}}, ts)::Ptr{NTuple{2,Int64}})::Int32
@@ -41,6 +51,25 @@ function clock_nanoseconds(id::Int32)
 end
 
 const CLOCK_REALTIME = Int32(0)
+
+# The clocks of Windows: the performance counter, which ticks at a rate that the system says (`QueryPerformanceFrequency`), and counts from the start of the system, is the monotonic one (the seconds and the rest are
+# converted apart, as the product of the counter and 10^9 does not fit in 64 bits for long); the time of day is the file time of the system (`GetSystemTimePreciseAsFileTime`: 100 ns since 1601), moved to 1970.
+function windows_clock_nanoseconds(realtime::Bool)
+    value = Ref(Int64(0))
+    GC.@preserve value begin
+        p = Base.unsafe_convert(Ptr{Int64}, value)
+        if realtime
+            @symbolcall GetSystemTimePreciseAsFileTime(p::Ptr{Int64})::Nothing
+            return UInt64(value[] - 116444736000000000) * UInt64(100)
+        end
+        @symbolcall QueryPerformanceCounter(p::Ptr{Int64})::Int32
+        counter = value[]
+        @symbolcall QueryPerformanceFrequency(p::Ptr{Int64})::Int32
+        frequency = value[]
+        seconds, rest = divrem(counter, frequency)
+        return UInt64(seconds) * UInt64(1_000_000_000) + UInt64(rest) * UInt64(1_000_000_000) ÷ UInt64(frequency)
+    end
+end
 
 @inline clock_monotonic() = target_choice(Int32(6), Int32(1))
 
@@ -54,6 +83,10 @@ const CLOCK_REALTIME = Int32(0)
 # The time of day: `jl_gettimeofday` is a function of libjulia; `gettimeofday` is that of the C library (so
 # `Dates.now()` and `today()` work: the zone is that of the machine that runs the program, from `localtime_r`)
 @device_override function Base.Libc.TimeVal()
+    if target_windows() # (its `struct timeval` has 32-bit fields: what `gettimeofday` writes is not a `TimeVal`)
+        ns = windows_clock_nanoseconds(true)
+        return Base.Libc.TimeVal(Int64(ns ÷ UInt64(1_000_000_000)), Int64(ns % UInt64(1_000_000_000) ÷ UInt64(1000)))
+    end
     tv = Ref{Base.Libc.TimeVal}()
     status = ccall(:gettimeofday, Cint, (Ref{Base.Libc.TimeVal}, Ptr{Cvoid}), tv, C_NULL)
     status != 0 && error("unable to determine current time: ", status)
@@ -220,7 +253,7 @@ end
     n = sizeof(A)
     GC.@preserve A while n > 0
         m = min(n, 256)
-        ok = @symbolcall getentropy(p::Ptr{UInt8}, UInt(m)::UInt)::Int32
+        ok = target_windows() ? (windows_random_bytes!(p, m) ? Int32(0) : Int32(-1)) : @symbolcall(getentropy(p::Ptr{UInt8}, UInt(m)::UInt)::Int32)
         ok == 0 || error("could not get entropy from the system")
         p += m
         n -= m

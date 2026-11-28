@@ -5,6 +5,10 @@ using StaticCompiler: StaticCompiler
 using GPUCompiler: GPUCompiler
 using LLVM: LLVM
 using InteractiveUtils: subtypes
+# (the libraries of MinGW-w64 that a program for Windows is linked with, which StaticCompiler's extension for them fetches for any host, when both of these are loaded: it is what
+# `cross_target("x86_64-w64-mingw32")` uses, and a Windows host's own programs)
+using Mingw_jll: Mingw_jll
+using Pkg: Pkg
 # StaticCompiler's own entry points (and `@device_override`) are replaced by ones of ours that use our method table
 @reexport using StaticCompiler: StaticTarget
 @reexport using StaticTools
@@ -15,7 +19,7 @@ include("registry.jl")
 
 # The runtime that is linked into programs (a module of its own), our method table, and our LLVM passes
 include("runtime/runtime.jl")
-using .Runtime: link_runtime!, UnsupportedCodeError, target_system, target_arch, target_macos, target_choice, with_target, TARGET_SYSTEM, TARGET_ARCH, TARGET_CROSS
+using .Runtime: link_runtime!, UnsupportedCodeError, target_system, target_arch, target_macos, target_windows, target_choice, target_value, with_target, TARGET_SYSTEM, TARGET_ARCH, TARGET_CROSS
 include("method_table.jl")   # our method table, `@device_override`, and the parameters of our compilations
 include("extensions.jl")     # functions that package extensions add methods to (Makie)
 include("llvm/tags.jl")      # the type tags of the objects that a program allocates
@@ -27,6 +31,7 @@ include("overrides/graphemes.jl")   # grapheme breaks (`graphemes`, `titlecase`)
 include("overrides/collections.jl") # vector literals, tuples, `prod`, `splice!`, `unsafe_wrap`, `Dict` of pairs
 include("overrides/system.jl")     # time, `sleep`, locks, `exit` and `atexit`, libraries
 include("overrides/io.jl")         # streams of libc, files, and `IOContext`
+include("overrides/windows.jl")    # what files, directories, the environment and the system are on Windows
 include("overrides/printing.jl")   # print, println, show, display, sprint, repr, and color
 include("overrides/symbols.jl")    # Symbols that are made when the program runs
 include("overrides/objectid.jl")   # objectid, so that a struct can be the key of a Dict
@@ -93,7 +98,7 @@ function default_gc()
         n = tryparse(Int, setting)
         return n === nothing ? parse(Bool, setting) : n
     end
-    return Sys.isapple() || Sys.islinux() ? :auto : false
+    return Sys.isapple() || Sys.islinux() || Sys.iswindows() ? :auto : false
 end
 
 # Whether the program is optimized once more after it is linked (`optimize = true`: the pipeline `O2` of the optimizer,
