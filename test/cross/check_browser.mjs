@@ -1,4 +1,4 @@
-// Runs the programs that `test/cross/build.jl` made for WebAssembly with the host for a browser (`exe.browser.mjs`, over files in memory), and compares what they do with what the native ones did:
+// Runs the programs that `test/cross/build.jl` (or `matrix.jl`) made for WebAssembly with the host for a browser (`exe.browser.mjs`, over files in memory), and compares what they do with what the native ones did:
 //   node test/cross/check_browser.mjs <outdir>                 in Node.js (checks the host's logic)
 //   BROWSER=/path/to/firefox node test/cross/check_browser.mjs <outdir>   in that browser, headless (Firefox, or Chrome: a program for `memory64` needs Firefox 134 or Chrome 133 or later)
 import fs from 'node:fs';

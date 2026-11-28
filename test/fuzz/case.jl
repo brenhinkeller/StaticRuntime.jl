@@ -9,19 +9,19 @@ using SHA, UUIDs, Sockets, Unicode, TOML, Markdown, Mmap
 using LLVM
 using LLVM: @dispose
 if Base.find_package("StaticRuntime") === nothing
-    include(joinpath(@__DIR__, "..", "..", "src", "StaticRuntime.jl"))
+    include("../../src/StaticRuntime.jl")
     using .StaticRuntime
 else
     using StaticRuntime
 end
-include(joinpath(@__DIR__, "..", "helpers.jl"))
+include("../helpers.jl")
 
 length(ARGS) == 2 || error("usage: julia --project=test test/fuzz/case.jl <embedfuzz|dispatchfuzz> <seed>")
 kind, seedtext = ARGS
 kind in ("embedfuzz", "dispatchfuzz") || error("the kind of fuzzing is `embedfuzz` or `dispatchfuzz`, not `$kind`")
 seed = startswith(seedtext, "0x") ? parse(UInt, seedtext) : parse(Int, seedtext)
 
-include(joinpath(@__DIR__, kind * ".jl")) # (defines `fuzz_case(seed)`)
+include(kind * ".jl") # (defines `fuzz_case(seed)`)
 
 ok, msg = try
     fuzz_case(seed)

@@ -1,0 +1,108 @@
+name: Cross-compiling matrix
+# What programs of StaticRuntime can be made from each kind of host, for each target (test/cross/matrix.jl: a table in the summary of each job), and whether what was made does what the native programs do on a
+# machine of its target (test/cross/run.jl). It is the same as the workflow of StaticCompiler.jl, with the programs of this package, which are made for Linux, macOS and WebAssembly (not Windows yet).
+# This is where the cross-compilation of the package is tested in CI: the tests of `CI.yml` do not have the group `Cross` (`test/cross/runtests.jl` is for a machine of someone: `GROUP=Cross`, or `All`).
+# A host makes what Julia's LLVM has the code generator for (its own architecture, and WebAssembly), and what it has the libraries for: those of Linux are fetched (Glibc_jll); the SDK of macOS is Xcode's, or one that is
+# downloaded (phracker/MacOSX-SDKs) on a Linux host; the other architecture's code generator (an `llc` for x86-64 on an Apple Silicon Mac: LLVM_full_jll, which Rosetta runs) is 2 GB and is left out here: a run of the group `Cross` on a machine of someone does that (test/cross/host.jl),
+# and the targets of the other architecture are said not to have been tried.
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'src/**'
+      - 'ext/**'
+      - 'test/cross/**'
+      - '.github/workflows/cross.yml'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+concurrency:
+  # (a push replaces the run that the one before it started, on a branch that is not shared)
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  make:
+    name: Make on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel # (the last runner with an Intel CPU)
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-latest
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre' # (the latest prerelease: 1.14 has no release yet; change to '1.14' once it does)
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: An SDK of macOS, for the programs for macOS that are made on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -fsSL -o sdk.tar.xz https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz
+          tar xJf sdk.tar.xz
+          echo "SDKROOT=$PWD/MacOSX11.3.sdk" >> "$GITHUB_ENV"
+          rm sdk.tar.xz
+      - name: The environment of the matrix
+        run: julia --project=test/cross -e 'using Pkg; Pkg.instantiate()'
+      - name: What is made
+        run: julia --project=test/cross test/cross/matrix.jl made
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: made-${{ matrix.os }}
+          path: made
+  run:
+    name: Run on ${{ matrix.os }}
+    needs: make
+    # (what a host made is run wherever it was made: a build that failed on one host does not stop what the others made from being run)
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-latest
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'pre'
+          arch: ${{ matrix.arch }}
+      - uses: actions/setup-node@v4 # (the programs for WebAssembly: `memory64` is on by default from Node.js 24)
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: made-*
+          path: made
+          merge-multiple: true
+      - name: Run what was made for this machine
+        run: julia test/cross/run.jl made

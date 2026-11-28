@@ -22,7 +22,7 @@ end
     @testset verbose=true "Files and the system" include_timed("files.jl")
     @testset verbose=true "Processes" include_timed("process.jl")
     @testset verbose=true "Scripts" include_timed("scripts.jl")
-    @testset verbose=true "Cross-compilation" include_timed("cross.jl")
+    @testset verbose=true "Targets for cross-compilation" include_timed("target.jl")
 end
 
 # Dynamic dispatch, closures and C callbacks

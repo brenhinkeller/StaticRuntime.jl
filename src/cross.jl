@@ -8,56 +8,65 @@
 # The code is made as it is for the host: by the code generator alone, with no more optimization of the IR (which Julia has made: another round of it, as
 # `clang -O1` makes, changes what some programs do). That is done in this process, by Julia's own LLVM, when it has the code generator for the target
 # (the host's architecture, and WebAssembly), and else by the `llc` of an LLVM of the same version that has it (`STATIC_RUNTIME_CROSS_LLC`).
-# The linker is the system's (`clang` as the driver).
+# The linker is a toolchain of StaticCompiler: the `lld` that Julia has for Linux and WebAssembly, and the system's `clang` as the driver for macOS.
 #
-# The target is a triple (`target = "x86_64-apple-macosx11.0.0"`), or a `CrossTarget` that also says how the code is made (`cross_target`).
+# The target is a triple (`target = "x86_64-apple-macosx11.0.0"`), or a `StaticTarget` made by `cross_target`, which also says how the code is made and linked: it is StaticCompiler's `StaticTarget`, with a `Retarget`
+# (the triple, the CPU and the features of the target, and the `llc` where Julia's LLVM has not its code generator) and the toolchain that links it.
 # A target that is the architecture and the system of the host is the host's.
-
-"""
-    CrossTarget
-
-A target that is not the host's: its triple, the `clang` that makes the code for it (one with the code generator for it, and of the version of
-LLVM that Julia has), the flags that it is given, and the system root that it links with. See [`cross_target`](@ref).
-"""
-struct CrossTarget
-    triple::String
-    cpu::String
-    features::String
-    llc::Union{Nothing,Cmd}
-    cc::Union{Nothing,Cmd}
-    cflags::Cmd
-    sysroot::Union{Nothing,String}
-end
 
 """
     cross_target(triple; cpu = "generic", features = "", llc = nothing, cc = nothing, cflags = ``, sysroot = nothing)
 
-A target for [`compile_executable`](@ref) (`target = cross_target("x86_64-apple-macosx11.0.0")`, or just the triple). The machine code is made by Julia's LLVM if it has the code generator for the
+A `StaticTarget` (of StaticCompiler, retargeted, with the toolchain that links it) for [`compile_executable`](@ref) (`target = cross_target("x86_64-apple-macosx11.0.0")`, or just the triple). The machine code is made by Julia's LLVM if it has the code generator for the
 triple (the host's architecture and WebAssembly); else by `llc`, which has to be the one of an LLVM of the version that Julia has, with the code generator for it. If it is not given, the
-one in the environment variable `STATIC_RUNTIME_CROSS_LLC`, and the one next to the `clang` in `STATIC_RUNTIME_CROSS_CLANG`, are tried. `cc` is the `clang` that links (the one of `Clang_jll`, or the system's, by default), and
-`cflags` are added to its command; `sysroot` is the root of the system's headers and libraries (for macOS, the SDK of `xcrun` is the default).
+one in the environment variable `STATIC_RUNTIME_CROSS_LLC`, and the one next to the `clang` in `STATIC_RUNTIME_CROSS_CLANG`, are tried. `cc` is the `clang` that links a program for macOS (the one of `Clang_jll`, or the system's, by default), and
+`cflags` are added to its command; `sysroot` is the root of the system's headers and libraries (for macOS, the SDK of `xcrun` is the default; for Linux, `sysroot = :glibc` is the glibc of the platform that
+`StaticCompiler.glibc_sysroot` fetches, with `using Glibc_jll, Pkg`).
 """
 function cross_target(triple::AbstractString; cpu::AbstractString = "generic", features::AbstractString = "", llc = nothing, cc = nothing, cflags::Cmd = ``, sysroot = nothing)
+    triple = String(triple)
     command(x) = x === nothing ? nothing : (x isa Cmd ? x : Cmd([String(x)]))
-    return CrossTarget(String(triple), String(cpu), String(features), command(llc), command(cc), cflags, sysroot === nothing ? nothing : String(sysroot))
+    sysroot === :glibc && (sysroot = glibc_sysroot(triple))
+    features = isempty(features) && triple_system(triple) === :wasm ? WASM_FEATURES : String(features)
+    # (the code is made for the host with its generic CPU, as `generic_host_target` says why, and retargeted)
+    return StaticCompiler.StaticTarget(triple, cpu, features; retarget = generic_host_target(), llc = command(llc),
+                                       toolchain = cross_toolchain(triple, command(cc), cflags, sysroot === nothing ? nothing : String(sysroot)))
+end
+
+# the glibc of the platform of the triple, from StaticCompiler's extension for `Glibc_jll`
+function glibc_sysroot(triple::AbstractString)
+    hasmethod(StaticCompiler.glibc_sysroot, Tuple{String}) ||
+        throw(ArgumentError("`sysroot = :glibc` needs the extension of StaticCompiler that fetches the C library: `using Glibc_jll, Pkg` (or give the directory of a glibc as `sysroot`)"))
+    return StaticCompiler.glibc_sysroot(String(triple))
 end
 
 canonical_arch(a::AbstractString) = a in ("arm64", "aarch64") ? "aarch64" : a in ("x86_64", "amd64", "x64") ? "x86_64" : String(a)
 triple_arch(triple::AbstractString) = canonical_arch(first(split(triple, '-')))
-triple_system(triple::AbstractString) = occursin("apple", triple) ? :macos : occursin("linux", triple) ? :linux : startswith(triple, "wasm") ? :wasm : occursin("windows", triple) ? :windows : :unknown
+triple_system(triple::AbstractString) = occursin("apple", triple) ? :macos : occursin("linux", triple) ? :linux : startswith(triple, "wasm") ? :wasm : occursin("windows", triple) || occursin("mingw", triple) ? :windows : :unknown
 host_arch() = canonical_arch(string(Sys.ARCH))
 host_system() = Sys.isapple() ? :macos : Sys.islinux() ? :linux : Sys.iswindows() ? :windows : :unknown
 
-# the target that `target` stands for: the host's if it is its architecture and system, and else a `CrossTarget`
+# the target that `target` stands for: the host's if it is its architecture and system, and else one that is made for by retargeting (`cross_target`)
 function resolve_target(target::AbstractString)
     triple_arch(target) == host_arch() && triple_system(target) == host_system() && return default_target()
     return cross_target(target)
 end
+function resolve_target(target::StaticCompiler.StaticTarget)
+    StaticCompiler.is_retargeted(target) && return target # (already made for by retargeting)
+    triple = StaticCompiler.target_triple(target)
+    triple_arch(triple) == host_arch() && triple_system(triple) == host_system() && return target
+    # (a target of another architecture or system that StaticCompiler would make with the code generator of its own: here the code is the host's, and retargeted. What the target says of its toolchain is kept)
+    resolved = cross_target(triple)
+    return isnothing(target.toolchain) ? resolved : StaticCompiler.StaticTarget(resolved; toolchain = target.toolchain)
+end
 resolve_target(target) = target
+
+# whether the target is made for by retargeting, which a target that is not the host's is
+is_cross(target) = target isa StaticCompiler.StaticTarget && StaticCompiler.is_retargeted(target)
 
 # run `f` for the target: the system and the architecture of it are what the code of the runtime and of the overrides that differs between systems chooses by (runtime/target.jl)
 with_cross_target(f, ::Nothing) = f()
-with_cross_target(f, cross::CrossTarget) = with_target(f, triple_system(cross.triple), Symbol(triple_arch(cross.triple)); cross = true)
+with_cross_target(f, cross::StaticCompiler.StaticTarget) = with_target(f, triple_system(StaticCompiler.target_triple(cross)), Symbol(triple_arch(StaticCompiler.target_triple(cross))); cross = true)
 
 ## The code generator and the linker
 
@@ -75,11 +84,12 @@ function llc_supports(llc::Cmd, arch::AbstractString)
 end
 
 # whether Julia's LLVM has the code generator for the triple
-julia_llvm_has(triple::AbstractString) = try LLVM.Target(; triple = String(triple)); true catch; false end
+# (the code generators of Julia's LLVM and the external `llc` are StaticCompiler's: `emit_object`; what is StaticRuntime's is which `llc` to try, and the preparation of the module for WebAssembly)
+const julia_llvm_has = StaticCompiler.julia_llvm_has
 
-function cross_llc(cross::CrossTarget)
-    cross.llc === nothing || return cross.llc
-    arch = triple_arch(cross.triple)
+# the `llc` that makes the machine code where Julia's LLVM has not the code generator: the one that the environment says (the one given to `cross_target` is in the target)
+function discover_llc(triple::AbstractString)
+    arch = triple_arch(triple)
     candidates = Cmd[]
     haskey(ENV, "STATIC_RUNTIME_CROSS_LLC") && push!(candidates, Cmd([ENV["STATIC_RUNTIME_CROSS_LLC"]]))
     if haskey(ENV, "STATIC_RUNTIME_CROSS_CLANG")
@@ -93,99 +103,96 @@ function cross_llc(cross::CrossTarget)
         push!(problems, why)
     end
     isempty(problems) && push!(problems, "there is none to try")
-    throw(ArgumentError(string("no way to make code for ", cross.triple, ": Julia's LLVM has no code generator for it, and ", join(unique(problems), "; "),
+    throw(ArgumentError(string("no way to make code for ", triple, ": Julia's LLVM has no code generator for it, and ", join(unique(problems), "; "),
                                ". Give an `llc` with `cross_target(triple; llc = ...)` or the environment variable `STATIC_RUNTIME_CROSS_LLC` (or `STATIC_RUNTIME_CROSS_CLANG`, the `clang` next to it): it has to be of LLVM ",
                                Base.libllvm_version.major, " and have the code generator for ", arch, " (the `LLVM_full_jll` of the host's other architecture has, and runs under Rosetta on macOS).")))
 end
 
-# the machine code of the module `text` for the target, as an object file at `path`
-function emit_cross_object(text::AbstractString, cross::CrossTarget, path::AbstractString; runtime::Bool = false)
-    if triple_system(cross.triple) === :wasm
-        !runtime && occursin(r"<\d+ x half>", text) && throw(ArgumentError("the program has vectors of `Float16`, which the code generator for WebAssembly can not make"))
-        LLVM.clopts("-wasm-enable-sjlj", "-wasm-use-legacy-eh=false") # (the lowering of `setjmp` and `longjmp` of the code generator for WebAssembly: it is only for programs of that, so it does not change the others)
-    end
-    if julia_llvm_has(cross.triple)
-        LLVM.@dispose ctx = LLVM.Context() begin
-            mod = parse(LLVM.Module, text)
-            try
-                triple_system(cross.triple) === :wasm && !runtime && prepare_wasm_module!(mod)
-                haskey(ENV, "STATIC_RUNTIME_CROSS_DUMP") && !runtime && write(ENV["STATIC_RUNTIME_CROSS_DUMP"], string(mod)) # (for looking at what the code generator is given)
-                features = isempty(cross.features) && triple_system(cross.triple) === :wasm ? WASM_FEATURES : cross.features
-                tm = LLVM.TargetMachine(LLVM.Target(; triple = cross.triple), cross.triple; cpu = cross.cpu, features, opt_level = LLVM.API.LLVMCodeGenLevelDefault, reloc = triple_system(cross.triple) === :wasm ? LLVM.API.LLVMRelocStatic : LLVM.API.LLVMRelocPIC)
-                try
-                    write(path, LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile))
-                finally
-                    LLVM.dispose(tm)
-                end
-            finally
-                LLVM.dispose(mod)
-            end
-        end
-    else
-        ir = path * ".ll"
-        write(ir, text)
-        try
-            run(`$(cross_llc(cross)) -O2 -filetype=obj -mtriple=$(cross.triple) -mcpu=$(cross.cpu) -mattr=$(cross.features) -relocation-model=pic $ir -o $path`)
-        finally
-            rm(ir; force = true)
-        end
-    end
-    return path
+# the target with the `llc` that makes its objects, if Julia's LLVM has not the code generator and none was given (the IR needs none: this is for the objects)
+function with_llc(target::StaticCompiler.StaticTarget)
+    triple = StaticCompiler.target_triple(target)
+    (julia_llvm_has(triple) || !isnothing(target.llc)) && return target
+    return StaticCompiler.StaticTarget(target; llc = discover_llc(triple))
 end
+
+# the target for Julia's code generation: the code is the host's, with the generic CPU, as it is for every program that is made for the host (`generic_host_target`)
+codegen_target(target::StaticCompiler.StaticTarget) = StaticCompiler.StaticTarget(target; codegen = generic_host_target().machine)
+
+# the code generator for WebAssembly lowers `setjmp` and `longjmp` to its exceptions with these options: they are only for programs of that, so they do not change the others
+wasm_code_generator_options() = LLVM.clopts("-wasm-enable-sjlj", "-wasm-use-legacy-eh=false")
 
 # The functions of the C library that the code generator for WebAssembly calls for `setjmp` and `longjmp` (they have to be in an object of their own: the code generator makes the declarations
 # of them in the module that has the `setjmp`, and the same names in that module are other functions)
-function emit_wasm_runtime_object(cross::CrossTarget, path::AbstractString)
-    text = "target triple = \"$(cross.triple)\"\n" * WASM_SJLJ_RUNTIME * WASM_LIBC
-    emit_cross_object(text, cross, path; runtime = true)
+function emit_wasm_runtime_object(cross::StaticCompiler.StaticTarget, path::AbstractString)
+    text = "target triple = \"$(StaticCompiler.target_triple(cross))\"\n" * WASM_SJLJ_RUNTIME * WASM_LIBC
+    wasm_code_generator_options()
+    write(path, StaticCompiler.emit_object(text, with_llc(cross)))
+    return path
 end
 
 # the linker's driver: `clang`, which links for any target that the system has the linker and the libraries of
-function cross_cc(cross::CrossTarget)
-    cross.cc === nothing || return cross.cc
+function cross_cc(cc)
+    cc === nothing || return cc
     Sys.isapple() && Sys.which("clang") !== nothing && return `clang` # (the system's: it has the linker's options of the SDK)
     return StaticCompiler.clang()
 end
 
-# the directory of a system root that has the start files of the C library (`crt1.o`)
-function crt_directory(sysroot::AbstractString)
-    for d in ("lib", "usr/lib", "lib64", "usr/lib64", "usr/lib/aarch64-linux-gnu", "usr/lib/x86_64-linux-gnu", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
-        isfile(joinpath(sysroot, d, "crt1.o")) && return joinpath(sysroot, d)
+# A toolchain that cannot link, and says why when it is asked to: the target is still one that IR and objects are made for
+struct NoLinker <: StaticCompiler.Toolchain
+    why::String
+end
+StaticCompiler.link(tc::NoLinker, args...; kwargs...) = throw(ArgumentError(tc.why))
+
+# How the target is linked: a toolchain of StaticCompiler (see `StaticCompiler.link`). macOS with the system's `clang` and the SDK; Linux and WebAssembly with the `lld` that Julia has, and for Linux the C library
+# of the system root. The object of the program has its `main` (`main_wrapper` of `StaticCompiler.generate_obj`), so none is added. What is missing is said when the program is linked, and not when the target is made
+# (the IR and the objects need neither the SDK nor the C library).
+function cross_toolchain(triple::AbstractString, cc, cflags::Cmd, sysroot)
+    system = triple_system(triple)
+    if system === :macos
+        # (on a Mac, the system's `clang` links, with Apple's linker and the SDK of Xcode; anywhere else, `lld` does, and it needs an SDK that is given, or `SDKROOT`: `StaticCompiler.macos_sdk`)
+        if cc === nothing && !(Sys.isapple() && Sys.which("clang") !== nothing)
+            return StaticCompiler.LLDToolchain(:darwin; sysroot, flags = cflags)
+        end
+        sdk = sysroot === nothing ? (Sys.isapple() && Sys.which("xcrun") !== nothing ? strip(read(`xcrun --show-sdk-path`, String)) : nothing) : sysroot
+        sdk === nothing && return NoLinker("a program for macOS needs the SDK: give `sysroot = ...` to `cross_target`")
+        flags = String["--target=$triple", "-isysroot", sdk, "-mlinker-version=900"]
+        return StaticCompiler.CCToolchain(`$(cross_cc(cc)) $flags $cflags`; builtins = true) # (the SDK has no compiler-rt for the calls that the code generator makes)
+    elseif system === :linux
+        sysroot === nothing && return NoLinker("a program for $triple needs the C library of the target: give `sysroot = ...` to `cross_target` (a directory with the `lib` of a glibc: `sysroot = :glibc`, or the `Glibc_jll` artifact for the platform, or a root of the target's)")
+        return StaticCompiler.LLDToolchain(:gnu; sysroot, flags = cflags)
+    elseif system === :wasm
+        return StaticCompiler.LLDToolchain(:wasm; flags = `--stack-first -z stack-size=4194304 $cflags`)
+    else
+        return NoLinker("programs for $triple ($(system)) can not be linked yet")
     end
-    throw(ArgumentError("`$sysroot` has no `crt1.o`: the system root of the target (`sysroot`) is the one of a glibc, with its `lib` (the `Glibc_jll` artifact of the platform is one)"))
 end
 
-# the loader that a program of the architecture asks for, where it is on the system that it runs on
-linux_dynamic_linker(arch::AbstractString) = arch == "x86_64" ? "/lib64/ld-linux-x86-64.so.2" : arch == "aarch64" ? "/lib/ld-linux-aarch64.so.1" : throw(ArgumentError("no loader is known for $arch"))
+# A link for Linux that failed can be of a function that the glibc that it is linked with does not have yet: the one that is pinned for `Glibc_jll` (`StaticCompiler.glibc_sysroot`) can be older than the program needs
+function warn_glibc_too_old(tc::StaticCompiler.LLDToolchain)
+    version = isnothing(tc.sysroot) ? nothing : StaticCompiler.glibc_version(tc.sysroot)
+    @warn string("The link failed. If `lld` said that a function is an undefined symbol, it may be one that the glibc that the program is linked with (", version === nothing ? "of a version that is not known" : "version $version",
+                 ") does not have yet: `Process` needs 2.29 (`posix_spawn_file_actions_addchdir_np`), and `stat` is a function of the library from 2.33. A newer `Glibc_jll` has them; an older one makes programs that run on older systems.")
+end
 
-# link the object for the target: macOS with the system's `clang` and the SDK; Linux with the `lld` that Julia has (`-flavor gnu`) and the C library of the system root
-function cross_link(cross::CrossTarget, obj::AbstractString, exe::AbstractString, small::Bool, extra::Cmd; objects::Vector{String} = String[])
-    system = triple_system(cross.triple)
-    if system === :macos
-        sdk = cross.sysroot === nothing ? (Sys.isapple() && Sys.which("xcrun") !== nothing ? strip(read(`xcrun --show-sdk-path`, String)) : nothing) : cross.sysroot
-        sdk === nothing && throw(ArgumentError("a program for macOS needs the SDK: give `sysroot = ...` to `cross_target`"))
-        flags = String["--target=$(cross.triple)", "-isysroot", sdk, "-mlinker-version=900"]
-        small && push!(flags, "-Wl,-x", "-Wl,-no_data_const")
-        run(`$(cross_cc(cross)) $flags $(cross.cflags) $extra $obj -o $exe`)
-    elseif system === :linux
-        cross.sysroot === nothing && throw(ArgumentError("a program for $(cross.triple) needs the C library of the target: give `sysroot = ...` to `cross_target` (a directory with the `lib` of a glibc: the `Glibc_jll` artifact for the platform, or a root of the system)"))
-        dir = crt_directory(cross.sysroot)
-        arch = triple_arch(cross.triple)
-        flags = String["-flavor", "gnu", "-o", exe, "-dynamic-linker", linux_dynamic_linker(arch), joinpath(dir, "crt1.o"), joinpath(dir, "crti.o"), obj, "-L$dir", "-lc", "-lm", "-ldl", joinpath(dir, "crtn.o")]
-        small && push!(flags, "-s")
-        run(`$(StaticCompiler.lld()) $flags $(cross.cflags) $extra`)
-    elseif system === :wasm
-        wasm = exe * ".wasm"
-        flags = String["-flavor", "wasm", triple_arch(cross.triple) == "wasm64" ? "-mwasm64" : "-mwasm32", "--no-entry", "--export=main", "--export-memory", "--allow-undefined", "--stack-first", "-z", "stack-size=4194304", "-o", wasm, obj, objects...]
-        small && push!(flags, "--strip-all")
-        run(`$(StaticCompiler.lld()) $flags $(cross.cflags) $extra`)
+# what makes a program smaller: the symbols are left out of it (the options of the linker, which the driver of the C compiler is given as `-Wl,`)
+small_flags(tc, system::Symbol) = system === :macos ? (tc isa StaticCompiler.CCToolchain ? `-Wl,-x -Wl,-no_data_const` : `-x -no_data_const`) : system === :linux ? `-s` : system === :wasm ? `--strip-all` : ``
+
+# link the objects of the program for the target to the executable `exe` (a module of WebAssembly, `exe.wasm`, with the host that runs it)
+function cross_link(cross::StaticCompiler.StaticTarget, obj::AbstractString, exe::AbstractString, small::Bool, extra::Cmd; objects::Vector{String} = String[])
+    tc = StaticCompiler.toolchain(cross)
+    system = triple_system(StaticCompiler.target_triple(cross))
+    smaller = small ? small_flags(tc, system) : ``
+    out = try
+        StaticCompiler.link(tc, cross, String[obj, objects...], StaticCompiler.output_name(tc, cross, exe); kind = :executable, entry = nothing, cflags = `$smaller $extra`)
+    catch err
+        system === :linux && tc isa StaticCompiler.LLDToolchain && err isa ProcessFailedException && warn_glibc_too_old(tc)
+        rethrow()
+    end
+    if system === :wasm
         write(exe * ".mjs", wasm_host_source("node")) # (the host that runs it: `node name.mjs`)
         write(exe * ".browser.mjs", wasm_host_source("browser")) # (and the one for a browser: `import { run } from "./name.browser.mjs"`)
-        return wasm
-    else
-        throw(ArgumentError("programs for $(cross.triple) ($(system)) can not be linked yet"))
     end
-    return exe
+    return out
 end
 
 # The host of a program for WebAssembly: the function that has the C library and the system (`wasm_host_core.js`), after the shell of the platform that gives it files, the clock and the streams.
@@ -193,22 +200,23 @@ wasm_host_source(platform::AbstractString) = read(joinpath(@__DIR__, "runtime", 
 
 ## The IR for the target
 
-# the IR that was made for the host, for the target: its triple, and no data layout (the code generator has the target's); the attributes that name the
-# host's CPU and features are left out. IR that has the host's intrinsics in it is refused.
-function retarget_ir(text::AbstractString, triple::AbstractString)
-    arch = triple_arch(triple)
-    for m in eachmatch(r"\bllvm\.(aarch64|arm|x86)\.[A-Za-z0-9_.]+", text)
-        made_for = m.captures[1] == "x86" ? "x86_64" : "aarch64" # (the intrinsics of the host's code generator, in the IR of the host)
-        made_for == arch || throw(ArgumentError("the program uses `$(m.match)`, an intrinsic of another architecture than $arch: it can not be made for $triple"))
+# The module of the program for the target when the code is made (`llvm_finalize` of `StaticCompiler.generate_obj`): the names of the C library of the system (and what the program may not have for it), and for
+# WebAssembly the setjmp, the streams and the top of the stack, and the preparation of the module for its code generator (`prepare`: not for the IR that is only written). (Its triple, its data layout
+# and the host's CPU are those that `StaticTarget(...; retarget)` gives: see `StaticCompiler.retarget!`.)
+function finalize_cross_module!(mod::LLVM.Module, cross::StaticCompiler.StaticTarget; prepare::Bool = true)
+    system = triple_system(StaticCompiler.target_triple(cross))
+    rename_system_symbols!(mod, system)
+    if system === :wasm
+        wasm_sjlj!(mod)
+        define_wasm_streams!(mod)
+        define_wasm_stack_top!(mod)
+        if prepare
+            occursin(r"<\d+ x half>", string(mod)) && throw(ArgumentError("the program has vectors of `Float16`, which the code generator for WebAssembly can not make"))
+            prepare_wasm_module!(mod)
+        end
     end
-    system = triple_system(triple)
-    text = rename_system_symbols(text, system)
-    system === :wasm && (text = wasm_sjlj_names(define_wasm_streams(text)))
-    system === :wasm && (text = replace(text, r"^@_static_wasm_stack_top = external[^\n]*$"m => "@_static_wasm_stack_top = global ptr null, align 8"))
-    text = replace(text, r"^target datalayout = .*\n"m => "")
-    text = replace(text, r"^target triple = .*$"m => "target triple = \"$triple\"")
-    text = replace(text, r" \"(target-cpu|target-features|tune-cpu)\"=\"[^\"]*\"" => "")
-    return text
+    prepare && haskey(ENV, "STATIC_RUNTIME_CROSS_DUMP") && write(ENV["STATIC_RUNTIME_CROSS_DUMP"], string(mod)) # (for looking at what the code generator is given)
+    return mod
 end
 
 # What the C libraries of the systems call the same: the standard streams that StaticTools has as globals (it chooses by the host's system when it is compiled), and `sigsetjmp` (glibc has it as a macro of
@@ -219,232 +227,33 @@ const ONLY_MACOS = ["_NSGetEnviron", "getattrlist", "mach_host_self", "host_stat
 const ONLY_LINUX = ["__errno_location", "__libc_stack_end", "__sigsetjmp", "sysinfo"]
 const HOST_FLAGS = ["mmap"]
 
-function rename_system_symbols(text::AbstractString, system::Symbol)
-    for (from, to) in get(SYSTEM_RENAMES, system, Pair{String,String}[])
-        text = replace(text, Regex("@" * from * "\\b(?![\\w.\$])") => "@" * to)
+# a function or a global variable of the module
+named_value(mod::LLVM.Module, name::AbstractString) = haskey(LLVM.functions(mod), name) ? LLVM.functions(mod)[name] : haskey(LLVM.globals(mod), name) ? LLVM.globals(mod)[name] : nothing
+
+# `from` is called `to`: where the module has `to` as well, the uses of `from` are of it
+function rename_symbol!(mod::LLVM.Module, from::AbstractString, to::AbstractString)
+    v = named_value(mod, from)
+    v === nothing && return
+    existing = named_value(mod, to)
+    if existing === nothing
+        LLVM.name!(v, to)
+    else
+        LLVM.replace_uses!(v, existing)
+        LLVM.erase!(v)
     end
-    wrong = system === :linux ? ONLY_MACOS : system === :macos ? ONLY_LINUX : String[]
-    found = String[w for w in wrong if occursin(Regex("@" * w * "\\b(?![\\w.\$])"), text)]
-    system === host_system() || append!(found, String[w for w in HOST_FLAGS if occursin(Regex("@" * w * "\\b(?![\\w.\$])"), text)]) # (what the host's packages chose for the host's system is right for the host's system)
-    isempty(found) || throw(ArgumentError(string("the program uses ", join(("`$w`" for w in found), ", "), ", which a program for ", system, " does not have, or has other arguments for (the code of the host's system, chosen when a package was compiled)")))
-    return text
+    return
 end
 
-# The conversions between `Float16` and `Float32` that the code generator for x86-64 calls where the CPU is not said to have them (they are in libgcc and compiler-rt, which the
-# program is not linked with): defined here, with the instructions that do them (F16C: from 2012 on), so that the program does not need them.
-const X86_HALF_BUILTINS = """
-define linkonce_odr hidden float @__extendhfsf2(half %a) #9999 {
-  %r = fpext half %a to float
-  ret float %r
-}
-define linkonce_odr hidden half @__truncsfhf2(float %a) #9999 {
-  %r = fptrunc float %a to half
-  ret half %r
-}
-attributes #9999 = { nounwind "target-features"="+f16c" }
-"""
-needs_half_builtins(text::AbstractString, arch::AbstractString) = arch == "x86_64" && occursin(r"\bhalf\b", text)
-
-# 128-bit division, which the code generator calls (`__udivti3` and the others of libgcc and compiler-rt, which a Linux program is not linked with): by shifting and subtracting,
-# with instructions of `i128` that are not calls (a division of `i128` in them would be a call of themselves).
-const LINUX_INT128_BUILTINS = """
-define linkonce_odr hidden i128 @__static_udivmod(i128 %a, i128 %b, i1 %rem) {
-entry:
-  ; (operands of 64 bits, the usual: the instruction of the CPU; a divisor of zero is left to the loop, which does not trap)
-  %ah = lshr i128 %a, 64
-  %bh = lshr i128 %b, 64
-  %hi = or i128 %ah, %bh
-  %nohi = icmp eq i128 %hi, 0
-  %bnz = icmp ne i128 %b, 0
-  %small = and i1 %nohi, %bnz
-  br i1 %small, label %fast, label %loop
-fast:
-  %a64 = trunc i128 %a to i64
-  %b64 = trunc i128 %b to i64
-  %fq = udiv i64 %a64, %b64
-  %fr = urem i64 %a64, %b64
-  %fqx = zext i64 %fq to i128
-  %frx = zext i64 %fr to i128
-  %fres = select i1 %rem, i128 %frx, i128 %fqx
-  ret i128 %fres
-loop:
-  %i = phi i32 [ 127, %entry ], [ %i1, %loop ]
-  %q = phi i128 [ 0, %entry ], [ %q2, %loop ]
-  %r = phi i128 [ 0, %entry ], [ %r3, %loop ]
-  %i128 = zext i32 %i to i128
-  %sh = lshr i128 %a, %i128
-  %bit = and i128 %sh, 1
-  %r1 = shl i128 %r, 1
-  %r2 = or i128 %r1, %bit
-  %ge = icmp uge i128 %r2, %b
-  %rs = sub i128 %r2, %b
-  %r3 = select i1 %ge, i128 %rs, i128 %r2
-  %one = shl i128 1, %i128
-  %qo = or i128 %q, %one
-  %q2 = select i1 %ge, i128 %qo, i128 %q
-  %i1 = sub i32 %i, 1
-  %done = icmp slt i32 %i1, 0
-  br i1 %done, label %exit, label %loop
-exit:
-  %res = select i1 %rem, i128 %r3, i128 %q2
-  ret i128 %res
-}
-define linkonce_odr hidden i128 @__udivti3(i128 %a, i128 %b) {
-  %r = call i128 @__static_udivmod(i128 %a, i128 %b, i1 false)
-  ret i128 %r
-}
-define linkonce_odr hidden i128 @__umodti3(i128 %a, i128 %b) {
-  %r = call i128 @__static_udivmod(i128 %a, i128 %b, i1 true)
-  ret i128 %r
-}
-define linkonce_odr hidden i128 @__divti3(i128 %a, i128 %b) {
-  %sa = icmp slt i128 %a, 0
-  %sb = icmp slt i128 %b, 0
-  %na = sub i128 0, %a
-  %nb = sub i128 0, %b
-  %ua = select i1 %sa, i128 %na, i128 %a
-  %ub = select i1 %sb, i128 %nb, i128 %b
-  %q = call i128 @__static_udivmod(i128 %ua, i128 %ub, i1 false)
-  %neg = xor i1 %sa, %sb
-  %nq = sub i128 0, %q
-  %r = select i1 %neg, i128 %nq, i128 %q
-  ret i128 %r
-}
-define linkonce_odr hidden i128 @__modti3(i128 %a, i128 %b) {
-  %sa = icmp slt i128 %a, 0
-  %sb = icmp slt i128 %b, 0
-  %na = sub i128 0, %a
-  %nb = sub i128 0, %b
-  %ua = select i1 %sa, i128 %na, i128 %a
-  %ub = select i1 %sb, i128 %nb, i128 %b
-  %m = call i128 @__static_udivmod(i128 %ua, i128 %ub, i1 true)
-  %nm = sub i128 0, %m
-  %r = select i1 %sa, i128 %nm, i128 %m
-  ret i128 %r
-}
-"""
-needs_int128_builtins(text::AbstractString, system::Symbol) = system === :linux && occursin(r"\b(udiv|sdiv|urem|srem) i128\b", text)
-
-# The same for WebAssembly, which has no instruction for it: by integer arithmetic (the rounding is to the nearest, ties to even)
-const WASM_HALF_BUILTINS = """
-define linkonce_odr hidden float @__extendhfsf2(half %a) {
-  %h = bitcast half %a to i16
-  %hi = zext i16 %h to i32
-  %s1 = lshr i32 %hi, 15
-  %s2 = shl i32 %s1, 31
-  %e1 = lshr i32 %hi, 10
-  %e = and i32 %e1, 31
-  %m = and i32 %hi, 1023
-  %en = add i32 %e, 112
-  %en2 = shl i32 %en, 23
-  %m13 = shl i32 %m, 13
-  %n1 = or i32 %s2, %en2
-  %normal = or i32 %n1, %m13
-  %i1 = or i32 %s2, 2139095040
-  %infnan = or i32 %i1, %m13
-  %mf = uitofp i32 %m to float
-  %sub = fmul float %mf, 0x3E70000000000000
-  %subb = bitcast float %sub to i32
-  %subs = or i32 %subb, %s2
-  %isz = icmp eq i32 %e, 0
-  %isi = icmp eq i32 %e, 31
-  %r1 = select i1 %isi, i32 %infnan, i32 %normal
-  %r = select i1 %isz, i32 %subs, i32 %r1
-  %f = bitcast i32 %r to float
-  ret float %f
-}
-define linkonce_odr hidden half @__truncsfhf2(float %a) {
-  %x = bitcast float %a to i32
-  %s1 = lshr i32 %x, 16
-  %sign = and i32 %s1, 32768
-  %e1 = lshr i32 %x, 23
-  %e = and i32 %e1, 255
-  %m = and i32 %x, 8388607
-  %ne = sub i32 %e, 112
-  ; infinity and NaN
-  %m13 = lshr i32 %m, 13
-  %nanm = or i32 %m13, 512
-  %hasm = icmp ne i32 %m, 0
-  %nanbits = select i1 %hasm, i32 %nanm, i32 0
-  %infnan = or i32 %nanbits, 31744
-  ; normal
-  %ne10 = shl i32 %ne, 10
-  %hn = or i32 %ne10, %m13
-  %rem = and i32 %m, 8191
-  %gt = icmp ugt i32 %rem, 4096
-  %eq = icmp eq i32 %rem, 4096
-  %odd1 = and i32 %hn, 1
-  %odd = icmp ne i32 %odd1, 0
-  %tie = and i1 %eq, %odd
-  %up = or i1 %gt, %tie
-  %upi = zext i1 %up to i32
-  %hn2 = add i32 %hn, %upi
-  ; subnormal
-  %mm = or i32 %m, 8388608
-  %shift = sub i32 14, %ne
-  %shiftc = call i32 @llvm.umin.i32(i32 %shift, i32 31)
-  %hs = lshr i32 %mm, %shiftc
-  %one = shl i32 1, %shiftc
-  %mask = sub i32 %one, 1
-  %rem2 = and i32 %mm, %mask
-  %half1 = lshr i32 %one, 1
-  %gt2 = icmp ugt i32 %rem2, %half1
-  %eq2 = icmp eq i32 %rem2, %half1
-  %odd2a = and i32 %hs, 1
-  %odd2 = icmp ne i32 %odd2a, 0
-  %tie2 = and i1 %eq2, %odd2
-  %up2 = or i1 %gt2, %tie2
-  %up2i = zext i1 %up2 to i32
-  %hs2 = add i32 %hs, %up2i
-  ; which
-  %isinf = icmp eq i32 %e, 255
-  %ovf = icmp sge i32 %ne, 31
-  %isnorm = icmp sge i32 %ne, 1
-  %issub = icmp sge i32 %ne, -10
-  %r1 = select i1 %issub, i32 %hs2, i32 0
-  %r2 = select i1 %isnorm, i32 %hn2, i32 %r1
-  %r3 = select i1 %ovf, i32 31744, i32 %r2
-  %r4 = select i1 %isinf, i32 %infnan, i32 %r3
-  %r5 = or i32 %r4, %sign
-  %r16 = trunc i32 %r5 to i16
-  %h = bitcast i16 %r16 to half
-  ret half %h
-}
-declare i32 @llvm.umin.i32(i32, i32)
-; double to half: through float with the rounding to odd (inexact results get an odd last bit: the second rounding is then the one of the double), and half to double
-define linkonce_odr hidden half @__truncdfhf2(double %a) {
-  %f = fptrunc double %a to float
-  %back = fpext float %f to double
-  %exact = fcmp oeq double %back, %a
-  %isnan = fcmp uno double %a, %a
-  %fb = bitcast float %f to i32
-  %odd = and i32 %fb, 1
-  %isodd = icmp ne i32 %odd, 0
-  %nb = fneg double %back
-  %bneg = fcmp olt double %back, 0.0
-  %ab = select i1 %bneg, double %nb, double %back
-  %na = fneg double %a
-  %aneg = fcmp olt double %a, 0.0
-  %aa = select i1 %aneg, double %na, double %a
-  %up = fcmp ogt double %ab, %aa
-  %dec = sub i32 %fb, 1
-  %inc = add i32 %fb, 1
-  %adj = select i1 %up, i32 %dec, i32 %inc
-  %isinf = fcmp oeq float %f, 0x7FF0000000000000
-  %k1 = or i1 %exact, %isodd
-  %k2 = or i1 %k1, %isnan
-  %k3 = or i1 %k2, %isinf
-  %r = select i1 %k3, i32 %fb, i32 %adj
-  %rf = bitcast i32 %r to float
-  %h = call half @__truncsfhf2(float %rf)
-  ret half %h
-}
-define linkonce_odr hidden double @__extendhfdf2(half %a) {
-  %f = call float @__extendhfsf2(half %a)
-  %d = fpext float %f to double
-  ret double %d
-}
-"""
+function rename_system_symbols!(mod::LLVM.Module, system::Symbol)
+    for (from, to) in get(SYSTEM_RENAMES, system, Pair{String,String}[])
+        rename_symbol!(mod, from, to)
+    end
+    wrong = system === :linux ? ONLY_MACOS : system === :macos ? ONLY_LINUX : String[]
+    found = String[w for w in wrong if named_value(mod, w) !== nothing]
+    system === host_system() || append!(found, String[w for w in HOST_FLAGS if named_value(mod, w) !== nothing]) # (what the host's packages chose for the host's system is right for the host's system)
+    isempty(found) || throw(ArgumentError(string("the program uses ", join(("`$w`" for w in found), ", "), ", which a program for ", system, " does not have, or has other arguments for (the code of the host's system, chosen when a package was compiled)")))
+    return mod
+end
 
 ## WebAssembly (wasm64)
 
@@ -496,21 +305,52 @@ define void @__wasm_longjmp(ptr %env, i32 %val) noreturn {
 }
 """
 
-# the code generator for WebAssembly finds `setjmp` and `longjmp` by these names (and `setjmp` takes the buffer only)
-function wasm_sjlj_names(text::AbstractString)
-    # (macOS has `sigsetjmp`, glibc `__sigsetjmp`, which is what a program made on Linux calls)
-    text = replace(text, r"call i32 @(?:__)?sigsetjmp\(ptr ([^,)]+), i32 0\)" => s"call i32 @setjmp(ptr \1)")
-    text = replace(text, r"declare i32 @(?:__)?sigsetjmp\(ptr, i32\)" => "declare i32 @setjmp(ptr)")
-    return replace(text, "@siglongjmp(" => "@longjmp(")
+# the code generator for WebAssembly finds `setjmp` and `longjmp` by these names (and `setjmp` takes the buffer only, and returns twice). macOS has `sigsetjmp`, glibc `__sigsetjmp`, which is what a program made on Linux calls.
+function wasm_sjlj!(mod::LLVM.Module)
+    ptr, i32 = LLVM.PointerType(), LLVM.IntType(32)
+    for name in ("sigsetjmp", "__sigsetjmp")
+        haskey(LLVM.functions(mod), name) || continue
+        old = LLVM.functions(mod)[name]
+        setjmp = haskey(LLVM.functions(mod), "setjmp") ? LLVM.functions(mod)["setjmp"] : LLVM.Function(mod, "setjmp", LLVM.FunctionType(i32, [ptr]))
+        push!(LLVM.function_attributes(setjmp), LLVM.EnumAttribute("returns_twice"))
+        for use in collect(LLVM.uses(old))
+            call = LLVM.user(use)
+            call isa LLVM.CallBase || continue
+            LLVM.@dispose builder = LLVM.IRBuilder() begin
+                LLVM.position!(builder, LLVM.before(call))
+                replacement = LLVM.call!(builder, LLVM.function_type(setjmp), setjmp, LLVM.Value[first(LLVM.operands(call))]) # (the buffer; the flag for the signal mask is dropped)
+                for attr in LLVM.function_attributes(call)
+                    push!(LLVM.function_attributes(replacement), attr)
+                end
+                LLVM.replace_uses!(call, replacement)
+                LLVM.erase!(call)
+            end
+        end
+        isempty(collect(LLVM.uses(old))) && LLVM.erase!(old)
+    end
+    rename_symbol!(mod, "siglongjmp", "longjmp")
+    return mod
 end
 
-# the standard streams of a program for wasm64 are the numbers of the descriptors (`fwrite` of the host writes to the one that it is given)
-function define_wasm_streams(text::AbstractString)
-    # (`__stdoutp` is the name on macOS, `stdout` on Linux)
+# the standard streams of a program for wasm64 are the numbers of the descriptors (`fwrite` of the host writes to the one that it is given); `__stdoutp` is the name on macOS, `stdout` on Linux
+function define_wasm_streams!(mod::LLVM.Module)
     for (name, fd) in ("__stdoutp" => 1, "__stderrp" => 2, "__stdinp" => 0, "stdout" => 1, "stderr" => 2, "stdin" => 0)
-        text = replace(text, Regex("^@" * name * " = external [^\\n]*\$", "m") => "@$name = local_unnamed_addr global ptr inttoptr (i64 $fd to ptr)")
+        haskey(LLVM.globals(mod), name) || continue
+        g = LLVM.globals(mod)[name]
+        LLVM.isdeclaration(g) && LLVM.initializer!(g, LLVM.const_inttoptr(LLVM.ConstantInt(LLVM.IntType(64), fd), LLVM.PointerType()))
     end
-    return text
+    return mod
+end
+
+# the top of the stack, which the collector reads and `main` stores (`wasm_stack_top_prologue`), is a variable of the module
+function define_wasm_stack_top!(mod::LLVM.Module)
+    haskey(LLVM.globals(mod), "_static_wasm_stack_top") || return mod
+    g = LLVM.globals(mod)["_static_wasm_stack_top"]
+    if LLVM.isdeclaration(g)
+        LLVM.initializer!(g, LLVM.null(LLVM.PointerType()))
+        LLVM.alignment!(g, 8)
+    end
+    return mod
 end
 
 # Calls of C functions that were bound when the program runs (`@ccall_name` is a global that is null until the first call looks the function up, and `@jlplt_name_got` the address of a function that does that) are calls of
@@ -1040,21 +880,14 @@ function prepare_wasm_module!(mod::LLVM.Module)
     return mod
 end
 
-# `main` of the executable, in IR: it calls the entry point, `fn`, which takes `(Int, Ptr{Ptr{UInt8}})` (or nothing) and returns an `Int` (or nothing)
-function main_wrapper(text::AbstractString, fn::AbstractString, triple::AbstractString)
-    m = match(Regex("^define [^@\n]*?(i64|i32|void) @" * fn * "\\(([^)]*)\\)", "m"), text)
-    m === nothing && throw(ArgumentError("the entry point `$fn` is not in the program, or has a return type that is not `Int`, `Int32` or `Nothing`"))
-    ret, params = m.captures[1], m.captures[2]
-    nparams = isempty(strip(params)) ? 0 : count(==(','), params) + 1
-    nparams in (0, 2) || throw(ArgumentError("the entry point `$fn` has $nparams arguments: it has two, `(argc::Int, argv::Ptr{Ptr{UInt8}})`, or none"))
-    args = nparams == 0 ? "" : "i64 %argc64, ptr %argv"
-    call = ret == "void" ? "call void @$fn($args)\n  ret i32 0" :
-           ret == "i64" ? "%r = call i64 @$fn($args)\n  %r32 = trunc i64 %r to i32\n  ret i32 %r32" : "%r = call i32 @$fn($args)\n  ret i32 %r"
-    guard = triple_system(triple) === :linux ? "@__stack_chk_guard = global ptr inttoptr (i64 $(rand(UInt) >> 1) to ptr)\n" : ""
-    # (a program for WebAssembly that has a collector: the collector looks at the stack from where it is to where it was when the program started, which is the top of the stack of the module)
-    top = triple_system(triple) === :wasm && occursin("@_static_wasm_stack_top", text) ? "  %sp = call ptr @llvm.stacksave.p0()\n  store ptr %sp, ptr @_static_wasm_stack_top, align 8\n" : ""
-    declare = isempty(top) || occursin("@llvm.stacksave.p0", text) ? "" : "declare ptr @llvm.stacksave.p0()\n"
-    return string(text, "\n", guard, declare, "define i32 @main(i32 %argc, ptr %argv) {\n", top, nparams == 0 ? "" : "  %argc64 = sext i32 %argc to i64\n", "  ", call, "\n}\n")
+# what the program does first in `main` on WebAssembly, if it has a collector: the collector looks at the stack from where it is to where it was when the program started, which is the top of the stack of the module
+function wasm_stack_top_prologue(builder, mod::LLVM.Module)
+    haskey(LLVM.globals(mod), "_static_wasm_stack_top") || return
+    stacksave = haskey(LLVM.functions(mod), "llvm.stacksave.p0") ? LLVM.functions(mod)["llvm.stacksave.p0"] :
+                LLVM.Function(mod, "llvm.stacksave.p0", LLVM.FunctionType(LLVM.PointerType(), LLVM.LLVMType[]))
+    sp = LLVM.call!(builder, LLVM.function_type(stacksave), stacksave)
+    LLVM.alignment!(LLVM.store!(builder, sp, LLVM.globals(mod)["_static_wasm_stack_top"]), 8)
+    return
 end
 
 ## Executables
@@ -1062,7 +895,7 @@ end
 # the generator of `compile_executable` for a target that is not the host's (it is given the entry point as StaticCompiler's is: `f`, its `types`, the `path` and
 # the `name`), and the same keywords but the ones of the link, which are the target's
 function cross_executable(f::Function, types = (), path::String = pwd(), name = StaticCompiler.fix_name(f);
-                          cross::CrossTarget, small::Bool = false, output::Symbol = :executable, filename::String = String(name), demangle = true, also_expose = Tuple{Function,Tuple{DataType}}[],
+                          cross::StaticCompiler.StaticTarget, small::Bool = false, output::Symbol = :executable, filename::String = String(name), demangle = true, also_expose = Tuple{Function,Tuple{DataType}}[],
                           cc = nothing, cflags = ``, llvm_to_clang = true, kwargs...)
     funcs = vcat([(f, types)], also_expose)
     StaticCompiler.check_signature(f, types; kwargs...)
@@ -1070,25 +903,25 @@ function cross_executable(f::Function, types = (), path::String = pwd(), name = 
     String(name) == "main" && (demangle = false)
     fn = demangle ? String(name) : "julia_$name"
     output in (:executable, :object, :llvmir) || throw(ArgumentError("`output` is `:executable`, `:object` or `:llvmir`, not `$(repr(output))`"))
-    _, ir_path = StaticCompiler.generate_obj(funcs, path, filename; demangle, emit_llvm_only = true, kwargs...)
-    obj = joinpath(path, "$filename.$(cross.triple).o")
+    # (the code is made for the host with its generic CPU, and has the triple of the target, the `main` that calls the entry point, and the builtins that the target's toolchain needs; the module is then made
+    # for the target, and is object code unless the IR is what is wanted: see `StaticTarget(...; retarget)`)
+    triple = StaticCompiler.target_triple(cross)
+    wasm = triple_system(triple) === :wasm
+    wasm && wasm_code_generator_options()
+    cross = output === :llvmir ? cross : with_llc(cross) # (the IR needs no `llc`)
+    target = codegen_target(cross)
+    prepare = output !== :llvmir
+    made = obj = joinpath(path, "$filename.$triple.$(output === :llvmir ? "ll" : "o")")
+    _, generated = StaticCompiler.generate_obj(funcs, path, filename; demangle, emit_llvm_only = output === :llvmir, main_wrapper = fn, main_prologue = wasm ? wasm_stack_top_prologue : nothing,
+                                               llvm_finalize = mod -> finalize_cross_module!(mod, cross; prepare), kwargs..., target)
+    mv(generated, made; force = true)
+    output === :llvmir && return made
+    output === :object && return joinpath(abspath(path), basename(made))
     exe = joinpath(path, filename)
-    keep = String[]
     try
-        text = main_wrapper(retarget_ir(read(ir_path, String), cross.triple), fn, cross.triple)
-        needs_half_builtins(text, triple_arch(cross.triple)) && (text *= "\n" * X86_HALF_BUILTINS)
-        needs_int128_builtins(text, triple_system(cross.triple)) && (text *= "\n" * LINUX_INT128_BUILTINS)
-        triple_system(cross.triple) === :wasm && occursin(r"\bhalf\b", text) && (text *= "\n" * WASM_HALF_BUILTINS)
-        if output === :llvmir
-            ll = joinpath(path, "$filename.$(cross.triple).ll")
-            write(ll, text)
-            return ll
-        end
-        emit_cross_object(text, cross, obj)
-        output === :object && (push!(keep, obj); return joinpath(abspath(path), "$filename.$(cross.triple).o"))
         objects = String[]
-        if triple_system(cross.triple) === :wasm
-            runtime_obj = joinpath(path, "$filename.runtime.$(cross.triple).o")
+        if wasm
+            runtime_obj = joinpath(path, "$filename.runtime.$triple.o")
             emit_wasm_runtime_object(cross, runtime_obj)
             push!(objects, runtime_obj)
         end
@@ -1099,8 +932,7 @@ function cross_executable(f::Function, types = (), path::String = pwd(), name = 
             foreach(o -> rm(o; force = true), objects)
         end
     finally
-        rm(ir_path; force = true)
-        obj in keep || rm(obj; force = true)
+        rm(obj; force = true)
     end
     return abspath(exe)
 end

@@ -148,8 +148,10 @@ end
 # The host's target with the generic CPU of its architecture, for the code of a program that is made for another target (or only as an object): Julia's code generation chooses the vectors and the
 # instructions by the CPU, and the machine code is made after by the target's own generic machine, which has not the host's extensions (the scalable vectors of SVE, for one, are not made
 # into machine code without it: "Don't know how to legalize this scalable vector type").
+# (Not `retarget = true` of `StaticTarget`, which takes the generic CPU with the triple that LLVM has for the host, `aarch64-apple-darwin22.6.0` on a Mac: the code that Julia's code generation makes with it
+# is not the same, and a program for WebAssembly was left without the `showerror` of a caught error, as the types of its slots came out differently. This is the triple that the programs for the host are made with.)
 function generic_host_target()
-    triple = LLVM.triple(default_target().tm)
+    triple = StaticCompiler.target_triple(default_target())
     return StaticCompiler.StaticTarget(triple, "generic", "")
 end
 
@@ -189,7 +191,7 @@ function early_entry_check(c, args, rooted; method_table, params, target)
         (e isa InferenceError && c.slots.mode === :on && c.slots.passes < SLOT_PASS_LIMIT) || rethrow()
     end
     trace_on() && trace("check of the entry point (not settled): ", round(time() - started; digits = 1), " s")
-    job, _ = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
+    job = StaticCompiler.static_job(rooted[1], rooted[2]; method_table, params, target)
     Base.invokelatest(precompile, job)
     started = time()
     check_entry(args[1], args[2]; method_table, params, target)
@@ -206,11 +208,11 @@ for f in (:compile_executable, :compile_shlib, :static_code_typed, :static_llvm_
             libraries in (:system, :bundle) || throw(ArgumentError("`libraries` is `:system` or `:bundle`, not `$(repr(libraries))`"))
             # (a target that is not the host's: the code is made for the host and the last steps are the target's, see cross.jl)
             target = resolve_target(target)
-            cross = target isa CrossTarget ? target : nothing
+            cross = is_cross(target) ? target : nothing
             cross === nothing || (target = default_target())
             # (`output = :object` or `:llvmir` is made by the same steps as for another target, with the host's)
             if cross === nothing && get(kwargs, :output, :executable) !== :executable
-                cross = cross_target(LLVM.triple(target.tm))
+                cross = cross_target(StaticCompiler.target_triple(target))
             end
             # (the code for another target does not use what only the host's CPU has)
             cross === nothing || (target = generic_host_target())
@@ -302,7 +304,7 @@ function static_code_native(f, types; io::IO = stdout, target = default_target()
     StaticCompiler.GPUCompiler.JuliaContext() do ctx
         mod = static_llvm_module(f, tt; target, method_table, params, kwargs...)
         try
-            job, _ = StaticCompiler.static_job(f, tt; target, method_table, params = params === nothing ? OverridesParams() : params)
+            job = StaticCompiler.static_job(f, tt; target, method_table, params = params === nothing ? OverridesParams() : params)
             asm, _ = StaticCompiler.GPUCompiler.emit_asm(job, mod, LLVM.CodeGenFileType.Assembly)
             print(io, asm isa AbstractString ? asm : String(asm))
         finally
@@ -389,7 +391,7 @@ function compile_executable_with_arguments(f::Function, path::String = pwd(), na
     return Base.invokelatest(compile_executable, entry, (Int, Ptr{Ptr{UInt8}}), path, String(name); kwargs...)
 end
 
-export compile_script, compile_script_string, cross_target, CrossTarget
+export compile_script, compile_script_string, cross_target
 export compile_executable, compile_shlib, static_code_llvm, static_code_typed, static_code_native,
        static_llvm_module, @device_override
 export UnsupportedCodeError, InferenceError, add_dispatch_candidates!, add_deserialize_types!, @assume, @assume_field, @assume_field_embedded

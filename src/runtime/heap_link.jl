@@ -219,7 +219,7 @@ function stack_functions_ir(system::Symbol)
           ret i64 %size
         }"""
     # WebAssembly: the stack is the shadow stack in the memory of the module, which grows down from the top that it had when the program started (the entry point records it, in the global that is defined
-    # there: see `main_wrapper`). Its size is the one that the linker is asked for.
+    # there: see `wasm_stack_top_prologue`, which `main` of `StaticCompiler.add_main_wrapper!` starts with). Its size is the one that the linker is asked for.
     system === :wasm && return """
         @_static_wasm_stack_top = external global ptr
         define fastcc i64 @static_stack_base() {

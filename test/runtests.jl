@@ -1,5 +1,6 @@
-# The tests. `GROUP` (an environment variable) says which: `Core` (the compiler, the runtime and the language: `core/`), `Packages` (the standard libraries and the packages that
-# programs use: `packages/`), or `All` (the default, so that `] test` runs both), and `Fuzzing` (random programs and values, each in a process of its own with a time limit: `fuzz/`; not in `All`). `PACKAGES` (see `packages/runtests.jl`) selects some of the files of `Packages`.
+# The tests. `GROUP` (an environment variable) says which: `Core` (the compiler, the runtime and the language: `core/`), `Packages` (the standard libraries and the packages that programs use: `packages/`),
+# `Cross` (programs for another system or architecture than the host's, made and run here where the machine can: `cross/`), or `All` (the default, so that `] test` runs the three), and `Fuzzing` (random programs
+# and values, each in a process of its own with a time limit: `fuzz/`; not in `All`). `PACKAGES` (see `packages/runtests.jl`) selects some of the files of `Packages`.
 #
 # Most of the tests compile a program to an executable and compare what it prints with what Julia prints for the same code (`check_cases`, in `helpers.jl`).
 
@@ -13,14 +14,14 @@ using SHA, UUIDs, Sockets, Unicode, TOML, Markdown, Mmap
 using LLVM
 using LLVM: @dispose
 if Base.find_package("StaticRuntime") === nothing
-    include(joinpath(@__DIR__, "..", "src", "StaticRuntime.jl"))
+    include("../src/StaticRuntime.jl")
     using .StaticRuntime
 else
     using StaticRuntime
 end
 
 const GROUP = get(ENV, "GROUP", "All")
-GROUP in ("Core", "Packages", "Fuzzing", "All") || throw(ArgumentError("GROUP is `Core`, `Packages`, `Fuzzing` or `All`, not `$GROUP`"))
+GROUP in ("Core", "Packages", "Cross", "Fuzzing", "All") || throw(ArgumentError("GROUP is `Core`, `Packages`, `Cross`, `Fuzzing` or `All`, not `$GROUP`"))
 
 include("helpers.jl")
 
@@ -28,6 +29,7 @@ include("helpers.jl")
 @info "Host CPU" cpu = LLVM.host_cpu_name() features = LLVM.host_cpu_features() threads = Threads.nthreads() julia = VERSION
 
 GROUP in ("Core", "All") && @time "Core tests:" include("core/runtests.jl")
+GROUP in ("Cross", "All") && @time "Cross-compilation tests:" include("cross/runtests.jl") # (in CI the workflow `cross.yml` does this: see `cross/runtests.jl`)
 GROUP in ("Packages", "All") && @time "Package tests:" include("packages/runtests.jl")
 GROUP == "Fuzzing" && @time "Fuzzing tests:" include("fuzz/runtests.jl") # (not in `All`: see `fuzz/runtests.jl`)
 

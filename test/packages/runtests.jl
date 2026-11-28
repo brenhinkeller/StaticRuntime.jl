@@ -5,7 +5,7 @@
 println("\n")
 @info "Package tests, including stdlibs:"
 
-@isdefined(check_cases) || include(joinpath(@__DIR__, "..", "helpers.jl"))
+@isdefined(check_cases) || include("../helpers.jl")
 include_timed("common.jl")
 
 const STDLIBS = String["dates", "encoding", "future", "libdl", "linearalgebra", "logging", "mmap", "printf", "serialization", "sha", "sockets", "sparsearrays", "statistics", "styledstrings", "uuids"]
@@ -17,8 +17,8 @@ selected = isempty(selected) ? ALL : [lowercase(strip(s)) for s in split(selecte
 # Each file is included in a module of its own, so that what one of them defines, or takes from a package with `using`, is not a name that another sees (StyledStrings and UnicodePlots both export `annotate!`: in one
 # module, after both, it is neither). The helpers (`helpers.jl` and `common.jl`) are in a module of theirs, and each module of a test has them as constants.
 const PACKAGE_TEST_HELPERS = Module(:PackageTestHelpers)
-Base.include(PACKAGE_TEST_HELPERS, joinpath(@__DIR__, "..", "helpers.jl"))
-Base.include(PACKAGE_TEST_HELPERS, joinpath(@__DIR__, "common.jl"))
+Base.include(PACKAGE_TEST_HELPERS, "../helpers.jl")
+Base.include(PACKAGE_TEST_HELPERS, "common.jl")
 const PACKAGE_TEST_HELPER_NAMES = Symbol[n for n in names(PACKAGE_TEST_HELPERS; all = true)
                                         if !startswith(string(n), "#") && !(n in (:eval, :include, nameof(PACKAGE_TEST_HELPERS))) &&
                                            isdefined(PACKAGE_TEST_HELPERS, n) && Base.binding_module(PACKAGE_TEST_HELPERS, n) === PACKAGE_TEST_HELPERS]
@@ -34,7 +34,7 @@ function include_package_test(name::AbstractString)
     end
     isempty(get(ENV, "TEST_PROGRESS", "")) || (println(stderr, "TEST_PROGRESS ", name, ".jl"); flush(stderr))
     t0 = time()
-    Base.include(m, joinpath(@__DIR__, "$name.jl"))
+    Base.include(m, "$name.jl")
     push!(FILE_TIMES, "$name.jl" => time() - t0)
     return nothing
 end

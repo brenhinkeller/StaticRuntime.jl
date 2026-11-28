@@ -168,14 +168,14 @@ end
 # GPUCompiler's functions are specialized for the parameters of this package only: what StaticCompiler compiles on its own is unchanged
 @testset "Our compilations only" begin
     SC = StaticRuntime.StaticCompiler
-    splitting(params; kwargs...) = SC.GPUCompiler.inference_params(first(SC.static_job(identity, (Int,); params, kwargs...))).max_union_splitting
+    splitting(params; kwargs...) = SC.GPUCompiler.inference_params(SC.static_job(identity, (Int,); params, kwargs...)).max_union_splitting
     # (also with our method table: it is the parameters that tell)
     @test splitting(SC.StaticCompilerParams(); method_table = StaticRuntime.method_table) == Core.Compiler.InferenceParams().max_union_splitting
     @test splitting(SC.StaticCompilerParams()) == Core.Compiler.InferenceParams().max_union_splitting
     @test splitting(StaticRuntime.OverridesParams(); method_table = StaticRuntime.method_table) >= StaticRuntime.SPLIT_LIMIT[]
     # the interpreter of our compilations is of a type of its own (so that the methods that change inference are for it only); StaticCompiler's own
     # compilations have GPUCompiler's interpreter, whatever is loaded
-    interpreter(params; kwargs...) = SC.GPUCompiler.get_interpreter(first(SC.static_job(identity, (Int,); params, kwargs...)))
+    interpreter(params; kwargs...) = SC.GPUCompiler.get_interpreter(SC.static_job(identity, (Int,); params, kwargs...))
     @test interpreter(StaticRuntime.OverridesParams(); method_table = StaticRuntime.method_table) isa StaticRuntime.OverridesInterpreter
     @test !(interpreter(SC.StaticCompilerParams()) isa StaticRuntime.OverridesInterpreter)
     @test !(interpreter(SC.StaticCompilerParams(); method_table = StaticRuntime.method_table) isa StaticRuntime.OverridesInterpreter)

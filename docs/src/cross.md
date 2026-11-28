@@ -7,12 +7,12 @@ using StaticRuntime
 compile_executable(main, (Vector{String},), "build", "hello"; target = "x86_64-apple-macosx11.0.0")
 ```
 
-`target` is a triple, or [`cross_target`](@ref)`(triple; ...)`, which also says how the machine code is made. A triple that is the architecture and the system of the host is the host's, and nothing is different.
+`target` is a triple, or [`cross_target`](@ref)`(triple; ...)`, which also says how the machine code is made and how it is linked. It is a `StaticTarget` of StaticCompiler.jl: made for by retargeting (`target.machine` has the triple, the CPU and the features, and `target.llc` the `llc` if one is given), with the toolchain that links it (`target.toolchain`: the `lld` of Julia for Linux and WebAssembly, `clang` with the SDK for macOS). What is missing for the link (the SDK, the C library) is said when the program is linked, so `output = :llvmir` and `output = :object` need neither. A triple that is the architecture and the system of the host is the host's, and nothing is different.
 
 ## How it is made
 
 Everything up to the last step is the host's: Julia's inference and code generation, the objects that the program has as constants, and the runtime of this package, which is linked in as LLVM IR. The layout of Julia's objects is the host's, so the target has to be 64-bit and little-endian (x86-64, AArch64, and  `wasm64`); `wasm32` is not feasible.
-That IR is then made for the target (its `target triple` is changed, and its data layout is left to the code generator), the machine code is made, and the program is linked.
+That IR is then made for the target, by [StaticCompiler.jl](https://github.com/tshort/StaticCompiler.jl) (the target is a `StaticTarget(triple; retarget = ...)`, see its documentation): the IR gets the triple of the target and no data layout (the code generator has the target's) and loses the host's CPU and features, and IR that has the intrinsics of another architecture is refused. The `main` that calls the entry point, and the builtins that the link has not (`__udivti3` and the other functions that a C runtime library has: `i128` division on Linux, the conversions of `Float16` on x86-64 and WebAssembly), are added to it. This package then changes what is the system's: the names of its C library, the standard streams, `setjmp` and the top of the stack on WebAssembly (`finalize_cross_module!`, with LLVM and not text). The machine code is made, and the program is linked by a toolchain of StaticCompiler: `LLDToolchain` with the `lld` that Julia has for Linux and WebAssembly, and the system's `clang` with the SDK for macOS (`StaticCompiler.link`).
 
 The machine code is made as it is for the host: by the code generator alone, without optimizing the IR again, which Julia has done (making it with `clang -O2` changes what some programs do). It is made
 
@@ -34,21 +34,39 @@ ENV["STATIC_RUNTIME_CROSS_CLANG"] = joinpath(artifact_path(Base.SHA1(meta["git-t
 A program for Linux needs the C library of the target to link with. `sysroot` is a directory with the `lib` of a glibc (`crt1.o`, `libc.so`, `libm.so`, ...), and the program is linked with the `lld` that Julia has, so nothing but the C library has to be found. The `Glibc_jll` artifact for the platform is one, and can be fetched for any host:
 
 ```julia
-using Glibc_jll, Pkg.Artifacts, Base.BinaryPlatforms
-toml = joinpath(dirname(dirname(pathof(Glibc_jll))), "Artifacts.toml")
-platform = Platform("aarch64", "linux"; libc = "glibc")
-meta = artifact_meta("Glibc", toml; platform)
-ensure_artifact_installed("Glibc", meta, toml; platform)
-sysroot = artifact_path(Base.SHA1(meta["git-tree-sha1"]))
-
-compile_executable(main, (Vector{String},), "build", "hello"; target = cross_target("aarch64-unknown-linux-gnu"; sysroot))
+using StaticRuntime, Glibc_jll, Pkg # (the extension of StaticCompiler that fetches the glibc of the platform, for any host)
+compile_executable(main, (Vector{String},), "build", "hello"; target = cross_target("aarch64-unknown-linux-gnu"; sysroot = :glibc))
 ```
+
+`sysroot = :glibc` is the `Glibc_jll` artifact for the architecture of the triple (`StaticCompiler.glibc_sysroot(triple)` is the directory). Another glibc is given as the directory: `sysroot = "/path/to/root"`.
+
+### Which glibc, and where the program runs
+
+The glibc that a program is linked with is the **oldest that it runs on**, and it is the version of the `Glibc_jll` of the environment, which is 2.35 unless it is pinned: a program made with it needs glibc 2.34 or newer, and does not run on Ubuntu 20.04, Debian 11, RHEL 8 or Amazon Linux 2. To make programs that run on older systems, pin an older one, with `Pkg.add(name = "Glibc_jll", version = "2.17")` or in `[compat]`:
+
+| `Glibc_jll` | architectures | programs need |
+|:------------|:--------------|:--------------|
+| 2.17.1 | x86_64, i686, powerpc64le | glibc 2.17 (CentOS 7, Ubuntu 14.04, ...) |
+| 2.19.1 | also aarch64, armv7l, armv6l | glibc 2.17 |
+| 2.35.0 (the default) | all of them | glibc 2.34 (Ubuntu 22.04, Debian 12, ...) |
+
+`StaticCompiler.glibc_version(sysroot)` says which a directory has. What a newer glibc has cannot be linked with an older one: `Process` needs 2.29 (`posix_spawn_file_actions_addchdir_np`), so a program that uses it is made with 2.35 (the link fails with that function as an undefined symbol, and says so). The programs of `test/cross/programs.jl` but that one all link with 2.19.1 for aarch64, and then need only glibc 2.17; `julia test/cross/sysroot.jl aarch64 2.19` fetches that sysroot.
 
 The code of this package that differs between the systems (the flags of `open`, `struct stat`, `readdir`, the clock, the stack of the collector, the names of the standard streams and of `sigsetjmp`) is chosen by the target when the program is compiled, so a program that uses files, directories, processes, the collector and the clock is made for Linux as it is for macOS. The program links against glibc's own functions; a symbol that Linux does not have is refused when compiling (and `Mmap`, whose flags are chosen by the host's Julia, is not available for another system).
 
 `output = :object` and `output = :llvmir` give the object file and the IR for the target instead of the executable, which is what to use to link somewhere else.
 
-To check programs for a system that can't run here, `test/cross/build.jl <triple> <outdir> [sysroot]` makes a set of programs for it and records what the same programs do natively, and `test/cross/check.jl <outdir>` (which needs only Julia) runs them on the machine of the target and compares.
+**Testing.** The cross-compilation tests are a group of their own, `GROUP=Cross` (`test/cross/runtests.jl`; `] test` runs it too, as part of `All`), and CI does not run it (the Core tests do run `test/core/cross.jl`, which needs no tool): the workflow `.github/workflows/cross.yml` does, in the form of a matrix. `test/cross/matrix.jl` makes every program of `test/cross/programs.jl` for every target that each kind of host can make (a table of what each made, in the summary of each job), and `test/cross/run.jl` runs them on a machine of the target (Linux and macOS on x86-64 and AArch64, and WebAssembly with Node.js) and compares them with the native ones. On a machine of your own the group makes programs for every target that the machine can make and run, and compares what they do with what the same programs do made for the host (`test/cross/here.jl`; the tests that make nothing to run, the targets and the IR, are in `test/core/cross.jl`, and run in CI with the Core tests): what is missing is fetched (the glibc, Node.js 24 for WebAssembly, and on an Apple Silicon Mac the `llc` for x86-64 that Rosetta runs: 2 GB, outside CI; `STATIC_RUNTIME_CROSS_FETCH=0` stops this, and `all` fetches it for any group), and a target that cannot be tried is skipped with the reason in the log. By hand, `test/cross/matrix.jl` does the same as in CI for one machine, `test/cross/build.jl <triple> <outdir> [sysroot]` makes the programs for one target (with the sysroot that you give), `test/cross/sysroot.jl <arch> [glibc version]` fetches a glibc, an older one for programs that have to run on older systems, and `test/cross/check.jl <outdir>` (which needs only Julia) runs programs on the machine of the target.
+
+## macOS
+
+On a Mac a program for macOS is linked by Apple's `clang` and linker, with the SDK of Xcode (`sysroot` gives another). On any other host it is linked by `lld` (`StaticCompiler.LLDToolchain(:darwin)`), which needs an SDK of macOS: the directory is `sysroot = "/path/MacOSX11.3.sdk"`, or the environment variable `SDKROOT`. An SDK is Apple's, and has to be provided (BinaryBuilder uses the ones of [phracker/MacOSX-SDKs](https://github.com/phracker/MacOSX-SDKs)). **What has been checked:** on a Mac, `lld` with the SDK of Xcode and with the downloaded 11.3 one: a program that `lld` links is signed (ad hoc) as the arm64 system asks, and behaves as the one that Apple's linker makes (a program of this package that prints, uses math and catches an exception was run both ways, with the same output and a size that differs by less than 1%). And **from Linux**, x86-64 and AArch64 hosts with the downloaded SDK (the workflow of `test/cross/matrix.jl`, in StaticCompiler.jl): the programs that were made there ran on macOS, on Apple Silicon (an x86-64 one with Rosetta) and on Intel. Those were programs of StaticCompiler.jl; programs of this package for macOS from Linux have not been tried. And **from Windows** (x86-64, the same workflow, which extracts the SDK with real symbolic links: `MSYS=winsymlinks:nativestrict`): the program for x86-64 macOS is made and linked there, the same as on Linux, and it ran on macOS, on Intel and on Apple Silicon (with Rosetta). Those too were programs of StaticCompiler.jl: programs of this package for macOS from Windows have not been tried.
+
+The code generator for the architecture has to be there too: Julia's LLVM has the host's. A program for x86-64 macOS from an Apple Silicon Mac needs the `llc` above, and a program for AArch64 macOS from an x86-64 host needs an `llc` that has AArch64 (see `STATIC_RUNTIME_CROSS_LLC`).
+
+## Windows
+
+StaticCompiler.jl links a program for Windows (`StaticCompiler.LLDToolchain(:mingw)`, with the MinGW-w64 libraries that `StaticCompiler.mingw_sysroot` fetches with `using Mingw_jll, Pkg`), but the runtime of this package has no Windows support yet: the programs of this package are not made for it.
 
 ## WebAssembly
 
@@ -79,16 +97,16 @@ const result = await run('name.wasm', {
 result.exitCode; result.readFile('/out.csv');       // what the program wrote (bytes); result.list('/') lists a directory
 ```
 
-The program runs to its end where `run` is called, so in a page it belongs in a Web Worker (`new Worker(url, { type: 'module' })`). `/tmp` is there for `tempname` and `mktempdir`; `env` and `cwd` are options. The browser needs `memory64` (Firefox 134 or later, Chrome 133 or later; not Safari yet), WebAssembly exceptions with `exnref` and SIMD. All 18 programs of `test/cross/build.jl` do what the native ones do in headless Firefox 162: `BROWSER=/Applications/Firefox.app/Contents/MacOS/firefox node test/cross/check_browser.mjs <outdir>` (without `BROWSER`, the same host runs in Node.js, which checks its logic). The layers of the host are `src/runtime/wasm_host_core.js` (the C library and the system, for all platforms), `wasm_host_node.mjs` (Node's `fs`, the clock and the streams) and `wasm_host_browser.mjs` (the in-memory file system, `run`); `cross_link` joins the core to each shell.
+The program runs to its end where `run` is called, so in a page it belongs in a Web Worker (`new Worker(url, { type: 'module' })`). `/tmp` is there for `tempname` and `mktempdir`; `env` and `cwd` are options. The browser needs `memory64` (Firefox 134 or later, Chrome 133 or later; not Safari yet), WebAssembly exceptions with `exnref` and SIMD. The 18 programs that `test/cross/programs.jl` had when this was last checked do what the native ones do in headless Firefox 162: `BROWSER=/Applications/Firefox.app/Contents/MacOS/firefox node test/cross/check_browser.mjs <outdir>` (without `BROWSER`, the same host runs in Node.js, which checks its logic). The layers of the host are `src/runtime/wasm_host_core.js` (the C library and the system, for all platforms), `wasm_host_node.mjs` (Node's `fs`, the clock and the streams) and `wasm_host_browser.mjs` (the in-memory file system, `run`); `cross_link` joins the core to each shell.
 
 ## What works
 
 | host | target | state |
 |:-----|:-------|:------|
-| macOS, AArch64 | `x86_64-apple-macosx...` | works, with the `llc` above; the programs run with Rosetta. 13 programs (files, directories, processes, the collector among them) are checked in `test/cross/build.jl` and `test/core/cross.jl` |
-| macOS, AArch64 | `aarch64-unknown-linux-gnu` | built and linked (13 programs) with Julia's LLVM and a glibc sysroot; run on a Linux machine of the architecture in CI (`test/cross/check.jl`) |
-| macOS, AArch64 | `x86_64-unknown-linux-gnu` | the same, with the `llc` above; not run in CI yet |
-| any | `wasm64-unknown-unknown` | works, with Node.js 24 or later; 19 of the 21 programs of `test/cross/build.jl` do what the native ones do, exceptions, files and the collector included (the others use processes, or vectors of `Float16`) |
+| macOS, AArch64 | `x86_64-apple-macosx...` | works, with the `llc` above; the programs run with Rosetta (all 21 programs of `test/cross/programs.jl`, files, directories, processes and the collector among them, in a local run of the tests) |
+| macOS, AArch64 | `aarch64-apple-macosx...`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu` | made and linked (21 programs) by `lld` with a glibc sysroot (Linux: with the `llc` above for x86-64), and by Apple's linker for macOS; the Linux ones are run in CI on a Linux machine of the architecture (`cross.yml`) |
+| Linux, x86-64 and AArch64 | Linux and macOS of the architecture | made in CI (macOS with a downloaded SDK), and run on a machine of the target: Linux on both architectures, macOS on Intel and on Apple Silicon |
+| any | `wasm64-unknown-unknown` | works, with Node.js 24 or later; 19 of the 21 programs of `test/cross/programs.jl` do what the native ones do, exceptions, files and the collector included (the others use processes, or vectors of `Float16`) |
 | others | | not tried |
 
 Code that Base chooses by the host's system when Base is compiled is the host's: what a program that uses it does on another system is not checked (the standard library functions that this package replaces are, see above). Libraries that are loaded when the program runs (BigInt, BLAS) are the host's, and are not for another system. The conversions between `Float16` and `Float32` on x86-64 use the instructions of F16C (a CPU of 2012 or later); on WebAssembly they are made by integer arithmetic.

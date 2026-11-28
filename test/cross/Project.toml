@@ -1,0 +1,12 @@
+# The environment of `test/cross/matrix.jl` (and `build.jl`): StaticRuntime, and what it needs to make programs for the targets: the C library of Linux (`Glibc_jll`, fetched for any host).
+# StaticCompiler is a dependency of its own here because `[sources]` is read only for the project that is active.
+[deps]
+Glibc_jll = "452aa2e7-e185-58db-8ff9-d3c1fa4bc997"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+StaticCompiler = "81625895-6c0f-48fc-b932-11a18313743c"
+StaticRuntime = "d747b762-a330-4f6e-bc20-fedef305c130"
+
+[sources]
+StaticCompiler = {rev = "cross-target", url = "https://github.com/tshort/StaticCompiler.jl.git"}
+StaticRuntime = {path = "../.."}
